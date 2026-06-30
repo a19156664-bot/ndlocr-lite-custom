@@ -91,12 +91,32 @@ def get_detector(args):
     classes_path = args.det_classes
     assert os.path.isfile(weights_path), f"There's no weight file with name {weights_path}"
     assert os.path.isfile(classes_path), f"There's no classes file with name {weights_path}"
-    detector = DEIM(model_path=weights_path,
-                      class_mapping_path=classes_path,
-                      score_threshold=args.det_score_threshold,
-                      conf_threshold=args.det_conf_threshold,
-                      iou_threshold=args.det_iou_threshold,
-                      device=args.device)
+
+    detector = DEIM(
+        model_path=weights_path,
+        class_mapping_path=classes_path,
+        score_threshold=args.det_score_threshold,
+        conf_threshold=args.det_conf_threshold,
+        iou_threshold=args.det_iou_threshold,
+        device=args.device,
+    )
+
+    if getattr(args, "layout_slice", False):
+        from sahi_deim import SlicedDEIM
+
+        detector = SlicedDEIM(
+            detector=detector,
+            slice_height=args.layout_slice_height,
+            slice_width=args.layout_slice_width,
+            overlap_height_ratio=0.1,
+            overlap_width_ratio=0.1,
+            postprocess_type="NMS",
+            postprocess_match_metric="IOU",
+            postprocess_match_threshold=args.layout_slice_postprocess_match_threshold,
+            perform_standard_pred=args.layout_slice_standard_pred,
+            progress_bar=args.layout_slice_progress,
+        )
+
     return detector
 
 def get_recognizer(args,weights_path=None):
@@ -685,6 +705,44 @@ def main():
     parser.add_argument("--device", type=str, required=False, help="Device use (cpu or cuda)", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--enable-tcy", action="store_true", dest="enable_tcy", default=False, help="Enable tate-chuu-yoko (縦中横) detection for vertical text (e.g. newspaper OCR)")
     parser.add_argument("--json-only", action="store_true", help="Disable .xml and .txt output and only output JSON")
+
+    parser.add_argument(
+        "--layout-slice",
+        action="store_true",
+        help="Enable SAHI sliced inference for layout detection",
+    )
+    parser.add_argument(
+        "--layout-slice-height",
+        type=int,
+        default=2400,
+        help="SAHI slice height for layout detection",
+    )
+
+    parser.add_argument(
+        "--layout-slice-width",
+        type=int,
+        default=2400,
+        help="SAHI slice width for layout detection",
+    )
+
+    parser.add_argument(
+        "--layout-slice-postprocess-match-threshold",
+        type=float,
+        default=0.5,
+        help="SAHI postprocess match threshold",
+    )
+
+    parser.add_argument(
+        "--layout-slice-standard-pred",
+        action="store_true",
+        help="Also run standard full-image layout prediction in addition to sliced prediction",
+    )
+
+    parser.add_argument(
+        "--layout-slice-progress",
+        action="store_true",
+        help="Show SAHI slice progress bar",
+    )
     args, remaining = parser.parse_known_args()
     if args.enable_tcy and remaining:
         from tcy_wrapper import add_tcy_arguments

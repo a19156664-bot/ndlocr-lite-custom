@@ -18,7 +18,7 @@ ndlocr-lite = "ocr:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["ocr", "deim", "parseq", "ndl_parser", "tablerecog", "tcy_wrapper"]
+py-modules = ["ocr", "deim", "parseq", "ndl_parser", "tablerecog", "tcy_wrapper","sahi_deim"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
