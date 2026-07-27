@@ -1,0 +1,314 @@
+Task 27: [FIX] Three defects found in real use: shrinking image, OCR pile-up, dead PDF button
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+All three defects were REPRODUCED AND DIAGNOSED by the commander with real
+measurements. Do not re-investigate. Fix them.
+
+================================================================================
+DEFECT 1 - THE IMAGE SHRINKS TO NOTHING AS YOU TURN PAGES  (most severe)
+================================================================================
+1.1 WHAT THE USER SAW
+
+Opening a 164 image folder and paging forward, the user reported "the image is
+not displayed", and "going back to page 1 no longer displays page 1 either".
+Their status bar read:
+
+    [5/164] File: viz_..._00005.png | Size: 2218x3071 | Scale: 0.045 | Mode: PAN
+
+The image was in fact being drawn - at 100 x 138 pixels.
+
+1.2 MEASURED REPRODUCTION (window 1600x900, image 2218x3071)
+
+    after                    win_w   win_h   zoom_scale     rendered px
+    -------------------------------------------------------------------
+    startup                   1280     800       0.2605         578x800
+    Next x1  [2/8]             960     700       0.2279         506x700
+    Next x2  [3/8]             640     600       0.1954         433x600
+    Next x3  [4/8]             320     500       0.1443         320x443
+    Next x4  [5/8]             100     400       0.0451         100x138   <-- 0.045
+    Next x7  [8/8]             100     100       0.0326          72x100
+    back to page 1             100     100       0.0326          72x100
+
+0.0451 matches the user's reported 0.045 exactly.
+
+1.3 ROOT CAUSE
+
+`SelectableImageViewer.update_layout` subtracts the side panel and status bar:
+
+        def update_layout(self, win_w, win_h):
+            available_w = max(100, win_w - 320)
+            available_h = max(100, win_h - 100)
+            super().update_layout(available_w, available_h)
+
+and the BASE class stores what it is given:
+
+        def update_layout(self, win_w, win_h):      # custom_gui/viewer.py
+            self.win_w = win_w                       # <- now holds the REDUCED value
+            self.win_h = win_h
+            self.zoom_scale = calculate_fit_scale(self.img_w, self.img_h,
+                                                  self.win_w, self.win_h)
+
+`_switch_image` then feeds that already-reduced value straight back in:
+
+        self.update_layout(self.win_w, self.win_h)   # custom_gui/app.py
+
+so every page change subtracts another 320 and 100, until `max(100, ...)` pins it.
+Nothing resets it, which is why going back does not recover.
+
+1.4 DEFINITION OF DONE
+
+[1A] Keep the TRUE window size in its own attribute, for example
+     `self.frame_w` / `self.frame_h`, set from the values PASSED IN to
+     `update_layout`. `self.win_w` / `self.win_h` keep their current meaning -
+     the CONTENT area after subtracting the panel and status bar - because
+     `calculate_fit_scale` and the layer sizing depend on that.
+     Do NOT rename `self.win_w` / `self.win_h`, and do NOT change
+     custom_gui/viewer.py.
+     Check your new names do not collide with anything flet defines. NEVER use
+     `self.image` or `self.scale`; both are reserved and previously caused a
+     fatal startup crash here.
+
+[1B] `_switch_image` must re-layout from the TRUE size, not the reduced one.
+
+[1C] Initialise the true size in `__init__` from the win_w / win_h arguments, so
+     a switch that happens before any explicit `update_layout` call still works.
+
+[1D] Turning pages must not change the zoom.
+     Starting at 1600x900 with a 2218x3071 image, `zoom_scale` must be 0.2605
+     at startup and STILL 0.2605 after ten page changes. Assert this exact value
+     in a test.
+
+[1E] Window resize must keep working: `page.on_resized` passes the real window
+     size, and the layout must follow it, growing as well as shrinking.
+
+================================================================================
+DEFECT 2 - OCR JOBS PILE UP AND FIGHT EACH OTHER
+================================================================================
+2.1 WHAT HAPPENS
+
+`_switch_image` starts OCR for every page whose state is IDLE. Nothing stops the
+previous page's OCR. Paging through 8 pages starts 8 OCR jobs, all still running.
+
+`page.run_thread` ends in `run_in_executor(None, ...)`, i.e. asyncio's default
+ThreadPoolExecutor, sized `min(32, cpu_count + 4)`. The user's machine has 4
+logical cores, so up to 8 OCR subprocesses compete for 4 cores. Each spawns
+`src/ocr.py` and loads the ONNX models from scratch.
+
+Commander's measurement on the bundled 2048x1446 sample:
+
+    --sourcedir with 2 images (models loaded once)  : 52 s
+    --sourceimg twice        (models loaded twice)  : 87 s
+    => model loading is about 35 s; the OCR itself is about 8.5 s
+
+So each surplus job wastes roughly 35 seconds of CPU that the page the user is
+actually looking at needs.
+
+2.2 THE REQUIRED BEHAVIOUR - DECIDED BY THE COMMANDER
+
+At most ONE OCR job runs at a time, and the newest request wins.
+
+    - Turning to a page whose OCR has not run REQUESTS OCR for that page.
+    - If nothing is running, it starts immediately.
+    - If something is running, the request is remembered as PENDING. A second
+      request REPLACES the pending one - it does not queue up. Pages the user
+      merely passed through are never OCR'd.
+    - When the running job finishes, OCR starts for the page the user is looking
+      at NOW, if that page still needs it. If the user is back on a page that is
+      already DONE, nothing new starts.
+    - A page that was skipped stays IDLE and will be OCR'd if the user returns
+      to it and stays.
+
+    Do NOT kill or interrupt a running subprocess. Let it finish and store its
+    result; that result is still useful if the user returns to that page.
+
+2.3 DEFINITION OF DONE
+
+[2A] Put the decision logic in a PURE, GUI-FREE, flet-free helper so it can be
+     tested directly, for example a small `OcrScheduler` class in a new module
+     `custom_gui/ocr_scheduler.py`. It must not import flet and must not know
+     about OcrState or the viewer.
+
+[2B] Wire it into `start_ocr` and `_on_ocr_complete`. `page.run_thread` is still
+     used for the actual work, and `_on_ocr_complete` must keep writing results
+     to the state of the page the job was FOR (`target_path`), never to whatever
+     page is displayed now. That behaviour already exists - preserve it.
+
+[2C] The status bar must tell the user which of the three situations they are in:
+     OCR running for THIS page, OCR waiting because another page is being
+     processed, and OCR not started for this page. Use clear short wording and
+     keep every existing status field.
+
+[2D] Tests for the scheduler - concrete assertions, no GUI:
+     (a) A request when idle returns "start this one".
+     (b) A request while one is running returns "do not start", and the pending
+         page is recorded.
+     (c) Three requests while one is running leave only the LAST as pending -
+         assert the exact pending value.
+     (d) On completion, the next page to start is the one the caller says is
+         currently displayed, when it still needs OCR.
+     (e) On completion, when the currently displayed page no longer needs OCR,
+         nothing starts and the scheduler is idle.
+     (f) Completion of a job clears "running" even if no new job starts.
+     (g) Requesting the SAME page that is already running does not start a
+         second job.
+
+[2E] An app-level test asserting that navigating quickly across five pages
+     results in exactly ONE call to the OCR function, not five. Monkeypatch
+     `custom_gui.app.run_ocr_and_parse` with a counter; never run real OCR.
+
+================================================================================
+DEFECT 3 - THE "OPEN PDF" BUTTON DOES NOTHING
+================================================================================
+3.1 ROOT CAUSE - REPRODUCED BY THE COMMANDER
+
+`ft.FilePickerResultEvent` carries the two kinds of result in different fields:
+
+        get_directory_path  ->  e.path is set,   e.files is None
+        pick_files          ->  e.path is None,  e.files is a list
+
+`_on_file_picker_result` starts with
+
+        if not e.path:
+            return
+
+so the branch for `self._file_picker_mode == "pdf"`, which reads `e.files`, is
+unreachable. Pressing the button does nothing at all. Verified headlessly:
+
+        after 'Open PDF' : sequence.count 5 -> 5
+        image changed    : False
+        >>> NOTHING HAPPENED - the Open PDF button is DEAD <<<
+
+3.2 DEFINITION OF DONE
+
+[3A] The early return must accept EITHER kind of result and reject only a genuine
+     cancellation, where both `e.path` and `e.files` are empty.
+
+[3B] Selecting one PDF loads all of its pages. Selecting several loads all their
+     pages, ordered by file name then page number.
+
+[3C] The "save" and "folder" modes must keep behaving exactly as they do now.
+     The current-image and all-images CSV/TXT export, and folder loading with
+     mixed images and PDFs, are all verified working - do not regress them.
+
+[3D] A test that drives `_on_file_picker_result` with a files-style event
+     (`path=None`, `files=[...]`) and asserts the sequence actually changed.
+     This test MUST FAIL against the current code. State in your report that you
+     confirmed it fails before your fix and passes after.
+
+================================================================================
+CURRENT CODE CONTRACT (on master - use it)
+================================================================================
+custom_gui/viewer.py - DO NOT MODIFY. Pure functions and the base ImageViewer:
+    original_to_display / display_to_original / calculate_fit_scale /
+    apply_pan / calculate_label_position / class InteractionMode
+    ImageViewer.update_layout(win_w, win_h) stores win_w/win_h and recomputes
+    zoom_scale, then calls _update_viewer()
+
+custom_gui/app.py, class SelectableImageViewer(ImageViewer):
+    self.image_src / img_w / img_h / win_w / win_h / zoom_scale / offset_x / offset_y
+    self.sequence                ImageSequence
+    self.image_states            dict keyed by path: selections / ocr_state /
+                                 ocr_results / ocr_error / edits
+    self.pdf_page_map            png_path -> (pdf_path, page_index)
+    self.pdf_cache_dir           temp dir for rendered PDF pages
+    self.file_picker / self._file_picker_mode  ("save" | "folder" | "pdf")
+    self.status_text / status_row / progress_ring / latest_region_info
+    start_ocr(page) / _on_ocr_complete(results, error, target_path=None)
+    _switch_image(path) / update_layout(win_w, win_h) / _update_status()
+    _update_selections_ui() / _get_status_message()
+    class OcrState(Enum): IDLE / RUNNING / DONE / ERROR
+
+custom_gui/pdf_loader.py:
+    RENDER_DPI = 300 / list_pdfs_in_folder / plan_pdf_pages /
+    ensure_page_rendered / build_source_list(folder, cache_dir) -> (paths, registry)
+
+================================================================================
+REGRESSION SAFETY
+================================================================================
+    - `python -m pytest tests/ -v` must pass completely (95+ tests).
+    - Do NOT modify custom_gui/viewer.py, custom_gui/image_sequence.py,
+      custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+      custom_gui/selection.py, custom_gui/text_assembler.py,
+      custom_gui/exporter.py, custom_gui/rtl.py, custom_gui/pdf_loader.py.
+    - Do NOT modify ANY existing file under tests/. In particular
+      tests/test_flet_constants.py is a guard test: if it objects to your code,
+      CHANGE YOUR CODE. NEVER add an exemption to it. A local variable named
+      `page` WILL collide with it.
+    - Everything a human has verified must keep working: rectangle selection,
+      the Select/Pan toggle, panning, yellow highlights, the "Region N" label
+      OUTSIDE the rectangle, the progress ring, CSV/TXT export for the current
+      image and for all images, folder loading, Prev/Next/Ctrl+N, F2 / EDIT
+      correction with revert, the right-to-left button, and PDF pages loaded
+      through a folder.
+    - Guard every `.update()` call on a control with `if self.page:`.
+    - Do not run real OCR in your tests.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Three previous tasks left probe files at
+      the repository root and the commander had to delete them.
+
+================================================================================
+ALLOWED SCOPE (WHITELIST)
+================================================================================
+    custom_gui/app.py
+    custom_gui/ocr_scheduler.py      (new file)
+    tests/test_ocr_scheduler.py      (new file)
+    tests/test_layout_stability.py   (new file - Defect 1)
+    tests/test_picker_modes.py       (new file - Defect 3)
+
+================================================================================
+PROHIBITED SCOPE (BLACKLIST)
+================================================================================
+    custom_gui/viewer.py, custom_gui/image_sequence.py, custom_gui/ocr_bridge.py,
+    custom_gui/region_filter.py, custom_gui/selection.py,
+    custom_gui/text_assembler.py, custom_gui/exporter.py, custom_gui/rtl.py,
+    custom_gui/pdf_loader.py                                  (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+================================================================================
+OUT OF SCOPE
+================================================================================
+    - Persisting OCR results, rectangles or edits to disk. A separate decision.
+    - Batch OCR of a whole folder, or using --sourcedir. A separate task.
+    - Killing or interrupting a running OCR subprocess.
+    - Keeping a long-lived OCR worker process alive between pages.
+    - Pre-fetching the next page's OCR.
+    - Changing the OCR engine, region filter or text assembler.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: DEFECT 1 first (the application is
+      unusable without it), then DEFECT 3 (one line plus a test), then DEFECT 2.
+
+================================================================================
+WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping every condition [1A]-[1E], [2A]-[2E], [3A]-[3D] to how you
+       satisfied it.
+    2. The names you chose for the true-window-size attributes, and proof they do
+       not collide with flet.
+    3. The measured zoom_scale after 1, 5 and 10 page changes at 1600x900 with a
+       2218x3071 image. It must be 0.2605 every time.
+    4. The full public API of custom_gui/ocr_scheduler.py.
+    5. The exact status bar wording for each of the three OCR situations.
+    6. Proof for [3D]: the test failing before your fix and passing after. Both
+       outputs, in full.
+    7. The list of changed files and the reason for each change.
+    8. The output of `git status` showing no stray files.
+    9. The full output of `python -m pytest tests/ -v`.
+   10. Anything that cannot be verified without a GUI, stated explicitly.
+   11. Open questions or compromises. Write "none" if there are none.
