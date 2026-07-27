@@ -1,5 +1,5 @@
 import flet as ft
-from custom_gui.viewer import ImageViewer, original_to_display
+from custom_gui.viewer import ImageViewer, original_to_display, apply_pan, InteractionMode
 from custom_gui.selection import SelectionContainer, calculate_normalized_bbox
 from custom_gui.ocr_bridge import run_ocr_and_parse
 from custom_gui.region_filter import filter_lines_by_region
@@ -16,10 +16,22 @@ class SelectableImageViewer(ImageViewer):
         self.active_rect = None
         self.drag_current_point = None
         
+        self.mode_state = InteractionMode()
+        
         # Run OCR once and store results
         self.ocr_results = []
         if os.path.exists(image_src):
             self.ocr_results = run_ocr_and_parse(image_src)
+            
+        self.mode_toggle = ft.SegmentedButton(
+            segments=[
+                ft.Segment(value="SELECT", icon=ft.Icon(ft.Icons.HIGHLIGHT_ALT), label=ft.Text("Select")),
+                ft.Segment(value="PAN", icon=ft.Icon(ft.Icons.PAN_TOOL), label=ft.Text("Pan"))
+            ],
+            selected={self.mode_state.current},
+            on_change=self._on_mode_change
+        )
+        self.controls_row.controls.append(self.mode_toggle)
         
         # We overlay rectangles on top of the image container using a Stack
         self.highlight_layer = ft.Stack(
@@ -110,9 +122,20 @@ class SelectableImageViewer(ImageViewer):
 
 
 
+    def _on_mode_change(self, e):
+        if e.control.selected:
+            self.mode_state.set_mode(list(e.control.selected)[0])
+        else:
+            # Prevent deselecting everything - fallback to current mode
+            e.control.selected = {self.mode_state.current}
+        if hasattr(self, 'status_text'):
+            self.status_text.value = self._get_status_message()
+        if self.page:
+            self.update()
+
     def _get_status_message(self):
         filename = os.path.basename(self.image_src)
-        return (f"File: {filename} | Size: {self.img_w}x{self.img_h} | Scale: {self.zoom_scale:.3f} | "
+        return (f"File: {filename} | Size: {self.img_w}x{self.img_h} | Scale: {self.zoom_scale:.3f} | Mode: {self.mode_state.current} | "
                 f"Lines: {len(self.ocr_results)} | Last: {self.latest_region_info}")
 
     def update_layout(self, win_w: float, win_h: float):
@@ -135,65 +158,85 @@ class SelectableImageViewer(ImageViewer):
         # Local coordinates within the stack
         self.drag_start_point = (e.local_x, e.local_y)
         self.drag_current_point = None
-        self.active_rect = ft.Container(
-            border=ft.border.all(2, ft.Colors.RED),
-            bgcolor=ft.Colors.with_opacity(0.2, ft.Colors.RED),
-            left=e.local_x,
-            top=e.local_y,
-            width=0,
-            height=0
-        )
-        self.rects_layer.controls.append(self.active_rect)
-        if self.page:
-            self.rects_layer.update()
+        
+        if self.mode_state.current == "SELECT":
+            self.active_rect = ft.Container(
+                border=ft.border.all(2, ft.Colors.RED),
+                bgcolor=ft.Colors.with_opacity(0.2, ft.Colors.RED),
+                left=e.local_x,
+                top=e.local_y,
+                width=0,
+                height=0
+            )
+            self.rects_layer.controls.append(self.active_rect)
+            if self.page:
+                self.rects_layer.update()
 
     def _on_pan_update(self, e: ft.DragUpdateEvent):
-        if not self.drag_start_point or not self.active_rect:
+        if not self.drag_start_point:
             return
             
         start_x, start_y = self.drag_start_point
         end_x = e.local_x
         end_y = e.local_y
         
-        x = min(start_x, end_x)
-        y = min(start_y, end_y)
-        w = abs(start_x - end_x)
-        h = abs(start_y - end_y)
-        
-        self.active_rect.left = x
-        self.active_rect.top = y
-        self.active_rect.width = w
-        self.active_rect.height = h
-        
-        self.drag_current_point = (e.local_x, e.local_y)
-        
-        if self.page:
-            self.active_rect.update()
+        if self.mode_state.current == "SELECT":
+            if not self.active_rect:
+                return
+            x = min(start_x, end_x)
+            y = min(start_y, end_y)
+            w = abs(start_x - end_x)
+            h = abs(start_y - end_y)
+            
+            self.active_rect.left = x
+            self.active_rect.top = y
+            self.active_rect.width = w
+            self.active_rect.height = h
+            
+            self.drag_current_point = (e.local_x, e.local_y)
+            
+            if self.page:
+                self.active_rect.update()
+                
+        elif self.mode_state.current == "PAN":
+            last_x, last_y = self.drag_current_point if self.drag_current_point else self.drag_start_point
+            dx = end_x - last_x
+            dy = end_y - last_y
+            
+            self.offset_x, self.offset_y = apply_pan(self.offset_x, self.offset_y, dx, dy)
+            self.image_control.left = self.offset_x
+            self.image_control.top = self.offset_y
+            self.drag_current_point = (end_x, end_y)
+            
+            self._update_viewer()
+            self._update_selections_ui()
 
     def _on_pan_end(self, e: ft.DragEndEvent):
-        if not self.drag_start_point or not self.active_rect:
+        if not self.drag_start_point:
             return
             
         start_x, start_y = self.drag_start_point
         end_x, end_y = self.drag_current_point if self.drag_current_point else (start_x, start_y)
         
-        if self.active_rect in self.rects_layer.controls:
-            self.rects_layer.controls.remove(self.active_rect)
-        self.active_rect = None
+        if self.mode_state.current == "SELECT":
+            if self.active_rect in self.rects_layer.controls:
+                self.rects_layer.controls.remove(self.active_rect)
+            self.active_rect = None
+            
+            bbox = calculate_normalized_bbox(
+                start_x, start_y, end_x, end_y,
+                self.zoom_scale, self.offset_x, self.offset_y,
+                self.img_w, self.img_h
+            )
+            
+            # Don't add if area is 0
+            if bbox[2] > bbox[0] and bbox[3] > bbox[1]:
+                self.selection_container.add(bbox)
+            
+            self._update_selections_ui()
+            
         self.drag_start_point = None
         self.drag_current_point = None
-        
-        bbox = calculate_normalized_bbox(
-            start_x, start_y, end_x, end_y,
-            self.zoom_scale, self.offset_x, self.offset_y,
-            self.img_w, self.img_h
-        )
-        
-        # Don't add if area is 0
-        if bbox[2] > bbox[0] and bbox[3] > bbox[1]:
-            self.selection_container.add(bbox)
-        
-        self._update_selections_ui()
 
     def _update_selections_ui(self):
         # Update drawn rectangles
