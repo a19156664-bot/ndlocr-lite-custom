@@ -43,25 +43,11 @@ class SelectableImageViewer(ImageViewer):
             drag_interval=10,
         )
         
-        # Replace image container content with a Stack
-        self.stack = ft.Stack(
-            controls=[
-                self.image,
-                self.highlight_layer,
-                self.rects_layer,
-                self.gesture_detector
-            ],
-            width=self.win_w,
-            height=self.win_h,
-        )
-        
-        self.image_container.content = self.stack
-        
         # List view for showing selections
         self.selections_list = ft.ListView(
             spacing=10,
             padding=10,
-            height=self.win_h,
+            expand=True,
             width=300
         )
         
@@ -69,13 +55,81 @@ class SelectableImageViewer(ImageViewer):
         self.content = ft.Row([
             ft.Column([
                 self.controls_row,
-                self.image_container
-            ]),
+                self.scrollable_image
+            ], expand=True),
             ft.Column([
                 ft.Text("Selections:", weight=ft.FontWeight.BOLD),
                 self.selections_list
-            ])
-        ])
+            ], expand=False)
+        ], expand=True)
+        
+        self.latest_region_info = "None"
+        self.ocr_error = None
+        if not os.path.exists(self.image_src):
+            self.ocr_error = f"Error: Image not found at {self.image_src}"
+        elif not self.ocr_results:
+             # Could be that OCR failed but image exists. Let's not falsely show it here if run_ocr_and_parse is quiet.
+             pass
+
+        self.status_text = ft.Text(self._get_status_message(), size=12, color=ft.Colors.BLACK54)
+        
+        if self.ocr_error:
+            self.image_container.content = ft.Text(self.ocr_error, color=ft.Colors.RED, weight=ft.FontWeight.BOLD)
+        else:
+            self.stack = ft.Stack(
+                controls=[
+                    self.image_control,
+                    self.highlight_layer,
+                    self.rects_layer,
+                    self.gesture_detector
+                ],
+                width=self.img_w * self.zoom_scale,
+                height=self.img_h * self.zoom_scale,
+            )
+            self.image_container.content = self.stack
+        
+        # Override overall layout again with status
+        self.content = ft.Column([
+            ft.Row([
+                ft.Column([
+                    self.controls_row,
+                    self.scrollable_image
+                ], expand=True),
+                ft.Column([
+                    ft.Text("Selections:", weight=ft.FontWeight.BOLD),
+                    self.selections_list
+                ], expand=False)
+            ], expand=True),
+            ft.Container(
+                content=self.status_text,
+                bgcolor=ft.Colors.GREY_200,
+                padding=5,
+                alignment=ft.alignment.center_left,
+            )
+        ], expand=True)
+
+
+
+    def _get_status_message(self):
+        filename = os.path.basename(self.image_src)
+        return (f"File: {filename} | Size: {self.img_w}x{self.img_h} | Scale: {self.zoom_scale:.3f} | "
+                f"Lines: {len(self.ocr_results)} | Last: {self.latest_region_info}")
+
+    def update_layout(self, win_w: float, win_h: float):
+        available_w = max(100, win_w - 320)
+        available_h = max(100, win_h - 100)
+        super().update_layout(available_w, available_h)
+        if not getattr(self, 'ocr_error', None):
+            self.highlight_layer.width = self.img_w * self.zoom_scale
+            self.highlight_layer.height = self.img_h * self.zoom_scale
+            self.rects_layer.width = self.img_w * self.zoom_scale
+            self.rects_layer.height = self.img_h * self.zoom_scale
+            self.gesture_detector.width = self.img_w * self.zoom_scale
+            self.gesture_detector.height = self.img_h * self.zoom_scale
+            self.stack.width = self.img_w * self.zoom_scale
+            self.stack.height = self.img_h * self.zoom_scale
+        if hasattr(self, 'status_text'):
+            self.status_text.value = self._get_status_message()
 
     def _on_pan_start(self, e: ft.DragStartEvent):
         # Local coordinates within the stack
@@ -90,7 +144,8 @@ class SelectableImageViewer(ImageViewer):
             height=0
         )
         self.rects_layer.controls.append(self.active_rect)
-        self.rects_layer.update()
+        if self.page:
+            self.rects_layer.update()
 
     def _on_pan_update(self, e: ft.DragUpdateEvent):
         if not self.drag_start_point or not self.active_rect:
@@ -112,7 +167,8 @@ class SelectableImageViewer(ImageViewer):
         
         self.drag_current_point = (e.local_x, e.local_y)
         
-        self.active_rect.update()
+        if self.page:
+            self.active_rect.update()
 
     def _on_pan_end(self, e: ft.DragEndEvent):
         if not self.drag_start_point or not self.active_rect:
@@ -129,7 +185,7 @@ class SelectableImageViewer(ImageViewer):
         
         bbox = calculate_normalized_bbox(
             start_x, start_y, end_x, end_y,
-            self.scale, self.offset_x, self.offset_y,
+            self.zoom_scale, self.offset_x, self.offset_y,
             self.img_w, self.img_h
         )
         
@@ -147,8 +203,8 @@ class SelectableImageViewer(ImageViewer):
         
         for rect in self.selection_container.get_all():
             x1, y1, x2, y2 = rect.bbox
-            dx1, dy1 = original_to_display(x1, y1, self.scale, self.offset_x, self.offset_y)
-            dx2, dy2 = original_to_display(x2, y2, self.scale, self.offset_x, self.offset_y)
+            dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, self.offset_x, self.offset_y)
+            dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, self.offset_x, self.offset_y)
             
             w = dx2 - dx1
             h = dy2 - dy1
@@ -171,8 +227,8 @@ class SelectableImageViewer(ImageViewer):
             # ハイライト層に抽出行の矩形を描画
             for line in filtered_lines:
                 lx1, ly1, lx2, ly2 = line["bbox"]
-                ldx1, ldy1 = original_to_display(lx1, ly1, self.scale, self.offset_x, self.offset_y)
-                ldx2, ldy2 = original_to_display(lx2, ly2, self.scale, self.offset_x, self.offset_y)
+                ldx1, ldy1 = original_to_display(lx1, ly1, self.zoom_scale, self.offset_x, self.offset_y)
+                ldx2, ldy2 = original_to_display(lx2, ly2, self.zoom_scale, self.offset_x, self.offset_y)
                 
                 # Selection Rectと区別するため黄色系の半透明塗りつぶし (borderなし)
                 highlight = ft.Container(
@@ -207,51 +263,49 @@ class SelectableImageViewer(ImageViewer):
             self.selections_list.controls.append(item)
             
         self.highlight_layer.update()
-        self.rects_layer.update()
+        if self.page:
+            self.rects_layer.update()
         self.selections_list.update()
 
-    def resize_viewer(self, win_w: float, win_h: float):
-        super().resize_viewer(win_w, win_h)
-        self.highlight_layer.width = self.win_w
-        self.highlight_layer.height = self.win_h
-        self.rects_layer.width = self.win_w
-        self.rects_layer.height = self.win_h
-        self.gesture_detector.width = self.win_w
-        self.gesture_detector.height = self.win_h
-        self.stack.width = self.win_w
-        self.stack.height = self.win_h
-        self.selections_list.height = self.win_h
-        self._update_selections_ui()
 
     def _update_viewer(self):
         super()._update_viewer()
+        if not getattr(self, 'ocr_error', None):
+            self.highlight_layer.width = self.img_w * self.zoom_scale
+            self.highlight_layer.height = self.img_h * self.zoom_scale
+            self.rects_layer.width = self.img_w * self.zoom_scale
+            self.rects_layer.height = self.img_h * self.zoom_scale
+            self.gesture_detector.width = self.img_w * self.zoom_scale
+            self.gesture_detector.height = self.img_h * self.zoom_scale
+            self.stack.width = self.img_w * self.zoom_scale
+            self.stack.height = self.img_h * self.zoom_scale
+        if hasattr(self, 'status_text'):
+            self.status_text.value = self._get_status_message()
+            if self.page:
+                self.status_text.update()
         self._update_selections_ui()
 
 def main(page: ft.Page):
     # Use repository bundled image for offline operation
     image_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
     
-    # Calculate initial window size excluding the selections list panel width (300)
-    initial_win_w = page.width - 300 if page.width > 300 else 800
-    initial_win_h = page.height if page.height > 0 else 600
-    
     viewer = SelectableImageViewer(
         image_src=image_path,
         img_w=2048,
         img_h=1446,
-        win_w=initial_win_w,
-        win_h=initial_win_h
+        win_w=page.width if page.width else 800,
+        win_h=page.height if page.height else 600,
+        expand=True
     )
     
-    def on_resized(e):
-        new_win_w = page.width - 300 if page.width > 300 else 800
-        new_win_h = page.height if page.height > 0 else 600
-        viewer.resize_viewer(new_win_w, new_win_h)
+    def on_resize(e):
+        viewer.update_layout(page.width, page.height)
         page.update()
         
-    page.on_resized = on_resized
-    
+    page.on_resized = on_resize
     page.add(viewer)
+    viewer.update_layout(page.width if page.width else 800, page.height if page.height else 600)
+    page.update()
 
 if __name__ == "__main__":
     ft.app(target=main)

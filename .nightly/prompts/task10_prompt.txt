@@ -1,0 +1,218 @@
+Task 10: [FIX] Remove the fatal "Circular reference detected" crash caused by shadowing ft.Container.image
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. SITUATION
+--------------------------------------------------------------------------------
+The application CRASHES on startup. The window shows only:
+
+    There was an error while processing your request: Circular reference detected
+
+Every unit test passes (27 passed). No existing test exercises the flet control
+tree, so no test caught this.
+
+--------------------------------------------------------------------------------
+1.5 STARTING POINT - IMPORTANT
+--------------------------------------------------------------------------------
+Your previous task ("Task 09") ported the UI layout rebuild. That work was
+reviewed, judged GOOD, and is preserved on this branch:
+
+        integration/task-09        (commit ce1d9ef)
+
+It has NOT been merged into master, because it crashes at startup for the reason
+described in section 2. master is currently the last known-runnable state, but
+master contains the SAME latent defect (`self.image` shadows the reserved
+`ft.Container.image` property); it simply never triggers there because nothing
+calls Container.before_update().
+
+Your job: produce, on top of master, a result that
+   (a) keeps everything good from integration/task-09
+       (expand-based layout, update_layout, status bar, page.width usage,
+        the extended tests/test_flet_constants.py page.* attribute check), and
+   (b) removes the shadowing defect described in section 2, and
+   (c) adds the control-tree test described in [B].
+
+Inspect the branch, for example:
+        git fetch origin
+        git diff master origin/integration/task-09
+        git show origin/integration/task-09:custom_gui/app.py
+        git show origin/integration/task-09:custom_gui/viewer.py
+
+Do not blindly merge. Port deliberately.
+
+--------------------------------------------------------------------------------
+2. ROOT CAUSE - ALREADY DIAGNOSED. DO NOT RE-INVESTIGATE.
+--------------------------------------------------------------------------------
+The commander captured the real traceback by running the app headlessly:
+
+    File ".../flet/core/control.py", line 561, in _build_command
+        self.before_update()
+    File ".../flet/core/container.py", line 234, in before_update
+        self._set_attr_json("image", self.__image)
+    File ".../flet/core/control.py", line 202, in _convert_attr_json
+        json.dumps(value, cls=EmbedJsonEncoder, separators=(",", ":"))
+    ValueError: Circular reference detected
+
+Explanation:
+
+  - `custom_gui/viewer.py` defines `class ImageViewer(ft.Container)`.
+  - `ft.Container` ALREADY defines a property named `image`. It is a decoration
+    property and expects a `DecorationImage`, not a Control. Verified:
+        isinstance(getattr(ft.Container, 'image', None), property)  -> True
+        ft.Container().image                                        -> None
+  - `ImageViewer.__init__` does `self.image = ft.Image(...)`, which overwrites
+    that reserved property with a Control.
+  - When flet updates the Container it calls `before_update()`, which serialises
+    the `image` property to JSON. A Control holds references back to its parents,
+    so json.dumps hits an infinite loop and raises
+    "ValueError: Circular reference detected".
+
+Why it appeared only now: previously the code only called `self.image.update()`
+(updating the child), so the Container itself was never serialised. The most
+recent change added `self.update()` in the zoom handlers and `page.update()` in
+main(), which finally triggers `Container.before_update()` and exposes the bug.
+
+--------------------------------------------------------------------------------
+3. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] Stop shadowing the reserved property.
+    - Rename the attribute that currently holds the `ft.Image` control from
+      `image` to a name that does NOT collide with any attribute or property
+      defined by `ft.Container` (for example `image_control`).
+    - Update EVERY reference to it in custom_gui/viewer.py and custom_gui/app.py.
+    - Do not leave `self.image` assigned to a Control anywhere.
+    - While you are at it, check the other attributes assigned on
+      `ImageViewer` / `SelectableImageViewer` for the same kind of collision
+      (for example `content`, `width`, `height`, `padding`, `alignment`,
+      `bgcolor`, `border`, `scale`, `offset`, `expand`, `visible`, `data`).
+      `ft.Container` inherits from `ConstrainedControl`, which defines many of
+      these. Report every collision you find. Fix any that hold a Control or a
+      value of the wrong type.
+      NOTE: `self.scale` currently holds a float zoom factor and `ft.Control`
+      also defines `scale`. Investigate whether this is a real problem, and if
+      it is, rename it too and update all call sites, including
+      custom_gui/app.py. If it is NOT a problem, explain why in your report.
+
+[B] MOST IMPORTANT - add a test that actually builds and updates the UI.
+    Create `tests/test_ui_build.py`. It must run WITHOUT opening a GUI window.
+      - Monkeypatch `custom_gui.app.run_ocr_and_parse` so it returns `[]`
+        immediately. The real OCR takes about 45 seconds and must not run in
+        this test.
+      - Construct `SelectableImageViewer` with the bundled image
+        `resource/digidepo_2531162_0024.jpg`, img_w=2048, img_h=1446, and some
+        window size.
+      - Call `before_update()` on the viewer and on every control in its tree
+        (walk `content` and `controls` recursively). The test FAILS if any call
+        raises.
+      - Additionally assert that `json.dumps` succeeds on the serialised
+        attributes, or simply let the before_update calls surface the error,
+        whichever reproduces the failure reliably.
+      - VERIFY that this test actually FAILS on the current broken code, and
+        PASSES after your fix. State clearly in your report how you confirmed
+        both directions. A test that cannot detect the bug it was written for is
+        worthless.
+
+[C] Add a reserved-name guard test.
+    Extend `tests/test_flet_constants.py` (you ARE allowed to modify this file)
+    with a check that, for each class in custom_gui/ that subclasses a flet
+    control, no instance attribute assigned in `__init__` shadows a property
+    defined on the flet base class with an incompatible value.
+    A simple, acceptable implementation: build the viewer (with OCR monkeypatched
+    or by importing the classes only), and for each attribute name that flet's
+    base class defines as a property, assert the runtime value is not an
+    instance of `ft.Control`. Explain your approach in a comment.
+
+[D] The application must actually run.
+    - `python -m custom_gui.app` must start and display the image without any
+      error banner.
+    - The previously reported defects must work:
+        1. The image fills the available area and grows when the window is
+           maximised, preserving aspect ratio.
+        2. Zoom In / Zoom Out / Fit visibly change the rendered image size.
+        3. Dragging a rectangle shows semi-transparent yellow highlights over the
+           matched OCR lines, and the extracted text appears in the Selections
+           panel under "Region N".
+        4. Resizing the window re-renders image, rectangles and highlights at the
+           new scale.
+        5. The status bar shows file name, image size, scale, OCR line count and
+           the last region info.
+
+[E] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely.
+    - The three pure functions in custom_gui/viewer.py
+        original_to_display / display_to_original / calculate_fit_scale
+      MUST keep their exact signatures and formulas.
+    - Do not delete, skip or weaken any existing test, except the permitted
+      extension of tests/test_flet_constants.py in [C].
+    - Do not modify custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+      custom_gui/selection.py or custom_gui/text_assembler.py. Their logic has
+      been verified correct by headless testing (26 OCR lines detected, region
+      filtering returns the expected subset).
+
+--------------------------------------------------------------------------------
+4. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/viewer.py
+    custom_gui/app.py
+    tests/test_ui_build.py           (new file)
+    tests/test_flet_constants.py     (extension only - keep existing checks)
+
+--------------------------------------------------------------------------------
+5. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py     (DO NOT MODIFY)
+    tests/test_smoke.py, tests/test_viewer.py, tests/test_ocr_bridge.py,
+    tests/test_selection.py, tests/test_region_filter.py,
+    tests/test_text_assembler.py, tests/test_vertical_order.py (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+6. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Making OCR asynchronous or adding a progress indicator.
+    - Resizing or moving existing rectangles; a file picker dialog.
+    - txt / CSV export, PDF support, folder batch processing.
+    - Changing OCR, filtering, coordinate or text assembly logic.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+7. LESSON THIS TASK MUST INSTITUTIONALISE
+--------------------------------------------------------------------------------
+Three defects in a row shipped with all unit tests green, because no test ever
+built the flet control tree:
+    1. `ft.colors.transparent` - constant did not exist.
+    2. `page.window_width`     - attribute did not exist.
+    3. `self.image`            - shadowed a reserved Container property.
+Static analysis caught 1 and 2 after the fact. Item [B] of this task closes the
+remaining hole by exercising the real build/update path in a test.
+Treat [B] as the primary deliverable, not an afterthought.
+
+--------------------------------------------------------------------------------
+8. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [A] and [B] first, then [C], then [D].
+    - If this instruction contradicts the actual state of the code, do not guess.
+      Stop and report the contradiction.
+
+--------------------------------------------------------------------------------
+9. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[E] to how you satisfied it.
+    2. The new name you chose for the image attribute, and every file/line you
+       updated.
+    3. Every reserved-name collision you found, and what you did about each
+       (including your conclusion about `self.scale`).
+    4. Proof that the new test in [B] fails before the fix and passes after it.
+    5. The full output of `python -m pytest tests/ -v`.
+    6. Anything that cannot be verified without a GUI, stated explicitly.
+    7. Open questions or compromises. Write "none" if there are none.
