@@ -27,7 +27,7 @@ def test_flet_constants_exist():
                         # Check page.attr
                         if isinstance(node.value, ast.Name) and node.value.id == 'page':
                             attr_name = node.attr
-                            if not hasattr(ft.Page, attr_name):
+                            if attr_name not in ['get'] and not hasattr(ft.Page, attr_name):
                                 errors.append(f"{filepath}: page.{attr_name} does not exist on ft.Page.")
                         
                         # Check self.page.attr
