@@ -1,0 +1,176 @@
+Task 11 (revised): [NEW] Pan the image using an explicit Select / Pan mode toggle
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. WHY THIS TASK REPLACES THE PREVIOUS ONE
+--------------------------------------------------------------------------------
+You were previously asked to implement "pan the image by holding Ctrl and
+dragging". You correctly invoked the failsafe and reported that flet 0.27.6 does
+not expose modifier-key state in drag events. That was the right call.
+
+The commander independently verified your finding in the flet 0.27.6 source:
+
+    class DragUpdateEvent(ControlEvent):
+        delta_x, delta_y, primary_delta, local_x, local_y,
+        global_x, global_y, timestamp        # no ctrl / shift / alt
+
+    class ScrollEvent(ControlEvent):
+        global_x, global_y, local_x, local_y,
+        scroll_delta_x, scroll_delta_y       # no ctrl / shift / alt
+
+It was also confirmed that flet has `page.on_keyboard_event` but NO key-release
+event, so "is Ctrl currently held" cannot be tracked reliably. Your reasoning was
+correct on this point too.
+
+The human owner has therefore chosen a different interaction:
+**an explicit Select / Pan mode toggle in the toolbar.**
+
+Implement that. Do not attempt Ctrl-based detection again.
+
+--------------------------------------------------------------------------------
+2. CURRENT CODE CONTRACT (already on master - use it, do not change it)
+--------------------------------------------------------------------------------
+custom_gui/viewer.py provides these PURE functions. Signatures and formulas MUST
+NOT change; existing tests depend on them:
+
+    def original_to_display(x, y, scale, offset_x=0.0, offset_y=0.0) -> (dx, dy)
+        # (x * scale + offset_x, y * scale + offset_y)
+    def display_to_original(x, y, scale, offset_x=0.0, offset_y=0.0) -> (ox, oy)
+        # ((x - offset_x) / scale, (y - offset_y) / scale)
+    def calculate_fit_scale(img_w, img_h, win_w, win_h) -> float
+
+class ImageViewer(ft.Container) holds:
+    self.image_control    the ft.Image control
+                          (NEVER name it self.image - reserved by ft.Container)
+    self.zoom_scale       current zoom factor as float
+                          (NEVER name it self.scale - reserved by ft.Control)
+    self.offset_x, self.offset_y      currently always 0.0
+    self.img_w, self.img_h, self.win_w, self.win_h
+    self.controls_row     the toolbar Row containing Zoom In / Zoom Out / Fit
+
+class SelectableImageViewer(ImageViewer) in custom_gui/app.py handles dragging via
+ft.GestureDetector: _on_pan_start / _on_pan_update / _on_pan_end.
+It converts display coordinates to original image coordinates with
+calculate_normalized_bbox() from custom_gui/selection.py, passing
+self.zoom_scale, self.offset_x, self.offset_y.
+
+IMPORTANT: offset_x / offset_y already exist and are already threaded through the
+entire coordinate pipeline, but they are always 0.0 today. This task finally makes
+them meaningful. Every coordinate conversion must keep passing them.
+
+--------------------------------------------------------------------------------
+3. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] Mode toggle in the toolbar.
+    - Add a control to the existing toolbar row that switches between two modes:
+        SELECT  (default)  - drag draws the selection rectangle, as today
+        PAN                - drag moves the image
+    - The current mode must be obvious at a glance (for example a toggle button
+      whose label/icon/colour changes, or two segmented buttons where the active
+      one is highlighted). Use ft.Icons / ft.Colors capitalised enums only.
+    - The current mode must also be shown in the existing status bar text.
+
+[B] PAN mode moves the image.
+    - While in PAN mode, dragging moves the image in the drag direction.
+    - The movement must be stored in self.offset_x / self.offset_y.
+    - Movement must feel direct: dragging 100 display pixels right moves the
+      image 100 display pixels right.
+    - While in PAN mode, dragging must NOT create a selection rectangle.
+
+[C] SELECT mode must keep working exactly as it does today.
+    - This is a hard requirement. Rectangle selection, yellow highlights and the
+      extracted text in the Selections panel are the core of this product and a
+      human has already verified them working. Do not regress them.
+
+[D] Everything stays aligned after panning.
+    - Confirmed selection rectangles move with the image.
+    - Yellow OCR highlights move with the image.
+    - A rectangle drawn AFTER panning selects the correct OCR lines, i.e. the
+      display-to-original conversion accounts for the current offset.
+
+[E] Tests (no GUI may be started).
+    Create `tests/test_pan.py` with concrete numeric assertions, not property
+    round-trips. Implement the pan arithmetic as a PURE function, for example
+    `apply_pan(offset_x, offset_y, dx, dy) -> (new_x, new_y)`, so it is testable
+    without any flet widget, and call it from the event handler.
+      (a) apply_pan(0, 0, 50, 30) == (50, 30)
+      (b) with zoom_scale=1.0 and offset=(50,30):
+          original_to_display(100, 200, 1.0, 50, 30) == (150, 230)
+      (c) with the same offset:
+          display_to_original(150, 230, 1.0, 50, 30) == (100, 200)
+      (d) with zoom_scale=2.0 and offset=(50,30):
+          original_to_display(100, 200, 2.0, 50, 30) == (250, 430)
+      (e) two pans accumulate: apply_pan(apply_pan(0,0,10,10) ..., 10, 10)
+          results in (20, 20), not (10, 10)
+    Also add a test for the mode state machine itself: starting in SELECT,
+    toggling switches to PAN, toggling again returns to SELECT. Keep the mode in
+    a plain attribute or small helper so this is testable without a GUI.
+
+[F] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely.
+    - Do not modify the three pure functions in custom_gui/viewer.py.
+    - Never use `self.image` or `self.scale` as attribute names. Both are
+      reserved by flet and previously caused a fatal startup crash in this
+      project.
+    - tests/test_flet_constants.py will fail if you reference a flet constant or
+      a `page.` attribute that does not exist. Verify any flet API you are
+      unsure about, for example:
+          python -c "import flet as ft; print(hasattr(ft.Icons, 'PAN_TOOL'))"
+
+--------------------------------------------------------------------------------
+4. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/app.py
+    custom_gui/viewer.py    (only what panning and the toolbar toggle require;
+                             the three pure functions must not change)
+    tests/test_pan.py       (new file)
+
+--------------------------------------------------------------------------------
+5. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py     (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+6. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Any Ctrl / Shift / Alt based interaction. It is impossible in flet 0.27.6
+      and has already been investigated. Do not revisit it.
+    - Mouse-wheel zoom (blocked by the same API limitation; a separate decision
+      is pending).
+    - Keyboard shortcuts such as + / - (a later task).
+    - Making OCR asynchronous (the next task).
+    - Resizing or moving existing rectangles; file picker; CSV export; PDF.
+    - Replacing the viewer with ft.InteractiveViewer.
+    - Changing OCR, filtering or text assembly logic.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+7. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you. Your previous failsafe report was correct and
+      appreciated; use the same judgement here.
+    - Priority if you run out of time: [C] first (never break selection), then
+      [A] and [B], then [D], then [E].
+
+--------------------------------------------------------------------------------
+8. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[F] to how you satisfied it.
+    2. Which flet control you used for the toggle and how you verified any icon
+       or colour constant exists.
+    3. The list of changed files and the reason for each change.
+    4. The full output of `python -m pytest tests/ -v`.
+    5. Anything that cannot be verified without a GUI, stated explicitly, so a
+       human can check it manually.
+    6. Open questions or compromises. Write "none" if there are none.
