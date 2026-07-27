@@ -1,0 +1,232 @@
+Task 12: [FIX] Make OCR asynchronous so the window is usable immediately
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. THE PROBLEM - MEASURED, NOT GUESSED
+--------------------------------------------------------------------------------
+The commander measured the real startup cost of `python -m custom_gui.app`:
+
+        52.8 seconds of a completely frozen UI.
+
+During those 52.8 seconds:
+    - no image, no toolbar and no panel are drawn,
+    - the window cannot be moved,
+    - the X (close) button does not work.
+
+A human user reported this as "the window will not close". It is not a crash. It
+is a synchronous OCR call blocking the UI thread.
+
+The cause is in custom_gui/app.py, inside SelectableImageViewer.__init__:
+
+        # Run OCR once and store results
+        self.ocr_results = []
+        if os.path.exists(image_src):
+            self.ocr_results = run_ocr_and_parse(image_src)
+
+`run_ocr_and_parse` spawns `src/ocr.py` as a subprocess and blocks until it
+finishes. Because it is called from `__init__`, and `__init__` is called from
+`main(page)` BEFORE `page.add(viewer)`, nothing is ever rendered until OCR ends.
+
+--------------------------------------------------------------------------------
+2. VERIFIED FLET 0.27.6 API - USE THESE, THEY EXIST
+--------------------------------------------------------------------------------
+The commander verified the following against the pinned flet 0.27.6 in this
+repository. Do not substitute anything else and do not add dependencies.
+
+        hasattr(ft.Page, "run_thread")   -> True
+        hasattr(ft.Page, "run_task")     -> True
+        hasattr(ft, "ProgressRing")      -> True
+        hasattr(ft, "ProgressBar")       -> True
+
+`page.run_thread(fn, *args)` runs `fn` on a background worker thread. Use it.
+Do NOT use `asyncio` for this: `run_ocr_and_parse` is blocking subprocess I/O,
+so a thread is the correct tool. Do NOT introduce `threading.Thread` directly;
+`page.run_thread` is what flet supports here.
+
+--------------------------------------------------------------------------------
+3. CURRENT CODE CONTRACT (on master - use it, do not change it)
+--------------------------------------------------------------------------------
+custom_gui/viewer.py provides these PURE functions. Signatures and formulas MUST
+NOT change; existing tests depend on them:
+
+    def original_to_display(x, y, scale, offset_x=0.0, offset_y=0.0) -> (dx, dy)
+    def display_to_original(x, y, scale, offset_x=0.0, offset_y=0.0) -> (ox, oy)
+    def calculate_fit_scale(img_w, img_h, win_w, win_h) -> float
+    def apply_pan(offset_x, offset_y, dx, dy) -> (new_x, new_y)
+    class InteractionMode                 # .current, .set_mode(mode)
+
+class ImageViewer(ft.Container) holds:
+    self.image_control    the ft.Image control
+                          (NEVER name it self.image - reserved by ft.Container,
+                           this previously caused a fatal startup crash)
+    self.zoom_scale       current zoom factor as float
+                          (NEVER name it self.scale - reserved by ft.Control)
+    self.offset_x, self.offset_y
+    self.img_w, self.img_h, self.win_w, self.win_h
+    self.controls_row     toolbar Row (Zoom In / Zoom Out / Fit / mode toggle)
+    self.image_container, self.scrollable_image
+
+class SelectableImageViewer(ImageViewer) in custom_gui/app.py currently holds:
+    self.ocr_results          list of OCR line dicts
+    self.ocr_error            str or None
+    self.status_text          ft.Text in the status bar
+    self.mode_state           InteractionMode
+    self.selection_container, self.rects_layer, self.highlight_layer,
+    self.gesture_detector, self.selections_list, self.stack
+    self._get_status_message(), self._update_selections_ui(),
+    self._update_viewer(), self.update_layout(win_w, win_h)
+
+Each OCR line dict has: text, bbox (x1,y1,x2,y2 floats), confidence,
+is_vertical, source_image.
+
+--------------------------------------------------------------------------------
+4. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] Nothing blocks __init__.
+    - SelectableImageViewer.__init__ must NOT call run_ocr_and_parse.
+    - After __init__, self.ocr_results must be an empty list and the viewer must
+      be fully constructible in well under one second.
+
+[B] OCR runs on a background thread, started after the UI is on screen.
+    - Add a public method, for example `start_ocr(self, page)`, that launches the
+      OCR work via `page.run_thread(...)`.
+    - main(page) must call it AFTER `page.add(viewer)` and after the first
+      `page.update()`, so the user sees the window first.
+    - When OCR finishes, store the result in self.ocr_results, refresh the status
+      bar and refresh the selections UI.
+    - If OCR raises, catch it, store the message in self.ocr_error, show it in the
+      status bar, and DO NOT crash the app.
+
+[C] Progress is visible.
+    - While OCR is running, show an obvious indicator: an `ft.ProgressRing` plus
+      text such as "OCR processing..." in or next to the status bar.
+    - When it completes, the indicator disappears and the status bar shows the
+      real line count, i.e. `Lines: 26` for the bundled image.
+    - Keep every existing field of the status bar message (File, Size, Scale,
+      Mode, Lines, Last).
+
+[D] The window is usable during OCR.
+    - The image, the toolbar and the Selections panel are all drawn immediately.
+    - The X button closes the window while OCR is still running.
+    - Zoom In / Zoom Out / Fit and the Select/Pan toggle all respond during OCR.
+
+[E] Dragging before OCR completes must not crash.
+    - With self.ocr_results == [], drawing a rectangle must simply produce a
+      region with no extracted text. It must not raise.
+    - When OCR later completes, previously drawn rectangles must be re-evaluated
+      so their text and yellow highlights appear.
+
+[F] Fix the unguarded update() calls - REQUIRED, NOT OPTIONAL.
+    In `_update_selections_ui` these two lines are currently NOT guarded:
+
+            self.highlight_layer.update()      # no `if self.page:` guard
+            self.selections_list.update()      # no `if self.page:` guard
+
+    (`self.rects_layer.update()` immediately between them IS guarded.)
+    Once OCR completes on a background thread, this method can be reached in
+    states where the control is not attached to a page, which raises. Guard all
+    three consistently with `if self.page:`.
+
+[G] Tests (no GUI window may be opened).
+    Create `tests/test_async_ocr.py`.
+      1. Put the OCR lifecycle state in a small PURE, GUI-free helper so it is
+         testable, for example:
+
+             class OcrState:
+                 IDLE, RUNNING, DONE, ERROR
+
+         with a function that renders the progress/status wording from the state.
+         Assert CONCRETE STRINGS, not properties. For example, that the message
+         while RUNNING contains "OCR processing" and that after DONE with 26 lines
+         it contains "Lines: 26".
+      2. Assert that constructing SelectableImageViewer does NOT run OCR:
+         monkeypatch `custom_gui.app.run_ocr_and_parse` with a function that sets
+         a flag (or raises), construct the viewer, and assert the flag was never
+         set. This is the regression test for the whole task - it must fail if
+         someone puts the OCR call back into __init__.
+      3. Assert that with `self.ocr_results == []`, `_update_selections_ui()`
+         does not raise and produces an empty extracted text for a region.
+      4. Assert the completion path: monkeypatch the OCR function to return two
+         fabricated line dicts, invoke the completion handler directly (do NOT
+         start a real thread and do NOT run real OCR - the real thing takes ~50
+         seconds and must never run in the test suite), then assert
+         `len(viewer.ocr_results) == 2` and that the status message contains
+         "Lines: 2".
+      5. Assert the error path: make the OCR function raise, invoke the same
+         handler, and assert `viewer.ocr_error` is set and nothing propagated.
+
+    State clearly in your report how long `python -m pytest tests/ -v` takes. It
+    is currently about 97 seconds because tests/test_ocr_bridge.py runs real OCR.
+    Do NOT modify that file, and do not let your new tests add real OCR runs.
+
+[H] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely (35+ tests).
+    - Do not modify the pure functions in custom_gui/viewer.py.
+    - Never use `self.image` or `self.scale` as attribute names.
+    - Select mode rectangle selection, yellow highlights and the extracted text
+      in the Selections panel are the core of this product and a human has
+      verified them working. Do not regress them.
+    - tests/test_flet_constants.py fails if you reference a flet constant or a
+      `page.` attribute that does not exist. Verify anything you are unsure of:
+          python -c "import flet as ft; print(hasattr(ft, 'ProgressRing'))"
+
+--------------------------------------------------------------------------------
+5. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/app.py
+    custom_gui/viewer.py       (only if the progress indicator genuinely requires
+                                it; the pure functions must not change)
+    tests/test_async_ocr.py    (new file)
+
+--------------------------------------------------------------------------------
+6. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py     (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+7. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Speeding up the OCR engine itself. 50 seconds of compute is expected; this
+      task only stops it from blocking the UI.
+    - Caching OCR results to disk.
+    - Multiple images, folder loading, a "next image" button.
+    - Exporting txt / CSV.
+    - Editing extracted text.
+    - Moving the "Region N" label outside the rectangle.
+    - Mouse-wheel or keyboard zoom.
+    - Resizing or moving existing rectangles; PDF support.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+8. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you. A previous failsafe report from you was correct
+      and appreciated; use the same judgement.
+    - Priority if you run out of time: [A] and [B] first, then [F], then [C] and
+      [E], then [D], then [G].
+    - If this instruction contradicts the actual state of the code, do not guess.
+      Stop and report the contradiction.
+
+--------------------------------------------------------------------------------
+9. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[H] to how you satisfied it.
+    2. Exactly where OCR is now started, and how you guaranteed it happens after
+       the first render.
+    3. How the background thread hands its result back to the UI safely.
+    4. The list of changed files and the reason for each change.
+    5. The full output of `python -m pytest tests/ -v`, including total duration.
+    6. Anything that cannot be verified without a GUI, stated explicitly, so a
+       human can check it manually.
+    7. Open questions or compromises. Write "none" if there are none.
