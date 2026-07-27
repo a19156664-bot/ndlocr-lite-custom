@@ -4,10 +4,15 @@ import io
 from custom_gui.region_filter import filter_lines_by_region
 from custom_gui.text_assembler import assemble_text
 
-def build_export_rows(image_name: str, rects: list, ocr_results: list) -> list:
+def build_export_rows(image_name: str, rects: list, ocr_results: list, edited_texts: dict = None) -> list:
     """
     Builds export rows from selection rectangles and OCR results.
     Each row is a dict matching the required CSV columns.
+    
+    Args:
+        edited_texts: Optional dictionary mapping region_id to edited string.
+                      When provided, this string is used instead of the raw OCR text.
+                      `line_count` remains the number of raw OCR lines inside the rect.
     """
     basename = os.path.basename(image_name.replace('\\', '/'))
     rows = []
@@ -15,8 +20,12 @@ def build_export_rows(image_name: str, rects: list, ocr_results: list) -> list:
     for rect in rects:
         x1, y1, x2, y2 = rect.bbox
         filtered_lines = filter_lines_by_region((x1, y1, x2, y2), ocr_results)
-        text = assemble_text(filtered_lines)
         line_count = len(filtered_lines)
+        
+        if edited_texts and rect.rect_id in edited_texts:
+            text = edited_texts[rect.rect_id]
+        else:
+            text = assemble_text(filtered_lines)
         
         row = {
             "image_name": basename,

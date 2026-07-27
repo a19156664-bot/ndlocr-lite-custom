@@ -36,10 +36,12 @@ class SelectableImageViewer(ImageViewer):
             "selections": SelectionContainer(),
             "ocr_state": OcrState.IDLE if os.path.exists(image_src) else OcrState.ERROR,
             "ocr_results": [],
-            "ocr_error": None if os.path.exists(image_src) else f"Error: Image not found at {image_src}"
+            "ocr_error": None if os.path.exists(image_src) else f"Error: Image not found at {image_src}",
+            "edits": {}
         }
         
         self.selection_container = self.image_states[image_src]["selections"]
+        self.edits = self.image_states[image_src]["edits"]
         self.ocr_state = self.image_states[image_src]["ocr_state"]
         self.ocr_results = self.image_states[image_src]["ocr_results"]
         self.ocr_error = self.image_states[image_src]["ocr_error"]
@@ -49,6 +51,8 @@ class SelectableImageViewer(ImageViewer):
         self.drag_start_point = None
         self.drag_current_point = None
         self.active_rect = None
+        self.active_region_id = None
+        self.editing_region_id = None
         
         self.mode_state = InteractionMode()
             
@@ -280,7 +284,8 @@ class SelectableImageViewer(ImageViewer):
                 "selections": SelectionContainer(),
                 "ocr_state": OcrState.IDLE if os.path.exists(path) else OcrState.ERROR,
                 "ocr_results": [],
-                "ocr_error": None if os.path.exists(path) else f"Error: Image not found at {path}"
+                "ocr_error": None if os.path.exists(path) else f"Error: Image not found at {path}",
+                "edits": {}
             }
             
         state = self.image_states[path]
@@ -290,6 +295,9 @@ class SelectableImageViewer(ImageViewer):
         self.ocr_state = state["ocr_state"]
         self.ocr_results = state["ocr_results"]
         self.ocr_error = state["ocr_error"]
+        self.edits = state["edits"]
+        self.active_region_id = None
+        self.editing_region_id = None
         
         try:
             from PIL import Image
@@ -383,7 +391,7 @@ class SelectableImageViewer(ImageViewer):
                 path_txt = f"{os.path.splitext(path_csv)[0]}.txt"
 
             rects = self.selection_container.get_all()
-            rows = build_export_rows(self.image_src, rects, self.ocr_results)
+            rows = build_export_rows(self.image_src, rects, self.ocr_results, edited_texts=self.edits)
             
             csv_text = rows_to_csv_text(rows)
             txt_text = rows_to_txt_text(rows)
@@ -522,7 +530,13 @@ class SelectableImageViewer(ImageViewer):
         self.highlight_layer.controls.clear()
         self.selections_list.controls.clear()
         
-        for rect in self.selection_container.get_all():
+        all_rects = self.selection_container.get_all()
+        
+        # Ensure active_region_id actually exists, if not reset it to the latest
+        if self.active_region_id not in [r.rect_id for r in all_rects]:
+            self.active_region_id = all_rects[-1].rect_id if all_rects else None
+            
+        for rect in all_rects:
             x1, y1, x2, y2 = rect.bbox
             dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, self.offset_x, self.offset_y)
             dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, self.offset_x, self.offset_y)
@@ -576,21 +590,83 @@ class SelectableImageViewer(ImageViewer):
             # Update list (結果パネル)
             def delete_rect(e, rid=rect.rect_id):
                 self.selection_container.delete_by_id(rid)
+                if rid in self.edits:
+                    del self.edits[rid]
+                if self.active_region_id == rid:
+                    self.active_region_id = None
+                if self.editing_region_id == rid:
+                    self.editing_region_id = None
                 self._update_selections_ui()
                 
+            def edit_rect(e, rid=rect.rect_id):
+                self.active_region_id = rid
+                self.editing_region_id = rid
+                self._update_selections_ui()
+                
+            def commit_edit(e, rid=rect.rect_id, text_field=None):
+                self.edits[rid] = text_field.value
+                self.editing_region_id = None
+                self._update_selections_ui()
+                
+            def cancel_edit(e, rid=rect.rect_id):
+                self.editing_region_id = None
+                self._update_selections_ui()
+                
+            def restore_rect(e, rid=rect.rect_id):
+                if rid in self.edits:
+                    del self.edits[rid]
+                self._update_selections_ui()
+                
+            def make_active(e, rid=rect.rect_id):
+                if self.active_region_id != rid:
+                    self.active_region_id = rid
+                    self._update_selections_ui()
+
+            has_edit = rect.rect_id in self.edits
+            display_text = self.edits[rect.rect_id] if has_edit else extracted_text
+            label_suffix = " (edited)" if has_edit else ""
+            is_active = (self.active_region_id == rect.rect_id)
+            is_editing = (self.editing_region_id == rect.rect_id)
+
+            if is_editing:
+                tf = ft.TextField(
+                    value=display_text,
+                    multiline=True,
+                    autofocus=True
+                )
+                content_area = ft.Column([
+                    tf,
+                    ft.Row([
+                        ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save (Commit)", on_click=lambda e, rid=rect.rect_id, tf=tf: commit_edit(e, rid, tf)),
+                        ft.IconButton(icon=ft.Icons.CANCEL, tooltip="Cancel", on_click=cancel_edit)
+                    ])
+                ])
+            else:
+                content_area = ft.Text(display_text, selectable=True)
+                
+            buttons = [
+                ft.IconButton(icon=ft.Icons.EDIT, tooltip="Edit", on_click=edit_rect)
+            ]
+            if has_edit:
+                buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
+            buttons.append(ft.IconButton(icon=ft.Icons.DELETE, tooltip="Delete", on_click=delete_rect))
+
             item_content = ft.Column([
                 ft.Row([
-                    ft.Text(f"{rect.label}:", weight=ft.FontWeight.BOLD),
-                    ft.IconButton(icon=ft.Icons.DELETE, on_click=delete_rect)
-                ]),
-                ft.Text(extracted_text, selectable=True)
+                    ft.Text(f"{rect.label}{label_suffix}:", weight=ft.FontWeight.BOLD),
+                    ft.Row(buttons, spacing=0)
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                content_area
             ])
             
+            border_color = ft.Colors.GREEN if is_active else ft.Colors.OUTLINE
+            border_width = 2 if is_active else 1
             item = ft.Container(
                 content=item_content,
                 padding=10,
-                border=ft.border.all(1, ft.Colors.OUTLINE),
-                border_radius=5
+                border=ft.border.all(border_width, border_color),
+                border_radius=5,
+                on_click=make_active
             )
             
             self.selections_list.controls.append(item)
@@ -642,9 +718,17 @@ def main(page: ft.Page):
         page.update()
         
     def on_keyboard(e: ft.KeyboardEvent):
+        if viewer.editing_region_id is not None:
+            # Suppress global shortcuts while editing text
+            return
+            
         if e.key == "N" and e.ctrl:
             if viewer.btn_next and not viewer.btn_next.disabled:
                 viewer._on_next_click(None)
+        elif e.key == "F2":
+            if viewer.active_region_id:
+                viewer.editing_region_id = viewer.active_region_id
+                viewer._update_selections_ui()
                 
     page.on_resized = on_resize
     page.on_keyboard_event = on_keyboard
