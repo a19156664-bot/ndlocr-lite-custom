@@ -1,0 +1,77 @@
+Task 02: [NEW] OCRブリッジ（src/ocr.py の呼び出しと結果の構造化）
+
+本リポジトリのルートにある AGENTS.md（プロジェクト憲法）を必ず読み、その規約に従って作業すること。
+
+1. 目的・背景 (Purpose & Background):
+本プロジェクトは NDLOCR-Lite を fork し、「マウスで矩形範囲を選択して、その範囲だけOCR結果を取り出す」
+機能を追加するものである。上流コードは一切変更せず custom_gui/ にのみ実装する（C方式）。
+
+本タスクでは、既存の OCR 処理（src/ocr.py）を呼び出し、その出力JSONを
+後続タスク（矩形フィルタ・GUI表示）が扱いやすい形に正規化する「橋渡し層」を作る。
+
+【重要な既知情報】src/ocr.py は出力先ディレクトリに <画像名>.json を生成する。
+その JSON は次の構造を持つ（実機検証済み）:
+  {
+    "contents": [ [ {
+        "boundingBox": ["380 229", "380 251", "569 229", "569 251"],
+        "id": 0, "isVertical": "false", "text": "(2) 気送子送付管",
+        "isTextline": "true", "confidence": 0.895, "class_index": 1
+    }, ... ] ],
+    "imginfo": { ... }
+  }
+boundingBox は4隅の座標を "x y" 形式の文字列で持つ。isVertical は文字列の "true"/"false" である。
+
+2. 完了条件 (Definition of Done):
+   - `custom_gui/ocr_bridge.py` を新規作成し、画像ファイルのパスを受け取って
+     OCRを実行し、行データの list を返す関数を実装すること。
+   - 返される各行は、以下のフィールドを持つ正規化済みのデータであること:
+       text          : 認識テキスト (str)
+       bbox          : (x1, y1, x2, y2) の数値タプル。左上と右下を表す軸平行矩形に変換すること
+       confidence    : 信頼度 (float)
+       is_vertical   : 縦書きかどうか (bool。JSONの文字列 "true"/"false" を bool へ変換すること)
+       source_image  : 元画像のファイル名 (str)。※必須。フォルダ一括処理で出所を追跡するため
+   - `tests/test_ocr_bridge.py` を新規作成し、`resource/digidepo_2531162_0024.jpg` を入力として
+     以下を検証するテストを追加し、`python -m pytest tests/ -v` が全件グリーンになること:
+       (a) 1行以上が取得できること
+       (b) 全行の source_image が入力画像のファイル名と一致すること
+       (c) 全行の bbox が4要素の数値であり、x1 < x2 かつ y1 < y2 を満たすこと
+       (d) is_vertical が bool 型であること（文字列でないこと）
+
+3. 変更許可スコープ (Allowed Scope / Whitelist):
+   - `custom_gui/**`
+   - `tests/**`
+
+4. 変更禁止スコープ (Prohibited Scope / Blacklist):
+   - `src/**`（※呼び出すだけ。中身の変更は一切禁止）
+   - `ndlocr-lite-gui/**`, `train/**`, `resource/**`
+   - `LICENCE`, `LICENCE_DEPENDENCEIES`, `README.md`
+   - `pyproject.toml`, `requirements.txt`
+   - `.github/**`, `.nightly/**`, `.agents/**`, `scripts/**`
+   - `AGENTS.md`, `CLAUDE.md`, `task_template.md`
+
+5. 既存ユニットテストの絶対保護:
+   - 既存テスト（tests/test_smoke.py）の削除・スキップ・期待値変更を固く禁止する。
+   - 既存テストが失敗する場合、テストコードを修正せず、失敗内容と原因を報告して停止すること。
+
+6. 今回やらないこと (Out of Scope):
+   - GUI・画面の実装（flet のウィンドウ作成を含む）
+   - 矩形選択・範囲フィルタの実装（Task 04/05 で行う）
+   - src/ocr.py 自体の改造・高速化・リファクタリング
+   - 依存パッケージの追加
+   - 国立国会図書館の著作権表示・クレジット・ライセンス条項の削除、改変、移動
+
+7. 技術的ヒント:
+   - OCRは1枚あたり数秒かかる。テストが極端に長時間化しないよう、画像は1枚のみ使用すること。
+   - src/ocr.py はコマンドラインからは
+     `python src/ocr.py --sourceimg <画像> --output <出力先ディレクトリ>` の形式で実行できる。
+     サブプロセス実行・直接import のどちらでもよいが、選んだ理由をコード内コメントに記すこと。
+
+8. 詰まった場合の指示 (Failsafe):
+   - 完了条件を満たせない障害に遭遇した場合、回避策を発明せず、
+     できた部分までで作業を止め、障害の内容を報告すること。
+
+9. 提出時の説明に含めること:
+   1. 完了条件との対応表（各条件を満たした方法）
+   2. 変更ファイル一覧と各変更の理由
+   3. `python -m pytest tests/ -v` の実行結果
+   4. 未確定事項・妥協した点（なければ「なし」と明記）
