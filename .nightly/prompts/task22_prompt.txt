@@ -1,0 +1,272 @@
+Task 22: [NEW] Export button - save the extracted OCR text as CSV and TXT
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. PURPOSE
+--------------------------------------------------------------------------------
+The user selects rectangles on a scanned page and the OCR text inside each
+rectangle is shown in the Selections panel. Right now that text can only be read
+on screen. It cannot leave the application, which makes the tool unusable for
+real work.
+
+The human owner has decided the exact output format. Implement it as specified.
+Do not redesign it.
+
+--------------------------------------------------------------------------------
+2. THE OUTPUT FORMAT - DECIDED BY THE HUMAN OWNER
+--------------------------------------------------------------------------------
+Two files are written from one button press.
+
+(1) CSV - ONE ROW PER RECTANGLE. The text of the whole rectangle goes into a
+    single cell. This is deliberate: the user wants "the result of the region I
+    selected" as one unit, usable directly in a spreadsheet.
+
+    Header row, in exactly this order:
+
+        image_name,region_id,x1,y1,x2,y2,line_count,text
+
+      image_name  the ORIGINAL IMAGE FILE NAME, basename only, e.g.
+                  digidepo_2531162_0024.jpg
+                  This column is mandatory. It exists so results can still be
+                  traced back to their source once folder batch processing is
+                  added later.
+      region_id   SelectionRect.rect_id  ("1", "2", ...)
+      x1,y1,x2,y2 the rectangle in ORIGINAL IMAGE COORDINATES, from
+                  SelectionRect.bbox
+      line_count  how many OCR lines fell inside the rectangle
+      text        the assembled text for that rectangle, in ONE cell
+
+    Example:
+
+        image_name,region_id,x1,y1,x2,y2,line_count,text
+        digidepo_0024.jpg,1,120,340,880,610,4,"第一章 序説..."
+        digidepo_0024.jpg,2,120,650,880,900,3,"明治三十年に至り..."
+
+(2) TXT - human readable, same data, one block per rectangle:
+
+        === digidepo_0024.jpg / Region 1 ===
+        第一章 序説
+        この書は...
+
+        === digidepo_0024.jpg / Region 2 ===
+        明治三十年に至り...
+
+--------------------------------------------------------------------------------
+3. ENCODING - GET THIS RIGHT, IT IS THE MOST COMMON FAILURE
+--------------------------------------------------------------------------------
+The text is Japanese.
+
+    - Write the CSV as UTF-8 WITH BOM, i.e. encoding="utf-8-sig".
+      Microsoft Excel on Japanese Windows misreads plain UTF-8 CSV as Shift-JIS
+      and produces mojibake. The BOM is what prevents that. The user is on
+      Windows 10 Japanese. This is not optional.
+    - Write the TXT as plain UTF-8 (encoding="utf-8").
+    - Use Python's `csv` module, opening the file with `newline=""`, so that
+      embedded newlines inside the `text` cell are quoted correctly and do not
+      break the row structure. Do NOT hand-roll CSV escaping.
+
+--------------------------------------------------------------------------------
+4. CURRENT CODE CONTRACT (on master - use it, do not change it)
+--------------------------------------------------------------------------------
+custom_gui/selection.py:
+
+    @dataclass
+    class SelectionRect:
+        rect_id: str                                  # "1", "2", ...
+        bbox: Tuple[float, float, float, float]       # x1,y1,x2,y2 ORIGINAL coords
+        label: str                                    # "Region 1", ...
+
+    class SelectionContainer:
+        add(bbox, label=None) -> SelectionRect
+        get_all() -> List[SelectionRect]
+        delete_by_id(rect_id) -> bool
+
+custom_gui/region_filter.py:
+    filter_lines_by_region(rect, lines, overlap_threshold=0.5) -> List[dict]
+        rect is (x1, y1, x2, y2) in ORIGINAL image coordinates.
+
+custom_gui/text_assembler.py:
+    assemble_text(lines) -> str
+
+Each OCR line dict has: text, bbox (x1,y1,x2,y2 floats), confidence,
+is_vertical, source_image.
+
+custom_gui/app.py, class SelectableImageViewer(ImageViewer):
+    self.image_src            path of the current image
+    self.ocr_results          list of OCR line dicts (EMPTY until OCR finishes)
+    self.ocr_state            OcrState.IDLE / RUNNING / DONE / ERROR
+    self.selection_container  SelectionContainer
+    self.controls_row         toolbar Row (Zoom In / Zoom Out / Fit / mode toggle)
+    self.status_text, self.status_row, self.progress_ring
+    self._update_selections_ui()   rebuilds rectangles, labels, highlights, panel
+
+`_update_selections_ui` already computes, for every rectangle:
+        filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
+        extracted_text = assemble_text(filtered_lines)
+That is exactly the data you must export. Reuse those two functions; do not
+reimplement filtering or assembly.
+
+NEVER use `self.image` or `self.scale` as attribute names. Both are reserved by
+flet and previously caused a fatal startup crash in this project.
+
+--------------------------------------------------------------------------------
+5. VERIFIED FLET 0.27.6 API
+--------------------------------------------------------------------------------
+The commander verified these against the pinned flet 0.27.6 in this repository:
+
+    ft.FilePicker                                        exists
+    FilePicker.save_file(dialog_title=None, file_name=None,
+                         initial_directory=None,
+                         file_type=FilePickerFileType.ANY,
+                         allowed_extensions=None)        exists
+    ft.Page.overlay                                      exists
+    ft.Icons.SAVE / ft.Icons.SAVE_ALT / ft.Icons.DOWNLOAD exists
+
+A FilePicker must be added to `page.overlay` before it can be used. Verify any
+other flet API you are unsure about, for example:
+    python -c "import flet as ft; print(hasattr(ft.Icons, 'SAVE'))"
+
+--------------------------------------------------------------------------------
+6. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] New module `custom_gui/exporter.py` holding the PURE, GUI-FREE logic.
+    It must not import flet. Suggested contract (you may refine the names, but
+    it must be pure and testable without any GUI):
+
+        def build_export_rows(image_name, rects, ocr_results) -> List[dict]
+            # one dict per rectangle, keys matching the CSV columns
+
+        def rows_to_csv_text(rows) -> str
+        def rows_to_txt_text(rows) -> str
+
+    Writing to disk may live here too, but the string-building must be
+    separately testable without touching the filesystem.
+
+[B] An export button in the toolbar.
+    - Add it to `self.controls_row`, next to the existing Zoom / mode controls.
+    - Use ft.Icons.SAVE (or SAVE_ALT / DOWNLOAD) with a clear label such as
+      "Export".
+    - Pressing it opens a save dialog via ft.FilePicker.save_file.
+    - The user chooses ONE path. Write BOTH files from it: if the chosen path is
+      `C:\out\result.csv`, also write `C:\out\result.txt`. Derive the second name
+      by replacing the extension. Suggest a sensible default file name based on
+      the image file name.
+
+[C] Behaviour in edge states - all must be handled, none may crash.
+    - No rectangles selected: do not write empty files silently. Show a clear
+      message in the status bar such as "Nothing to export" and return.
+    - OCR not finished (`ocr_state` is IDLE or RUNNING): the text would be empty
+      or partial. Refuse and say so in the status bar, e.g.
+      "OCR not finished - cannot export yet". Do NOT block the UI waiting.
+    - User cancels the dialog (the result path is None): do nothing, no error.
+    - Writing fails (permission denied, path gone): catch the exception, show the
+      message in the status bar, do not crash the app.
+    - On success, the status bar must confirm it, including how many regions were
+      written, e.g. "Exported 3 regions to result.csv / result.txt".
+
+[D] image_name is the BASENAME of the current image.
+    Use `os.path.basename(self.image_src)`. Not the full path, not a hardcoded
+    string.
+
+[E] Tests - `tests/test_exporter.py`, no GUI, no filesystem for the string tests.
+    Build fabricated OCR lines and rectangles by hand and assert CONCRETE
+    STRINGS, not properties:
+      (a) The CSV header line is exactly:
+              image_name,region_id,x1,y1,x2,y2,line_count,text
+      (b) Two rectangles produce exactly three lines of CSV output
+          (header + 2 data rows).
+      (c) A rectangle whose text contains a COMMA is quoted correctly and still
+          parses back to the original string via `csv.reader`. Assert by parsing
+          the generated CSV back, not by eyeballing the raw string.
+      (d) A rectangle whose text contains a NEWLINE stays inside one CSV record
+          and round-trips correctly through `csv.reader`.
+      (e) image_name appears in every data row and equals the basename you passed
+          in, even if you passed a full path like
+          `C:\\scan\\shiryo\\0002.jpg` or `resource/digidepo_2531162_0024.jpg`.
+      (f) line_count equals the number of OCR lines that fall inside the
+          rectangle - assert an exact integer, using fabricated lines where you
+          control the answer, including one line deliberately OUTSIDE the
+          rectangle that must NOT be counted.
+      (g) The TXT output contains the exact separator line
+          `=== <image_name> / Region 1 ===` for the first region.
+      (h) Zero rectangles produces a CSV consisting of the header only, and an
+          empty (or header-free) TXT - assert exactly which.
+    Add ONE test that actually writes to disk, using pytest's `tmp_path`
+    fixture, and assert that the CSV file's first three bytes are the UTF-8 BOM
+    (b"\xef\xbb\xbf"). This is the regression guard for section 3.
+
+[F] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely (48+ tests).
+    - Do NOT modify custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+      custom_gui/selection.py or custom_gui/text_assembler.py.
+    - Do not modify the pure functions in custom_gui/viewer.py:
+      original_to_display / display_to_original / calculate_fit_scale /
+      apply_pan / calculate_label_position / class InteractionMode
+    - Rectangle selection, the Select/Pan toggle, the yellow highlights, the
+      "Region N" label now drawn OUTSIDE the rectangle, and the extracted text
+      panel are all verified working. Do not regress any of them.
+    - Guard every `.update()` call on a control with `if self.page:`.
+    - Do not run real OCR in your tests. It takes about 50 seconds.
+      tests/test_ocr_bridge.py already does that deliberately; leave it alone.
+
+--------------------------------------------------------------------------------
+7. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/exporter.py      (new file)
+    custom_gui/app.py
+    tests/test_exporter.py      (new file)
+
+--------------------------------------------------------------------------------
+8. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py,
+    custom_gui/viewer.py                                      (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+9. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Multiple images, folder loading, a "next image" button (the next task).
+    - Editing the extracted text before export (a later task).
+    - Exporting confidence, is_vertical, or per-line rows. The human owner chose
+      one row per rectangle. Do not add columns beyond the specified header.
+    - JSON, XLSX or PDF output.
+    - Re-running OCR at export time.
+    - Resizing or moving existing rectangles.
+    - Mouse-wheel or keyboard zoom.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6 and no CSV
+      or Excel library may be added - the standard library `csv` module is
+      sufficient.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+10. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [A] and [E] first (the pure logic and its
+      tests), then [B], then [C], then [D].
+    - If this instruction contradicts the actual state of the code, do not guess.
+      Stop and report the contradiction.
+
+--------------------------------------------------------------------------------
+11. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[F] to how you satisfied it.
+    2. The exact signatures of every function in custom_gui/exporter.py.
+    3. A real sample of the generated CSV and TXT for two regions with Japanese
+       text, pasted verbatim.
+    4. How you verified the UTF-8 BOM is present.
+    5. The list of changed files and the reason for each change.
+    6. The full output of `python -m pytest tests/ -v`.
+    7. Anything that cannot be verified without a GUI, stated explicitly, so a
+       human can check it manually.
+    8. Open questions or compromises. Write "none" if there are none.
