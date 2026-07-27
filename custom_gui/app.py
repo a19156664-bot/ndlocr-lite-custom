@@ -5,7 +5,7 @@ from custom_gui.selection import SelectionContainer, calculate_normalized_bbox
 from custom_gui.ocr_bridge import run_ocr_and_parse
 from custom_gui.region_filter import filter_lines_by_region
 from custom_gui.text_assembler import assemble_text
-from custom_gui.exporter import build_export_rows, rows_to_csv_text, rows_to_txt_text
+from custom_gui.exporter import build_export_rows, build_export_rows_multi, rows_to_csv_text, rows_to_txt_text
 import os
 from enum import Enum, auto
 
@@ -90,13 +90,17 @@ class SelectableImageViewer(ImageViewer):
         self.controls_row.controls.insert(0, self.btn_prev)
         self.controls_row.controls.insert(0, self.btn_open_folder)
 
-        self.export_button = ft.IconButton(
+        self.export_button = ft.PopupMenuButton(
             icon=ft.Icons.SAVE,
             tooltip="Export Results",
-            on_click=self._on_export_click
+            items=[
+                ft.PopupMenuItem(text="Current image only", on_click=lambda e: self._start_export("current")),
+                ft.PopupMenuItem(text="All images", on_click=lambda e: self._start_export("all")),
+            ]
         )
         self.controls_row.controls.append(self.export_button)
         
+        self._export_scope = "current"
         self._file_picker_mode = "save"
         self.file_picker = ft.FilePicker(on_result=self._on_file_picker_result)
         # The file_picker will be added to page.overlay when start_ocr or main runs,
@@ -170,6 +174,8 @@ class SelectableImageViewer(ImageViewer):
                 width=self.img_w * self.zoom_scale,
                 height=self.img_h * self.zoom_scale,
             )
+            if not hasattr(self, 'stack'):
+                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector])
             self.image_container.content = self.stack
         
         # Override overall layout again with status
@@ -318,6 +324,8 @@ class SelectableImageViewer(ImageViewer):
         if self.ocr_error:
             self.image_container.content = ft.Text(self.ocr_error, color=ft.Colors.RED, weight=ft.FontWeight.BOLD)
         else:
+            if not hasattr(self, 'stack'):
+                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector])
             self.image_container.content = self.stack
             
         self.btn_prev.disabled = not self.sequence.has_prev()
@@ -339,17 +347,58 @@ class SelectableImageViewer(ImageViewer):
         if self.ocr_state == OcrState.IDLE and self.page:
             self.start_ocr(self.page)
 
-    def _on_export_click(self, e):
-        rects = self.selection_container.get_all()
-        if not rects:
-            self.latest_region_info = "Nothing to export"
-            self._update_status()
-            return
+    def _collect_all_export_pages(self):
+        pages = []
+        skipped = 0
+        regions_count = 0
+        if hasattr(self.sequence, '_paths'):
+            paths = self.sequence._paths
+        else:
+            paths = []
+        
+        for img_path in paths:
+            state = self.image_states.get(img_path)
+            if not state:
+                continue
+            rects = state.get("selections").get_all()
+            if not rects:
+                continue
+            if state.get("ocr_state") != OcrState.DONE:
+                skipped += 1
+                continue
             
-        if self.ocr_state != OcrState.DONE:
-            self.latest_region_info = "OCR not finished - cannot export yet"
-            self._update_status()
-            return
+            pages.append({
+                "image_name": img_path,
+                "rects": rects,
+                "ocr_results": state.get("ocr_results", []),
+                "edited_texts": state.get("edits", {})
+            })
+            regions_count += len(rects)
+            
+        return pages, skipped, regions_count
+
+    def _start_export(self, scope):
+        self._export_scope = scope
+        if scope == "current":
+            rects = self.selection_container.get_all()
+            if not rects:
+                self.latest_region_info = "Nothing to export"
+                self._update_status()
+                return
+            if self.ocr_state != OcrState.DONE:
+                self.latest_region_info = "OCR not finished - cannot export yet"
+                self._update_status()
+                return
+        elif scope == "all":
+            pages, skipped, regions_count = self._collect_all_export_pages()
+            if not pages and skipped == 0:
+                self.latest_region_info = "Nothing to export"
+                self._update_status()
+                return
+            if not pages and skipped > 0:
+                self.latest_region_info = f"Nothing to export ({skipped} skipped: OCR not finished)"
+                self._update_status()
+                return
             
         default_filename = f"{os.path.splitext(os.path.basename(self.image_src))[0]}.csv"
         
@@ -390,8 +439,19 @@ class SelectableImageViewer(ImageViewer):
             else:
                 path_txt = f"{os.path.splitext(path_csv)[0]}.txt"
 
-            rects = self.selection_container.get_all()
-            rows = build_export_rows(self.image_src, rects, self.ocr_results, edited_texts=self.edits)
+            if self._export_scope == "current":
+                rects = self.selection_container.get_all()
+                rows = build_export_rows(self.image_src, rects, self.ocr_results, edited_texts=self.edits)
+                num_regions = len(rects)
+                success_msg = f"Exported {num_regions} regions to {os.path.basename(path_csv)} / {os.path.basename(path_txt)}"
+            else:
+                pages, skipped, regions_count = self._collect_all_export_pages()
+                rows = build_export_rows_multi(pages)
+                num_images = len(pages)
+                if skipped > 0:
+                    success_msg = f"Exported {regions_count} regions from {num_images} images ({skipped} skipped: OCR not finished)"
+                else:
+                    success_msg = f"Exported {regions_count} regions from {num_images} images"
             
             csv_text = rows_to_csv_text(rows)
             txt_text = rows_to_txt_text(rows)
@@ -404,7 +464,7 @@ class SelectableImageViewer(ImageViewer):
             with open(path_txt, "w", encoding="utf-8") as f:
                 f.write(txt_text)
                 
-            self.latest_region_info = f"Exported {len(rects)} regions to {os.path.basename(path_csv)} / {os.path.basename(path_txt)}"
+            self.latest_region_info = success_msg
         except Exception as ex:
             self.latest_region_info = f"Export failed: {str(ex)}"
             
