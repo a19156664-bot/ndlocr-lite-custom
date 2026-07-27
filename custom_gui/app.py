@@ -4,6 +4,7 @@ from custom_gui.selection import SelectionContainer, calculate_normalized_bbox
 from custom_gui.ocr_bridge import run_ocr_and_parse
 from custom_gui.region_filter import filter_lines_by_region
 from custom_gui.text_assembler import assemble_text
+from custom_gui.exporter import build_export_rows, rows_to_csv_text, rows_to_txt_text
 import os
 from enum import Enum, auto
 
@@ -48,6 +49,18 @@ class SelectableImageViewer(ImageViewer):
             on_change=self._on_mode_change
         )
         self.controls_row.controls.append(self.mode_toggle)
+        
+        self.export_button = ft.IconButton(
+            icon=ft.Icons.SAVE,
+            tooltip="Export Results",
+            on_click=self._on_export_click
+        )
+        self.controls_row.controls.append(self.export_button)
+        
+        self.file_picker = ft.FilePicker(on_result=self._on_file_picker_result)
+        # The file_picker will be added to page.overlay when start_ocr or main runs,
+        # but to be safe, we'll try to add it when the component is mounted (using did_mount) 
+        # or we can rely on main() to add it. Let's add an explicit page attachment.
         
         # We overlay rectangles on top of the image container using a Stack
         self.highlight_layer = ft.Stack(
@@ -140,6 +153,13 @@ class SelectableImageViewer(ImageViewer):
 
 
 
+    def did_mount(self):
+        super().did_mount()
+        if self.page:
+            if self.file_picker not in self.page.overlay:
+                self.page.overlay.append(self.file_picker)
+                self.page.update()
+
     def start_ocr(self, page: ft.Page):
         if self.ocr_state == OcrState.ERROR:
             return
@@ -190,6 +210,72 @@ class SelectableImageViewer(ImageViewer):
             self.status_text.value = self._get_status_message()
         if self.page:
             self.update()
+
+    def _on_export_click(self, e):
+        rects = self.selection_container.get_all()
+        if not rects:
+            self.latest_region_info = "Nothing to export"
+            self._update_status()
+            return
+            
+        if self.ocr_state != OcrState.DONE:
+            self.latest_region_info = "OCR not finished - cannot export yet"
+            self._update_status()
+            return
+            
+        default_filename = f"{os.path.splitext(os.path.basename(self.image_src))[0]}.csv"
+        
+        if self.page:
+            self.file_picker.save_file(
+                dialog_title="Export OCR Results",
+                file_name=default_filename,
+                allowed_extensions=["csv", "txt"]
+            )
+
+    def _on_file_picker_result(self, e: ft.FilePickerResultEvent):
+        if not e.path:
+            # User canceled
+            return
+            
+        try:
+            path_csv = e.path
+            if not path_csv.lower().endswith(".csv"):
+                # If they didn't add extension or added .txt, base it correctly
+                base, ext = os.path.splitext(path_csv)
+                if ext.lower() == ".txt":
+                    path_csv = f"{base}.csv"
+                    path_txt = e.path
+                else:
+                    path_csv = f"{path_csv}.csv"
+                    path_txt = f"{base}.txt"
+            else:
+                path_txt = f"{os.path.splitext(path_csv)[0]}.txt"
+
+            rects = self.selection_container.get_all()
+            rows = build_export_rows(self.image_src, rects, self.ocr_results)
+            
+            csv_text = rows_to_csv_text(rows)
+            txt_text = rows_to_txt_text(rows)
+            
+            # Write CSV with BOM
+            with open(path_csv, "w", encoding="utf-8-sig", newline="") as f:
+                f.write(csv_text)
+                
+            # Write TXT
+            with open(path_txt, "w", encoding="utf-8") as f:
+                f.write(txt_text)
+                
+            self.latest_region_info = f"Exported {len(rects)} regions to {os.path.basename(path_csv)} / {os.path.basename(path_txt)}"
+        except Exception as ex:
+            self.latest_region_info = f"Export failed: {str(ex)}"
+            
+        self._update_status()
+
+    def _update_status(self):
+        if hasattr(self, 'status_text'):
+            self.status_text.value = self._get_status_message()
+            if self.page:
+                self.status_text.update()
 
     def _get_status_message(self):
         filename = os.path.basename(self.image_src)
