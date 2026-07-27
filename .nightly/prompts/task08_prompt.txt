@@ -1,0 +1,206 @@
+Task 08: [FIX] Rebuild the app layout so that resize, zoom, and highlight rendering actually work
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. PURPOSE AND BACKGROUND
+--------------------------------------------------------------------------------
+This project is a fork of NDLOCR-Lite. It adds a feature: the user drags a
+rectangle on a page image, and only the OCR text inside that rectangle is shown.
+Upstream code must never be modified; all work happens in custom_gui/ and tests/.
+
+The application was tested on a real machine. Three defects remain.
+
+  (Defect 1) The image does NOT fill the window. It stays small even when the
+             window is maximized. The "Zoom In" and "Zoom Out" buttons have no
+             visible effect at all.
+  (Defect 2) Selected OCR lines are NOT highlighted in yellow on the image.
+  (Defect 3) Resizing the window does not change anything on screen.
+
+Working correctly (DO NOT BREAK THESE):
+  - Dragging creates a red rectangle that turns into a confirmed blue rectangle.
+  - The "Region 1" entry appears in the right-hand Selections panel.
+  - The delete (trash) button removes a region correctly.
+
+--------------------------------------------------------------------------------
+2. DIAGNOSIS ALREADY COMPLETED BY THE COMMANDER - DO NOT RE-INVESTIGATE THIS
+--------------------------------------------------------------------------------
+The core logic was executed headlessly (without any GUI) against
+resource/digidepo_2531162_0024.jpg. Results:
+
+    run_ocr_and_parse()                 -> 26 lines detected
+    filter_lines_by_region() with a
+      rectangle over the right-hand page-> 15 lines returned (correct)
+    filter_lines_by_region() with the
+      whole image (0,0,2048,1446)       -> 26 lines returned (correct)
+    calculate_normalized_bbox() round trip -> exact match
+
+CONCLUSION: custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+custom_gui/selection.py and the three pure functions in custom_gui/viewer.py
+are CORRECT. Every remaining defect is in the rendering / layout code.
+DO NOT modify the filtering, OCR, or coordinate math to "fix" these defects.
+
+Additional measured evidence for Defect 1 and 3:
+  - The image rendered at 452 px wide on screen.
+  - 452 px implies win_w == 452, which implies page.width was about 752 at the
+    moment main() ran.
+  - The actual window was 1912 px wide (maximized).
+  => page.on_resized is registered but has no effective result on screen.
+     The viewer keeps using the stale startup size.
+
+Likely root cause to address (verify it yourself before implementing):
+In flet, mutating a child control's width/height and then calling
+`child.update()` does not necessarily trigger a re-layout of its ancestors when
+those ancestors have hard-coded pixel width/height. The current design gives
+fixed width/height to image_container, stack, highlight_layer, rects_layer and
+gesture_detector, so the layout never reflows.
+
+--------------------------------------------------------------------------------
+3. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] Layout must be driven by the available space, not by hard-coded pixels.
+    - Restructure the layout in custom_gui/app.py (and custom_gui/viewer.py if
+      required) so the image area grows and shrinks with the window.
+      Use flet's `expand` / layout system rather than fixed pixel sizes for the
+      containers wherever possible.
+    - On startup with a maximized window, the image must be rendered as large as
+      the available image area allows, preserving aspect ratio.
+    - The right-hand Selections panel must keep a stable width (about 300 px)
+      and must not overlap the image area.
+
+[B] Window resize must visibly work.
+    - Resizing or maximizing/restoring the window must immediately re-render the
+      image at the new fit scale.
+    - Confirmed selection rectangles and yellow highlights must be redrawn at the
+      correct positions after the resize.
+    - Make sure whatever update call you use actually refreshes the UI
+      (for example calling page.update() or self.update() rather than only
+      updating a leaf control).
+
+[C] Zoom In / Zoom Out / Fit must visibly work.
+    - Clicking "Zoom In" must visibly enlarge the image; "Zoom Out" must shrink
+      it; "Fit" must return to the fit-to-area scale.
+    - Confirmed rectangles and highlights must stay aligned with the image
+      content at every zoom level.
+    - When the image is larger than the visible area, the user must be able to
+      see the rest of it (for example by making the image area scrollable).
+
+[D] Yellow highlights must be rendered.
+    - After a rectangle is confirmed, every OCR line selected by
+      filter_lines_by_region must be drawn as a semi-transparent yellow overlay
+      at the correct position on the image.
+    - The highlight overlay must be visible, i.e. it must not be hidden behind
+      the image or behind another layer. Check the z-order of the Stack children.
+    - The extracted text must appear under the "Region N" heading in the
+      Selections panel.
+
+[E] Failures must be visible, never silent.
+    - custom_gui/app.py currently does `if os.path.exists(image_src):` before
+      running OCR. If the path is wrong, ocr_results silently stays empty and the
+      user sees a working UI with no text and no highlights, with no explanation.
+      Replace this silent behaviour: if the image file cannot be found, or if OCR
+      fails, display a clear error message inside the application window.
+    - Add a small status bar (a single ft.Text line is enough) that always shows:
+        * the source image file name
+        * the image pixel size (width x height)
+        * the current scale, formatted to 3 decimals
+        * the number of OCR lines loaded
+        * for the most recently confirmed region: its bbox in original image
+          coordinates, and how many lines were matched
+      This status bar is a permanent diagnostic aid. It lets a human confirm at a
+      glance whether OCR ran and whether the coordinate mapping is sane.
+
+[F] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely.
+    - The three pure functions in custom_gui/viewer.py
+        original_to_display / display_to_original / calculate_fit_scale
+      MUST keep their exact current signatures and formulas. Existing tests
+      depend on them.
+    - Add `tests/test_app_structure.py` that verifies, WITHOUT starting a GUI,
+      by static analysis of custom_gui/app.py source (use the `ast` module):
+        (a) the string literal "https://" does not appear anywhere in
+            custom_gui/app.py (no external network dependency)
+        (b) a call to `page.update` or `self.update` exists inside the resize
+            handler function and inside the zoom handler functions
+            (this guards against the "value changed but screen not refreshed"
+             class of bug that caused Defect 1 and 3)
+      If a check cannot be expressed reliably with ast, implement it as a
+      source-text check instead, and explain the choice in a comment.
+
+--------------------------------------------------------------------------------
+4. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/app.py
+    custom_gui/viewer.py      (layout/rendering only - see the restriction in [F])
+    tests/test_app_structure.py   (new file)
+
+--------------------------------------------------------------------------------
+5. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py     (DO NOT MODIFY)
+    tests/test_smoke.py, tests/test_viewer.py, tests/test_ocr_bridge.py,
+    tests/test_selection.py, tests/test_region_filter.py,
+    tests/test_text_assembler.py, tests/test_vertical_order.py,
+    tests/test_flet_constants.py                              (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+6. EXISTING UNIT TEST PROTECTION
+--------------------------------------------------------------------------------
+    - Do NOT delete, skip, or change the expectations of any existing test.
+    - If an existing test fails, do NOT edit the test. Stop and report the
+      failure and its cause.
+
+--------------------------------------------------------------------------------
+7. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Making OCR asynchronous or adding a progress indicator (separate task).
+      Blocking the UI during startup OCR is acceptable for now.
+    - Resizing or moving existing rectangles (separate task).
+    - A file picker dialog (separate task).
+    - txt / CSV export, PDF support, folder batch processing.
+    - Changing OCR, filtering, or text assembly logic.
+    - Adding or upgrading dependencies.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+8. HINTS
+--------------------------------------------------------------------------------
+    - flet version is pinned to 0.27.6. Use ft.Colors / ft.Icons (capitalised);
+      the lowercase ft.colors / ft.icons are deprecated and
+      tests/test_flet_constants.py will fail if you reference a constant that
+      does not exist.
+    - page.width / page.height may not be reliable at the very first moment
+      main() runs. Prefer a layout that fills the available space automatically
+      over one that reads pixel numbers at startup.
+    - Highlights are drawn from line["bbox"], which is in ORIGINAL image pixel
+      coordinates. Convert with original_to_display using the current scale and
+      offsets before drawing.
+
+--------------------------------------------------------------------------------
+9. FAILSAFE
+--------------------------------------------------------------------------------
+    - If you cannot satisfy a condition, do NOT invent a workaround. Stop, keep
+      what already works, and report exactly what blocked you.
+    - Priority order if you run out of time: [D] and [E] first, then [B] and [C],
+      then [A]. Highlight rendering and visible error reporting matter most.
+    - If this instruction contradicts the actual state of the code on master,
+      do not guess. Stop and report the contradiction.
+
+--------------------------------------------------------------------------------
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[F] to how you satisfied it.
+    2. The list of changed files and the reason for each change.
+    3. The full output of `python -m pytest tests/ -v`.
+    4. The specific root cause you found for each of Defect 1, 2 and 3, and the
+       exact code change that fixes it.
+    5. Anything you could not verify without a GUI, stated explicitly so a human
+       can check it manually.
+    6. Open questions or compromises. Write "none" if there are none.
