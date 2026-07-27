@@ -1,0 +1,95 @@
+Task 04: [NEW] 矩形ドラッグ選択UI（複数矩形の保持）
+
+本リポジトリのルートにある AGENTS.md（プロジェクト憲法）を必ず読み、その規約に従って作業すること。
+
+1. 目的・背景 (Purpose & Background):
+本プロジェクトは NDLOCR-Lite を fork し、「マウスで矩形範囲を選択して、その範囲だけOCR結果を取り出す」
+機能を追加するものである。上流コードは一切変更せず custom_gui/ にのみ実装する（C方式）。
+
+本タスクでは、ユーザーが画像上でマウスをドラッグして矩形範囲を選択し、
+それを**複数保持できる**データ構造とUIを実装する。
+
+【重要】1つの画像に対して複数の矩形を保持することが確定要件である。
+単一矩形を前提とした実装を行い、後から複数対応へ作り直すことを固く禁止する。
+最初からリスト構造で設計すること。
+
+2. 既存コードの契約（master に実装済み。変更禁止）:
+`custom_gui/viewer.py` に以下の純粋関数が既に存在する。本タスクではこれを利用すること。
+
+    def original_to_display(x: float, y: float, scale: float,
+                            offset_x: float = 0.0, offset_y: float = 0.0) -> Tuple[float, float]
+        # 原画像座標 → 表示座標。戻り値は (x * scale + offset_x, y * scale + offset_y)
+
+    def display_to_original(x: float, y: float, scale: float,
+                            offset_x: float = 0.0, offset_y: float = 0.0) -> Tuple[float, float]
+        # 表示座標 → 原画像座標。戻り値は ((x - offset_x) / scale, (y - offset_y) / scale)
+
+    def calculate_fit_scale(img_w: float, img_h: float,
+                            win_w: float, win_h: float) -> float
+
+3. 完了条件 (Definition of Done):
+   - `custom_gui/selection.py` を新規作成し、選択矩形を表すデータ構造と、
+     それを複数保持・管理するコンテナを実装すること。
+     各矩形は以下を持つこと:
+        rect_id : 一意の識別子（int または str）
+        bbox    : (x1, y1, x2, y2) の **原画像座標**。x1 < x2 かつ y1 < y2 に正規化済み
+        label   : 表示用のラベル文字列（省略時は自動採番でよい）
+   - 矩形の追加・取得（全件）・IDによる削除ができること。
+   - ドラッグ開始点と終了点（**表示座標**）と scale / offset を受け取り、
+     **原画像座標に正規化された bbox** を返す純粋関数を実装すること。
+     この関数は以下の2点を必ず処理すること:
+        (a) 右下→左上、左下→右上など**どの方向にドラッグしても** x1 < x2, y1 < y2 になるよう正規化する
+        (b) 画像の範囲（0 <= x <= img_w, 0 <= y <= img_h）を超える座標は画像内にクリップする
+   - `custom_gui/app.py` または既存の viewer と組み合わせ、
+     flet 上で画像にマウスドラッグすると矩形が描画され、確定できるUIを実装すること。
+   - `tests/test_selection.py` を新規作成し、`python -m pytest tests/ -v` が全件グリーンになること。
+     テストには以下を**具体的な数値**で含めること（性質の検証ではなく、入力と期待値を直書きすること）:
+        (a) 表示座標(200, 400) を scale=2.0, offset=(0,0) で変換すると原画像座標(100, 200) になること
+        (b) 表示座標(250, 370) を scale=2.0, offset=(50,-30) で変換すると原画像座標(100, 200) になること
+        (c) 終了点が開始点より左上のドラッグ（例: 開始(300,300) → 終了(100,100)）でも
+            bbox が (100, 100, 300, 300) に正規化されること
+        (d) 画像サイズ 500x500 に対し、開始(-50,-50) → 終了(600,600) のドラッグが
+            bbox (0, 0, 500, 500) にクリップされること
+        (e) 矩形を3つ追加すると3件保持され、中央の1件をIDで削除すると残り2件になり、
+            残った矩形のIDが正しいこと
+
+4. 変更許可スコープ (Allowed Scope / Whitelist):
+   - `custom_gui/selection.py`（新規）
+   - `custom_gui/app.py`（新規。UIの組み立てが必要な場合のみ）
+   - `tests/test_selection.py`（新規）
+
+5. 変更禁止スコープ (Prohibited Scope / Blacklist):
+   - `custom_gui/viewer.py`（既存。読み取り・import のみ可。**変更禁止**）
+   - `custom_gui/ocr_bridge.py`（別タスクが担当中。**変更禁止**）
+   - `tests/test_smoke.py`, `tests/test_viewer.py`, `tests/test_ocr_bridge.py`（既存テスト。**変更禁止**）
+   - `src/**`, `ndlocr-lite-gui/**`, `train/**`, `resource/**`
+   - `LICENCE`, `LICENCE_DEPENDENCEIES`, `README.md`
+   - `pyproject.toml`, `requirements.txt`
+   - `.github/**`, `.nightly/**`, `.agents/**`, `scripts/**`
+   - `AGENTS.md`, `CLAUDE.md`, `task_template.md`
+
+6. 既存ユニットテストの絶対保護:
+   - 既存テスト3ファイルの削除・スキップ・期待値変更を固く禁止する。
+   - 既存テストが失敗する場合、テストコードを修正せず、失敗内容と原因を報告して停止すること。
+
+7. 今回やらないこと (Out of Scope):
+   - OCR の実行・呼び出し（Task 02 で実装済み。本タスクでは触れない）
+   - 矩形とOCR結果の突き合わせ・フィルタ処理（Task 05 が担当）
+   - 結果テキストの表示・ハイライト（Task 06 が担当）
+   - 矩形の編集（リサイズ・移動）UI（Task 07 が担当。本タスクは追加と削除のみ）
+   - viewer.py のリファクタリング・改善
+   - 依存パッケージの追加
+   - 国立国会図書館の著作権表示・クレジット・ライセンス条項の削除、改変、移動
+
+8. 詰まった場合の指示 (Failsafe):
+   - 完了条件を満たせない障害に遭遇した場合、回避策を発明せず、
+     できた部分までで作業を止め、障害の内容を報告すること。
+   - flet のドラッグ操作のGUI自動テストが困難な場合、GUI部分はテスト対象外とし、
+     座標計算・矩形管理の純粋関数のみをテスト対象として構わない（その旨を報告すること）。
+   - 上記2の契約と master の実態が食い違う場合、推測で実装せず報告して停止すること。
+
+9. 提出時の説明に含めること:
+   1. 完了条件との対応表（各条件を満たした方法）
+   2. 変更ファイル一覧と各変更の理由
+   3. `python -m pytest tests/ -v` の実行結果
+   4. 未確定事項・妥協した点（なければ「なし」と明記）
