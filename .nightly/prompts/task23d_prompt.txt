@@ -1,0 +1,196 @@
+Task 23d: [NEW] Let the user actually trigger the all-images export
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. WHAT IS MISSING
+--------------------------------------------------------------------------------
+Task 23c added and tested this pure function in `custom_gui/exporter.py`:
+
+        def build_export_rows_multi(pages: list) -> list
+
+It works and it is covered by tests/test_export_multi.py. But NOTHING in
+`custom_gui/app.py` ever calls it, so a user cannot reach the feature at all.
+The Export button still writes only the image currently on screen.
+
+This task is small and narrow: WIRE IT UP. Do not redesign the exporter, do not
+change its logic, and do not touch its tests.
+
+--------------------------------------------------------------------------------
+2. CURRENT CODE CONTRACT (on master - use it, do not change it)
+--------------------------------------------------------------------------------
+custom_gui/exporter.py:
+
+    build_export_rows(image_name, rects, ocr_results, edited_texts=None) -> List[dict]
+    build_export_rows_multi(pages) -> List[dict]
+        # `pages` is a list. Each entry is EITHER a dict:
+        #     {"image_name": str, "rects": list,
+        #      "ocr_results": list, "edited_texts": dict or None}
+        # OR a tuple (image_name, rects, ocr_results, edited_texts).
+        # Rows come out in the order the pages are given, and within a page in
+        # rectangle order. Pages with NO rectangles contribute no rows.
+    rows_to_csv_text(rows) -> str
+        # header: image_name,region_id,x1,y1,x2,y2,line_count,text
+    rows_to_txt_text(rows) -> str
+        # blocks of "=== <image_name> / Region <id> ==="
+
+custom_gui/app.py, class SelectableImageViewer:
+
+    self.image_src            path of the image on screen
+    self.sequence             ImageSequence; .count, .index, .goto(i), .current()
+    self.image_states         dict keyed by image path, each value a dict:
+                                "selections"  -> SelectionContainer
+                                "ocr_state"   -> OcrState
+                                "ocr_results" -> list of OCR line dicts
+                                "ocr_error"   -> str or None
+                                "edits"       -> {rect_id: str}
+    self.selection_container / self.ocr_results / self.ocr_state / self.edits
+                              views onto the CURRENT image's entry
+    self.export_button        ft.IconButton(icon=ft.Icons.SAVE)
+    self.file_picker          ft.FilePicker, already in page.overlay
+    self._file_picker_mode    currently either "save" or "folder"
+    self.latest_region_info   str shown after "Last:" in the status bar
+    _on_export_click(e)
+    _on_file_picker_result(e) branches on self._file_picker_mode
+    _update_status()
+
+    class OcrState(Enum): IDLE / RUNNING / DONE / ERROR
+
+The existing current-image export already handles: nothing selected, OCR not
+finished, dialog cancelled, and write failure. Read that code and follow the same
+shape.
+
+--------------------------------------------------------------------------------
+3. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] The user can choose the scope of the export.
+    - Pressing Export offers two choices:
+          "Current image only"   - exactly today's behaviour, unchanged
+          "All images"           - every image that has rectangles
+    - Use whatever obvious control you prefer: an ft.AlertDialog with two
+      buttons, or a second toolbar button, or a dropdown next to Export. It must
+      be visible and self-explanatory in the UI.
+    - A user who wants today's behaviour must still be able to get it. Do not
+      silently repurpose the existing button.
+
+[B] "All images" collects from self.image_states.
+    - Build the `pages` list in SEQUENCE ORDER, i.e. the order of
+      `self.sequence`, not Python dict order, so the output follows page order.
+    - For each image pass its own rects (`selections.get_all()`), its own
+      `ocr_results` and its own `edits`.
+    - Use `build_export_rows_multi`. Do not reimplement the aggregation.
+    - Write BOTH files from the single chosen path, exactly as the current-image
+      export does: `result.csv` plus `result.txt`.
+
+[C] Guard rails - none of these may crash.
+    - No image has any rectangle: status bar says "Nothing to export" and NOTHING
+      is written.
+    - Images whose `ocr_state` is not DONE are EXCLUDED from the output, and the
+      status bar reports how many were skipped, for example:
+          "Exported 7 regions from 3 images (2 skipped: OCR not finished)"
+      Do NOT wait for OCR and do NOT start OCR for images the user never opened.
+    - On success with nothing skipped, the message states regions AND images,
+      for example "Exported 7 regions from 3 images".
+    - Dialog cancelled: do nothing, no error.
+    - Write failure: catch it, show the reason in the status bar, do not crash.
+
+[D] Encoding is unchanged and still mandatory.
+    CSV with encoding="utf-8-sig" (UTF-8 WITH BOM, so Japanese Excel does not
+    produce mojibake), TXT with encoding="utf-8", CSV opened with newline="" and
+    written with the standard library `csv` module.
+
+[E] Tests - `tests/test_export_scope.py` (new file), no GUI, no real OCR.
+    Put the page-collection logic in a testable method or helper so it can be
+    called without clicking. Concrete assertions:
+      (a) Three images in sequence order a.jpg / b.jpg / c.jpg with 2 / 0 / 1
+          rectangles, all with ocr_state DONE: the collected `pages` yields rows
+          whose image_name values are exactly ["a.jpg", "a.jpg", "c.jpg"].
+      (b) The same three images but b.jpg has 2 rectangles and ocr_state RUNNING:
+          b.jpg contributes NO rows, and your skipped counter equals exactly 1.
+      (c) An edit registered for a.jpg rect "1" appears in that row, and the
+          c.jpg rect "1" row is unaffected - assert both exact strings.
+      (d) No image has any rectangle: the collected pages produce ZERO rows.
+      (e) Sequence order is respected: build the image_states dict in a
+          DIFFERENT insertion order from the sequence, and assert the rows still
+          come out in sequence order. This is the regression guard for [B].
+
+[F] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely (66+ tests).
+    - Do NOT modify custom_gui/exporter.py. Its logic is finished and tested.
+    - Do NOT modify custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+      custom_gui/selection.py, custom_gui/text_assembler.py,
+      custom_gui/image_sequence.py, custom_gui/viewer.py.
+    - Do NOT modify ANY existing file under tests/. In particular
+      tests/test_flet_constants.py is a guard test: if it objects to your code,
+      CHANGE YOUR CODE. Never add an exemption to it. Note that a local variable
+      named `page` will collide with it - name yours something else.
+    - Everything a human has verified must keep working: rectangle selection,
+      the Select/Pan toggle, panning, yellow highlights, the "Region N" label
+      drawn OUTSIDE the rectangle, async OCR with its progress ring, the
+      current-image CSV/TXT export, folder loading, Prev/Next/Ctrl+N, and the
+      F2 / EDIT text correction with its revert button.
+    - Guard every `.update()` call on a control with `if self.page:`.
+    - NEVER use `self.image` or `self.scale` as attribute names.
+    - Do not run real OCR in your tests.
+    - Leave NO scratch or probe files anywhere in the repository. Check
+      `git status` before you finish. A previous task left three at the
+      repository root and the commander had to delete them.
+
+--------------------------------------------------------------------------------
+4. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/app.py
+    tests/test_export_scope.py      (new file)
+
+--------------------------------------------------------------------------------
+5. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/exporter.py                                    (DO NOT MODIFY)
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py,
+    custom_gui/viewer.py, custom_gui/image_sequence.py        (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+6. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Batch-OCRing images the user has not opened. OCR stays lazy.
+    - Applying one rectangle to every image.
+    - Persisting rectangles or edits to disk between sessions.
+    - JSON, XLSX or PDF output.
+    - Changing the CSV columns or the TXT block format.
+    - Resizing or moving existing rectangles.
+    - Mouse-wheel or keyboard zoom.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+7. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [B] and [E] first (collection logic and
+      its tests), then [A], then [C].
+
+--------------------------------------------------------------------------------
+8. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[F] to how you satisfied it.
+    2. Exactly how the user chooses between current-image and all-images export,
+       described as a click sequence a human can follow.
+    3. The name and signature of the method that collects the `pages` list.
+    4. How you guaranteed sequence order rather than dict order.
+    5. A real sample of the combined CSV for two images with Japanese text.
+    6. The output of `git status` showing no stray files.
+    7. The full output of `python -m pytest tests/ -v`.
+    8. Anything that cannot be verified without a GUI, stated explicitly.
+    9. Open questions or compromises. Write "none" if there are none.
