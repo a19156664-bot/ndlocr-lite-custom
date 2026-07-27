@@ -1,0 +1,314 @@
+Task 26: [NEW] Open PDFs - single page, multi page, and folders containing them
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. PURPOSE
+--------------------------------------------------------------------------------
+The user scans historical Japanese magazines. Their material arrives as PDFs as
+well as loose image files. Today the application only accepts
+.jpg/.jpeg/.png/.tif/.tiff, so PDFs cannot be opened at all.
+
+Required, all three cases:
+    - a single-page PDF
+    - a multi-page PDF
+    - a folder containing PDFs and/or image files, mixed
+
+--------------------------------------------------------------------------------
+2. THE ARCHITECTURE - DECIDED BY THE COMMANDER. DO NOT REDESIGN.
+--------------------------------------------------------------------------------
+Rasterise each PDF page to a PNG, then feed those PNGs into the EXISTING image
+pipeline. Everything downstream - ImageSequence, rectangle selection, the OCR
+bridge, per-image state, highlights, export - then works unchanged, and the
+displayed image is byte-for-byte the image the OCR ran on, so coordinates cannot
+drift.
+
+DO NOT use the upstream `src/ocr.py --sourcepdf` path. The commander checked it:
+`process_pdf_documents` renders pages internally for OCR but does NOT save the
+rendered images, so the GUI would still have to render them again for display,
+and a second JSON parsing path would be needed. That is duplicated work and a
+coordinate-mismatch risk. Ignore that flag entirely.
+
+RENDER LAZILY. Do not rasterise a whole PDF up front - a 200 page magazine at 300
+DPI would freeze the application for a long time. Instead:
+    1. When a PDF is opened, only COUNT its pages and compute the list of PNG
+       paths that WILL exist. Counting is cheap.
+    2. Render a page to PNG only when that page is actually about to be shown.
+    3. If the PNG already exists, reuse it - never render the same page twice.
+
+--------------------------------------------------------------------------------
+3. VERIFIED ENVIRONMENT - NO NEW DEPENDENCIES ARE NEEDED
+--------------------------------------------------------------------------------
+The commander verified that requirements.txt ALREADY contains:
+
+        pypdfium2==4.30.0        <- renders PDF pages
+        pypdf==6.4.0
+        reportlab==4.2.5         <- can CREATE a PDF, useful in your tests
+        pillow==12.1.1
+
+Do NOT add or upgrade any dependency. flet stays pinned at 0.27.6.
+
+Rendering, as used by upstream src/ocr.py (copy this approach):
+
+        import pypdfium2
+        doc = pypdfium2.PdfDocument(str(pdf_path))
+        page_count = len(doc)
+        scale = DPI / 72.0
+        pages = doc.render(pypdfium2.PdfBitmap.to_pil,
+                           page_indices=[page_index],
+                           scale=scale)
+        pil_image = next(iter(pages)).convert("RGB")
+        pil_image.save(png_path)
+        doc.close()
+
+RESOLUTION: 300 DPI, FIXED. The human owner chose this because early-Showa
+magazine body text is small and 150 DPI breaks it. Define it as a module-level
+constant, for example `RENDER_DPI = 300`. Do not add a UI control for it.
+
+--------------------------------------------------------------------------------
+4. CURRENT CODE CONTRACT (on master - use it, do not change it)
+--------------------------------------------------------------------------------
+custom_gui/image_sequence.py  (DO NOT MODIFY):
+    SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
+    list_images_in_folder(folder) -> List[str]
+        # supported images DIRECTLY inside folder, case-insensitive extension,
+        # sorted by file name, no recursion
+    class ImageSequence(paths)
+        .index .count .current() .has_next() .has_prev()
+        .next() .prev() .goto(i)          # clamps, does not wrap
+
+custom_gui/app.py, class SelectableImageViewer(ImageViewer):
+    self.image_src, self.img_w, self.img_h, self.zoom_scale
+    self.sequence                ImageSequence
+    self.image_states            dict keyed by image path:
+                                   "selections"  -> SelectionContainer
+                                   "ocr_state"   -> OcrState
+                                   "ocr_results" -> list of OCR line dicts
+                                   "ocr_error"   -> str or None
+                                   "edits"       -> {rect_id: str}
+    self.file_picker             ft.FilePicker already in page.overlay
+    self._file_picker_mode       currently "save" or "folder"
+    self.btn_open_folder / self.btn_prev / self.btn_next / self.export_button
+    self.controls_row            the toolbar Row
+    self.latest_region_info      shown after "Last:" in the status bar
+    _on_open_folder_click(e) / _on_file_picker_result(e) / _update_status()
+    _switch_image(path)          sets image_src, reads the size with Pillow,
+                                 resets zoom/offset, restores that image's state,
+                                 and starts OCR lazily if its state is IDLE
+    start_ocr(page)              runs OCR on a background thread
+    class OcrState(Enum): IDLE / RUNNING / DONE / ERROR
+
+Verified flet 0.27.6 API:
+    ft.FilePicker.pick_files(dialog_title=None, initial_directory=None,
+                             file_type=..., allowed_extensions=None,
+                             allow_multiple=False)          exists
+    ft.FilePicker.get_directory_path(...)                   exists
+    ft.Icons.PICTURE_AS_PDF / FOLDER_OPEN                   exist
+        (verify PICTURE_AS_PDF yourself before using it:
+         python -c "import flet as ft; print(hasattr(ft.Icons,'PICTURE_AS_PDF'))")
+
+NEVER use `self.image` or `self.scale` as attribute names. Both are reserved by
+flet and previously caused a fatal startup crash in this project.
+
+--------------------------------------------------------------------------------
+5. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] New module `custom_gui/pdf_loader.py`. It must NOT import flet.
+
+        RENDER_DPI = 300
+        PDF_EXTENSIONS = (".pdf",)
+
+        def list_pdfs_in_folder(folder) -> List[str]
+            # PDFs DIRECTLY inside folder, case-insensitive (.PDF counts),
+            # sorted by file name, NO recursion, [] when none
+
+        def plan_pdf_pages(pdf_path, cache_dir) -> List[Tuple[str, str, int]]
+            # Opens the PDF ONLY to count pages. Renders NOTHING.
+            # Returns, for each page, (png_path, pdf_path, page_index).
+            # png_path must live under cache_dir and be named so a human can
+            # trace it back, for example  <pdf stem>_p0003.png  (1-based page
+            # number, zero padded to 4). This name becomes the image_name column
+            # in the CSV export, so traceability depends on it.
+
+        def ensure_page_rendered(png_path, pdf_path, page_index) -> str
+            # Renders that single page at RENDER_DPI and writes png_path,
+            # ONLY if png_path does not already exist. Returns png_path.
+            # Creates parent directories as needed.
+
+        def build_source_list(folder, cache_dir) -> Tuple[List[str], Dict[str, Tuple[str, int]]]
+            # Combines images and PDFs found in `folder` into ONE ordered list
+            # of displayable paths, plus a registry mapping
+            #     png_path -> (pdf_path, page_index)
+            # for the PDF-derived entries only.
+            #
+            # ORDER, and you must document and test it:
+            #   sort ALL SOURCE FILES by file name, case-insensitively;
+            #   an image contributes itself;
+            #   a PDF contributes all of its pages, in page order, consecutively.
+            # So a folder with  b.jpg, a.pdf(3 pages), c.png  yields
+            #   a_p0001.png, a_p0002.png, a_p0003.png, b.jpg, c.png
+
+[B] Opening a folder handles PDFs too.
+    `_on_open_folder_click` / the "folder" branch of `_on_file_picker_result`
+    must use `build_source_list`, so a folder of images, a folder of PDFs, or a
+    mixed folder all work. A folder with neither must still report
+    "No images found in <folder>" and leave the current image alone.
+
+[C] A dedicated "Open PDF" button.
+    - Add it to `self.controls_row` (ft.Icons.PICTURE_AS_PDF, or another verified
+      icon) with a tooltip such as "PDFを開く".
+    - It calls `self.file_picker.pick_files` restricted to the pdf extension,
+      with `allow_multiple=True`.
+    - Selecting ONE PDF loads all of its pages as the sequence. Selecting several
+      loads all their pages, ordered by file name then page number.
+    - `self._file_picker_mode` currently distinguishes "save" from "folder". Add
+      a third mode for this. Do not break the other two.
+
+[D] Lazy rendering, wired into navigation.
+    - Keep the registry from [A] on the viewer, for example `self.pdf_page_map`.
+    - `_switch_image(path)` must call `ensure_page_rendered` BEFORE it tries to
+      read the image size or display it, whenever `path` is in the registry.
+    - A page already rendered is never rendered again.
+    - Opening a 200 page PDF must be effectively instant, because nothing is
+      rendered until a page is shown. State the measured open time in your
+      report.
+
+[E] The cache location.
+    - Render into a per-session temporary directory created with
+      `tempfile.mkdtemp(prefix="ndlocr_pdf_")`. Do NOT write next to the user's
+      PDFs and do NOT write into the repository.
+    - Create it once per viewer, not once per PDF.
+
+[F] Everything downstream keeps working on PDF pages.
+    A rendered page behaves exactly like any other image: rectangle selection,
+    async OCR with the progress ring, per-page rectangles and edits, the
+    Select/Pan toggle, the "Region N" label, F2 / EDIT correction, the
+    right-to-left button, Prev/Next/Ctrl+N, and CSV/TXT export for the current
+    page and for all pages. Do not special-case PDFs anywhere downstream.
+
+[G] Failures must not crash the application.
+    - A corrupt or unreadable PDF: report it in the status bar, for example
+      "Failed to open <name>: <reason>", and leave the current image displayed.
+    - An encrypted / password-protected PDF: same treatment. Do not prompt.
+    - A PDF with zero pages: contributes no entries; do not raise.
+    - A render failure on one page must not kill navigation: report it and keep
+      the application usable.
+
+[H] Tests - `tests/test_pdf_loader.py`, no GUI, no real OCR.
+    Build real PDFs inside the test with `reportlab` and pytest's `tmp_path`
+    fixture. Do not commit any PDF file to the repository.
+      (a) A 3 page PDF: `plan_pdf_pages` returns exactly 3 tuples, the png paths
+          end with _p0001.png / _p0002.png / _p0003.png, the page_index values
+          are 0,1,2 - assert the exact basenames - and assert that NO file was
+          created on disk by this call.
+      (b) A 1 page PDF returns exactly 1 tuple.
+      (c) `ensure_page_rendered` creates the file, and the created PNG opens with
+          Pillow and has plausible pixel dimensions for 300 DPI - for an A4 page
+          (595x842 pt) assert width and height are within a few pixels of
+          595*300/72 and 842*300/72. Assert the exact expected values you compute
+          and explain the tolerance you allow.
+      (d) Calling `ensure_page_rendered` twice does not re-render: record the
+          file's mtime after the first call, call again, assert the mtime is
+          unchanged.
+      (e) `list_pdfs_in_folder` on a folder containing a.pdf, B.PDF, notes.txt
+          and a sub-folder returns exactly 2 paths whose basenames are
+          ["B.PDF", "a.pdf"] or ["a.pdf", "B.PDF"] according to your documented
+          sort - assert the exact list your implementation produces and make sure
+          the sort is case-insensitive as specified.
+      (f) THE ORDERING TEST: a folder with b.jpg, a.pdf (3 pages) and c.png
+          yields exactly
+              ["a_p0001.png", "a_p0002.png", "a_p0003.png", "b.jpg", "c.png"]
+          as basenames. This is the regression guard for [A].
+      (g) The registry maps every PDF-derived png path to the right
+          (pdf_path, page_index), and contains NO entry for b.jpg or c.png.
+      (h) An empty folder returns ([], {}) and does not raise.
+      (i) A file that is not really a PDF (write b"not a pdf" to x.pdf):
+          `plan_pdf_pages` must raise a clear error OR return [] - decide, state
+          which, and assert it. It must not crash the interpreter.
+
+[I] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely (85+ tests).
+    - Do NOT modify custom_gui/image_sequence.py, custom_gui/ocr_bridge.py,
+      custom_gui/region_filter.py, custom_gui/selection.py,
+      custom_gui/text_assembler.py, custom_gui/viewer.py, custom_gui/rtl.py,
+      custom_gui/exporter.py.
+    - Do NOT modify ANY existing file under tests/. In particular
+      tests/test_flet_constants.py is a guard test: if it objects to your code,
+      CHANGE YOUR CODE. NEVER add an exemption to it. A local variable named
+      `page` WILL collide with it - and you will be tempted, because you are
+      working with PDF pages. Name yours `page_index`, `pdf_page` or similar.
+    - Guard every `.update()` call on a control with `if self.page:`.
+    - Do not run real OCR in your tests. The suite already takes about 95
+      seconds because tests/test_ocr_bridge.py runs real OCR deliberately; do
+      not touch that file and do not add more real OCR runs.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Two previous tasks left probe files at the
+      repository root and the commander had to delete them.
+
+--------------------------------------------------------------------------------
+6. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/pdf_loader.py     (new file)
+    custom_gui/app.py
+    tests/test_pdf_loader.py     (new file)
+
+--------------------------------------------------------------------------------
+7. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/image_sequence.py, custom_gui/exporter.py, custom_gui/rtl.py,
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py,
+    custom_gui/viewer.py                                      (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt                          (NO NEW DEPS)
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+8. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Extracting an existing text layer from a digital-born PDF. Always OCR the
+      rendered image, so behaviour is uniform.
+    - Writing a searchable text layer back into a PDF (upstream has
+      --pdf-output; that is a separate future task).
+    - A DPI selector in the UI. 300 is fixed.
+    - Pre-rendering or batch-OCRing a whole PDF in the background.
+    - Recursing into sub-folders.
+    - Thumbnails or a page preview strip.
+    - Deleting the temporary cache on exit (a later task may add cleanup).
+    - Rotating or deskewing pages.
+    - Adding or upgrading dependencies.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+9. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [A] and [H] first (the pure module and its
+      tests), then [D], then [B], then [C], then [G].
+    - Never leave the existing image-only behaviour broken. Opening a folder of
+      plain images must keep working exactly as it does today.
+
+--------------------------------------------------------------------------------
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[I] to how you satisfied it.
+    2. The exact public API of custom_gui/pdf_loader.py.
+    3. The documented ordering rule, and the output of the ordering test [H](f).
+    4. The measured time to OPEN a multi-page PDF (page count only, no render)
+       and the measured time to render ONE page at 300 DPI.
+    5. The pixel dimensions you measured for an A4 page at 300 DPI.
+    6. Your decision for [H](i) and why.
+    7. How `_file_picker_mode` distinguishes all three modes.
+    8. The list of changed files and the reason for each change.
+    9. The output of `git status` showing no stray files.
+   10. The full output of `python -m pytest tests/ -v`.
+   11. Anything that cannot be verified without a GUI, stated explicitly.
+   12. Open questions or compromises. Write "none" if there are none.
