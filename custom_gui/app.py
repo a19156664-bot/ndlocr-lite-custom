@@ -5,6 +5,24 @@ from custom_gui.ocr_bridge import run_ocr_and_parse
 from custom_gui.region_filter import filter_lines_by_region
 from custom_gui.text_assembler import assemble_text
 import os
+from enum import Enum, auto
+
+class OcrState(Enum):
+    IDLE = auto()
+    RUNNING = auto()
+    DONE = auto()
+    ERROR = auto()
+
+def get_ocr_status_text(state: OcrState, line_count: int = 0) -> str:
+    if state == OcrState.IDLE:
+        return "OCR pending..."
+    elif state == OcrState.RUNNING:
+        return "OCR processing..."
+    elif state == OcrState.ERROR:
+        return "OCR failed"
+    elif state == OcrState.DONE:
+        return f"Lines: {line_count}"
+    return ""
 
 class SelectableImageViewer(ImageViewer):
     def __init__(self, image_src: str, img_w: float, img_h: float, win_w: float, win_h: float, **kwargs):
@@ -18,10 +36,8 @@ class SelectableImageViewer(ImageViewer):
         
         self.mode_state = InteractionMode()
         
-        # Run OCR once and store results
         self.ocr_results = []
-        if os.path.exists(image_src):
-            self.ocr_results = run_ocr_and_parse(image_src)
+        self.ocr_state = OcrState.IDLE if os.path.exists(image_src) else OcrState.ERROR
             
         self.mode_toggle = ft.SegmentedButton(
             segments=[
@@ -84,6 +100,8 @@ class SelectableImageViewer(ImageViewer):
              pass
 
         self.status_text = ft.Text(self._get_status_message(), size=12, color=ft.Colors.BLACK54)
+        self.progress_ring = ft.ProgressRing(width=16, height=16, visible=False)
+        self.status_row = ft.Row([self.progress_ring, self.status_text], spacing=5)
         
         if self.ocr_error:
             self.image_container.content = ft.Text(self.ocr_error, color=ft.Colors.RED, weight=ft.FontWeight.BOLD)
@@ -113,13 +131,53 @@ class SelectableImageViewer(ImageViewer):
                 ], expand=False)
             ], expand=True),
             ft.Container(
-                content=self.status_text,
+                content=self.status_row,
                 bgcolor=ft.Colors.GREY_200,
                 padding=5,
                 alignment=ft.alignment.center_left,
             )
         ], expand=True)
 
+
+
+    def start_ocr(self, page: ft.Page):
+        if self.ocr_state == OcrState.ERROR:
+            return
+            
+        self.ocr_state = OcrState.RUNNING
+        self.progress_ring.visible = True
+        if hasattr(self, 'status_text'):
+            self.status_text.value = self._get_status_message()
+            
+        if self.page:
+            self.status_row.update()
+            
+        def _run_ocr():
+            try:
+                results = run_ocr_and_parse(self.image_src)
+                self._on_ocr_complete(results, None)
+            except Exception as e:
+                self._on_ocr_complete(None, str(e))
+                
+        page.run_thread(_run_ocr)
+        
+    def _on_ocr_complete(self, results, error):
+        self.progress_ring.visible = False
+        if error:
+            self.ocr_state = OcrState.ERROR
+            self.ocr_error = error
+        else:
+            self.ocr_state = OcrState.DONE
+            self.ocr_results = results
+            
+        if hasattr(self, 'status_text'):
+            self.status_text.value = self._get_status_message()
+            
+        if self.page:
+            self.status_row.update()
+            
+        # Reprocess selections if any were drawn before OCR finished
+        self._update_selections_ui()
 
 
     def _on_mode_change(self, e):
@@ -135,8 +193,9 @@ class SelectableImageViewer(ImageViewer):
 
     def _get_status_message(self):
         filename = os.path.basename(self.image_src)
+        ocr_status = get_ocr_status_text(self.ocr_state, len(self.ocr_results))
         return (f"File: {filename} | Size: {self.img_w}x{self.img_h} | Scale: {self.zoom_scale:.3f} | Mode: {self.mode_state.current} | "
-                f"Lines: {len(self.ocr_results)} | Last: {self.latest_region_info}")
+                f"{ocr_status} | Last: {self.latest_region_info}")
 
     def update_layout(self, win_w: float, win_h: float):
         available_w = max(100, win_w - 320)
@@ -305,10 +364,10 @@ class SelectableImageViewer(ImageViewer):
             
             self.selections_list.controls.append(item)
             
-        self.highlight_layer.update()
         if self.page:
+            self.highlight_layer.update()
             self.rects_layer.update()
-        self.selections_list.update()
+            self.selections_list.update()
 
 
     def _update_viewer(self):
@@ -349,6 +408,9 @@ def main(page: ft.Page):
     page.add(viewer)
     viewer.update_layout(page.width if page.width else 800, page.height if page.height else 600)
     page.update()
+    
+    # Start OCR in background thread after UI is drawn
+    viewer.start_ocr(page)
 
 if __name__ == "__main__":
     ft.app(target=main)
