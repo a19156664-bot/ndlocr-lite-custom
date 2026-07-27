@@ -6,6 +6,7 @@ from custom_gui.ocr_bridge import run_ocr_and_parse
 from custom_gui.region_filter import filter_lines_by_region
 from custom_gui.text_assembler import assemble_text
 from custom_gui.exporter import build_export_rows, build_export_rows_multi, rows_to_csv_text, rows_to_txt_text
+from custom_gui.rtl import convert_right_to_left
 import os
 from enum import Enum, auto
 
@@ -685,6 +686,18 @@ class SelectableImageViewer(ImageViewer):
             has_edit = rect.rect_id in self.edits
             display_text = self.edits[rect.rect_id] if has_edit else extracted_text
             label_suffix = " (edited)" if has_edit else ""
+
+            def rtl_rect(e, rid=rect.rect_id, current_text=display_text, orig_text=extracted_text):
+                if not current_text:
+                    return
+                converted = convert_right_to_left(current_text)
+                if converted == orig_text:
+                    if rid in self.edits:
+                        del self.edits[rid]
+                else:
+                    self.edits[rid] = converted
+                self._update_selections_ui()
+
             is_active = (self.active_region_id == rect.rect_id)
             is_editing = (self.editing_region_id == rect.rect_id)
 
@@ -705,7 +718,8 @@ class SelectableImageViewer(ImageViewer):
                 content_area = ft.Text(display_text, selectable=True)
                 
             buttons = [
-                ft.IconButton(icon=ft.Icons.EDIT, tooltip="Edit", on_click=edit_rect)
+                ft.IconButton(icon=ft.Icons.EDIT, tooltip="Edit", on_click=edit_rect),
+                ft.IconButton(icon=ft.Icons.SWAP_HORIZ, tooltip="右から変換", on_click=rtl_rect)
             ]
             if has_edit:
                 buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
