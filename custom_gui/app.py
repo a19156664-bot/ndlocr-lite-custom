@@ -1,6 +1,10 @@
 import flet as ft
 from custom_gui.viewer import ImageViewer, original_to_display
 from custom_gui.selection import SelectionContainer, calculate_normalized_bbox
+from custom_gui.ocr_bridge import run_ocr_and_parse
+from custom_gui.region_filter import filter_lines_by_region
+from custom_gui.text_assembler import assemble_text
+import os
 
 class SelectableImageViewer(ImageViewer):
     def __init__(self, image_src: str, img_w: float, img_h: float, win_w: float, win_h: float, **kwargs):
@@ -8,9 +12,21 @@ class SelectableImageViewer(ImageViewer):
         
         self.selection_container = SelectionContainer()
         self.drag_start_point = None
+        self.drag_current_point = None
         self.active_rect = None
+        self.drag_current_point = None
+        
+        # Run OCR once and store results
+        self.ocr_results = []
+        if os.path.exists(image_src):
+            self.ocr_results = run_ocr_and_parse(image_src)
         
         # We overlay rectangles on top of the image container using a Stack
+        self.highlight_layer = ft.Stack(
+            controls=[],
+            width=self.win_w,
+            height=self.win_h,
+        )
         self.rects_layer = ft.Stack(
             controls=[],
             width=self.win_w,
@@ -31,6 +47,7 @@ class SelectableImageViewer(ImageViewer):
         self.stack = ft.Stack(
             controls=[
                 self.image,
+                self.highlight_layer,
                 self.rects_layer,
                 self.gesture_detector
             ],
@@ -63,6 +80,7 @@ class SelectableImageViewer(ImageViewer):
     def _on_pan_start(self, e: ft.DragStartEvent):
         # Local coordinates within the stack
         self.drag_start_point = (e.local_x, e.local_y)
+        self.drag_current_point = None
         self.active_rect = ft.Container(
             border=ft.border.all(2, ft.colors.RED),
             bgcolor=ft.colors.with_opacity(0.2, ft.colors.RED),
@@ -92,6 +110,8 @@ class SelectableImageViewer(ImageViewer):
         self.active_rect.width = w
         self.active_rect.height = h
         
+        self.drag_current_point = (e.local_x, e.local_y)
+        
         self.active_rect.update()
 
     def _on_pan_end(self, e: ft.DragEndEvent):
@@ -99,16 +119,13 @@ class SelectableImageViewer(ImageViewer):
             return
             
         start_x, start_y = self.drag_start_point
-        
-        # In Flet, DragEndEvent doesn't easily give local_x, local_y, but we can compute from DragUpdate
-        # or we just grab the final position from active_rect
-        end_x = self.active_rect.left + self.active_rect.width if self.active_rect.left == start_x else self.active_rect.left
-        end_y = self.active_rect.top + self.active_rect.height if self.active_rect.top == start_y else self.active_rect.top
+        end_x, end_y = self.drag_current_point if self.drag_current_point else (start_x, start_y)
         
         if self.active_rect in self.rects_layer.controls:
             self.rects_layer.controls.remove(self.active_rect)
         self.active_rect = None
         self.drag_start_point = None
+        self.drag_current_point = None
         
         bbox = calculate_normalized_bbox(
             start_x, start_y, end_x, end_y,
@@ -125,6 +142,7 @@ class SelectableImageViewer(ImageViewer):
     def _update_selections_ui(self):
         # Update drawn rectangles
         self.rects_layer.controls.clear()
+        self.highlight_layer.controls.clear()
         self.selections_list.controls.clear()
         
         for rect in self.selection_container.get_all():
@@ -137,7 +155,7 @@ class SelectableImageViewer(ImageViewer):
             
             drawn_rect = ft.Container(
                 border=ft.border.all(2, ft.colors.BLUE),
-                bgcolor=ft.colors.with_opacity(0.2, ft.colors.BLUE),
+                bgcolor=ft.colors.transparent,
                 left=dx1,
                 top=dy1,
                 width=w,
@@ -146,17 +164,49 @@ class SelectableImageViewer(ImageViewer):
             )
             self.rects_layer.controls.append(drawn_rect)
             
-            # Update list
+            # 抽出対象の行をフィルタリングしてハイライト & テキスト生成
+            filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
+            extracted_text = assemble_text(filtered_lines)
+            
+            # ハイライト層に抽出行の矩形を描画
+            for line in filtered_lines:
+                lx1, ly1, lx2, ly2 = line["bbox"]
+                ldx1, ldy1 = original_to_display(lx1, ly1, self.scale, self.offset_x, self.offset_y)
+                ldx2, ldy2 = original_to_display(lx2, ly2, self.scale, self.offset_x, self.offset_y)
+                
+                # Selection Rectと区別するため黄色系の半透明塗りつぶし (borderなし)
+                highlight = ft.Container(
+                    bgcolor=ft.colors.with_opacity(0.4, ft.colors.YELLOW),
+                    left=ldx1,
+                    top=ldy1,
+                    width=ldx2 - ldx1,
+                    height=ldy2 - ldy1
+                )
+                self.highlight_layer.controls.append(highlight)
+            
+            # Update list (結果パネル)
             def delete_rect(e, rid=rect.rect_id):
                 self.selection_container.delete_by_id(rid)
                 self._update_selections_ui()
                 
-            item = ft.Row([
-                ft.Text(f"{rect.label}: ({x1:.1f}, {y1:.1f}) - ({x2:.1f}, {y2:.1f})"),
-                ft.IconButton(icon=ft.icons.DELETE, on_click=delete_rect)
+            item_content = ft.Column([
+                ft.Row([
+                    ft.Text(f"{rect.label}:", weight=ft.FontWeight.BOLD),
+                    ft.IconButton(icon=ft.icons.DELETE, on_click=delete_rect)
+                ]),
+                ft.Text(extracted_text, selectable=True)
             ])
+            
+            item = ft.Container(
+                content=item_content,
+                padding=10,
+                border=ft.border.all(1, ft.colors.OUTLINE),
+                border_radius=5
+            )
+            
             self.selections_list.controls.append(item)
             
+        self.highlight_layer.update()
         self.rects_layer.update()
         self.selections_list.update()
 
@@ -165,13 +215,15 @@ class SelectableImageViewer(ImageViewer):
         self._update_selections_ui()
 
 def main(page: ft.Page):
-    # Dummy image path and dimensions for testing
+    # Use repository bundled image for offline operation
+    image_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+    
     viewer = SelectableImageViewer(
-        image_src="https://picsum.photos/800/600",
-        img_w=800,
-        img_h=600,
-        win_w=600,
-        win_h=500
+        image_src=image_path,
+        img_w=2048,
+        img_h=1446,
+        win_w=800,
+        win_h=600
     )
     page.add(viewer)
 

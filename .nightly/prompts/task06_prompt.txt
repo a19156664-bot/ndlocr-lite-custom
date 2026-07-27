@@ -1,0 +1,134 @@
+Task 06: [NEW/FIX] 範囲OCR結果の表示・ハイライトと app.py の不具合修正
+
+本リポジトリのルートにある AGENTS.md（プロジェクト憲法）を必ず読み、その規約に従って作業すること。
+
+1. 目的・背景 (Purpose & Background):
+本プロジェクトは NDLOCR-Lite を fork し、「マウスで矩形範囲を選択して、その範囲だけOCR結果を取り出す」
+機能を追加するものである。上流コードは一切変更せず custom_gui/ にのみ実装する（C方式）。
+
+これまでに「OCR実行」「画像表示と座標変換」「矩形選択」「範囲フィルタ」の部品が揃った。
+本タスクはそれらを結線し、**ユーザーが選択した範囲のテキストが実際に画面に出る**状態にする、
+本プロジェクトの核心を完成させるタスクである。
+あわせて、前タスクのレビューで検出された app.py の不具合2件を修正する。
+
+2. 既存コードの契約（master に実装済み。ここに書かれた通りに使うこと）:
+
+  # custom_gui/ocr_bridge.py
+  def run_ocr_and_parse(image_path: str) -> List[Dict[str, Any]]
+      # 戻り値の各要素:
+      #   {"text": str, "bbox": (x1,y1,x2,y2) float原画像座標,
+      #    "confidence": float, "is_vertical": bool, "source_image": str}
+      # ※ 1枚あたり数十秒かかる重い処理である
+
+  # custom_gui/region_filter.py
+  def filter_lines_by_region(rect: Tuple[float,float,float,float],
+                             lines: List[Dict[str,Any]],
+                             overlap_threshold: float = 0.5) -> List[Dict[str,Any]]
+      # rect内と判定された行のみを、入力の順序を保ったまま返す
+
+  # custom_gui/selection.py
+  @dataclass
+  class SelectionRect:  rect_id: str / bbox: Tuple[float,...] / label: str
+  class SelectionContainer:  add(bbox, label=None) -> SelectionRect
+                             get_all() -> List[SelectionRect]
+                             delete_by_id(rect_id: str) -> bool
+  def calculate_normalized_bbox(start_x, start_y, end_x, end_y,
+                                scale, offset_x, offset_y, img_w, img_h)
+                                -> Tuple[float,float,float,float]
+
+  # custom_gui/viewer.py
+  def original_to_display(x, y, scale, offset_x=0.0, offset_y=0.0) -> Tuple[float,float]
+  def display_to_original(x, y, scale, offset_x=0.0, offset_y=0.0) -> Tuple[float,float]
+  def calculate_fit_scale(img_w, img_h, win_w, win_h) -> float
+  class ImageViewer(ft.Container)
+
+  # custom_gui/app.py
+  class SelectableImageViewer(ImageViewer)   # 本タスクで修正・拡張する
+
+3. 完了条件 (Definition of Done):
+
+  【A. 結線と表示】
+   - 画像を読み込んで一度だけ OCR を実行し、その結果（行リスト）を保持する仕組みを実装すること。
+     矩形を選択するたびに OCR を再実行してはならない（重い処理のため）。
+   - 矩形を確定すると、その矩形に対して filter_lines_by_region を適用し、
+     抽出されたテキストが結果パネルに表示されること。
+   - 抽出対象となった行が、画像上でハイライト表示されること
+     （選択矩形そのものの枠線とは視覚的に区別できる色・スタイルにすること）。
+   - 矩形を削除すると、対応する結果表示とハイライトも消えること。
+
+  【B. 読み順の保証（縦書き対応）】
+   - `custom_gui/text_assembler.py` を新規作成し、
+     フィルタ済みの行リストを受け取って表示用のテキスト（str）に組み立てる純粋関数を実装すること。
+     この関数は **filter_lines_by_region が返した順序をそのまま維持**し、
+     行を改行で連結するだけとすること（独自の並べ替えを行わないこと）。
+   - `tests/test_text_assembler.py` を新規作成し、以下を検証すること:
+       (a) 3行の入力に対し、"1行目\n2行目\n3行目" の形式で連結されること（具体的な文字列で検証）
+       (b) 空リストに対して空文字列 "" が返ること
+       (c) 入力の順序が入れ替わらないこと（意図的に逆順の座標を持つ入力で検証）
+   - `tests/test_vertical_order.py` を新規作成し、
+     `resource/tategaki2026-04-24-094138.png`（縦書き資料）に対して以下を検証すること:
+       (d) run_ocr_and_parse の結果に対し、画像全体を覆う矩形でフィルタをかけると、
+           戻り値の text の並びが run_ocr_and_parse の戻り値の並びと完全に一致すること
+           （＝フィルタと組み立てが読み順を壊さないことの証明）
+
+  【C. 既存不具合の修正（前タスクのレビュー指摘）】
+   - `custom_gui/app.py` の `main()` が外部URL `https://picsum.photos/800/600` を
+     参照している。これを**リポジトリ同梱の `resource/digidepo_2531162_0024.jpg`**
+     に変更し、オフラインで動作するようにすること。外部ネットワークへの依存を排除すること。
+   - `custom_gui/app.py` の `_on_pan_end` は、ドラッグ終端座標を
+     `self.active_rect.left == start_x` という **float の等値比較**で推測している。
+     これを `_on_pan_update` で最終座標を明示的に保持する方式に改め、
+     等値比較への依存を排除すること。
+     ドラッグの向き（右下方向・左上方向・右上方向・左下方向）に関わらず
+     正しい終端座標が得られること。
+
+  【D. 全体】
+   - `python -m pytest tests/ -v` が全件グリーンで完了すること。
+
+4. 変更許可スコープ (Allowed Scope / Whitelist):
+   - `custom_gui/app.py`（既存。本タスクが所有権を持つ）
+   - `custom_gui/text_assembler.py`（新規）
+   - `tests/test_text_assembler.py`（新規）
+   - `tests/test_vertical_order.py`（新規）
+
+5. 変更禁止スコープ (Prohibited Scope / Blacklist):
+   - `custom_gui/viewer.py`, `custom_gui/ocr_bridge.py`,
+     `custom_gui/selection.py`, `custom_gui/region_filter.py`
+     （既存。読み取り・import のみ可。**変更禁止**）
+   - `tests/test_smoke.py`, `tests/test_viewer.py`, `tests/test_ocr_bridge.py`,
+     `tests/test_selection.py`, `tests/test_region_filter.py`（既存テスト。**変更禁止**）
+   - `src/**`, `ndlocr-lite-gui/**`, `train/**`, `resource/**`
+   - `LICENCE`, `LICENCE_DEPENDENCEIES`, `README.md`
+   - `pyproject.toml`, `requirements.txt`
+   - `.github/**`, `.nightly/**`, `.agents/**`, `scripts/**`
+   - `AGENTS.md`, `CLAUDE.md`, `task_template.md`
+
+6. 既存ユニットテストの絶対保護:
+   - 既存テスト5ファイルの削除・スキップ・期待値変更を固く禁止する。
+   - 既存テストが失敗する場合、テストコードを修正せず、失敗内容と原因を報告して停止すること。
+
+7. 今回やらないこと (Out of Scope):
+   - 矩形のリサイズ・移動などの編集UI（Task 07 が担当）
+   - txt / CSV へのファイル出力（Task 09 が担当）
+   - PDF の読み込み、ページ送り（Task 10, 11 が担当）
+   - フォルダ一括処理（Task 12 が担当）
+   - 既存4モジュールのリファクタリング・改善
+   - 依存パッケージの追加
+   - 国立国会図書館の著作権表示・クレジット・ライセンス条項の削除、改変、移動
+
+8. 技術的ヒント:
+   - OCR は重いため、テストで複数回実行しないこと。
+     test_vertical_order.py では OCR 実行を1回に抑えること。
+   - GUI の自動テストが困難な場合、GUI部分はテスト対象外とし、
+     text_assembler と読み順の検証のみをテスト対象として構わない（その旨を報告すること）。
+
+9. 詰まった場合の指示 (Failsafe):
+   - 完了条件を満たせない障害に遭遇した場合、回避策を発明せず、
+     できた部分までで作業を止め、障害の内容を報告すること。
+   - 上記2の契約と master の実態が食い違う場合、推測で実装せず報告して停止すること。
+
+10. 提出時の説明に含めること:
+   1. 完了条件との対応表（A〜D の各条件を満たした方法）
+   2. 変更ファイル一覧と各変更の理由
+   3. `python -m pytest tests/ -v` の実行結果
+   4. 未確定事項・妥協した点（なければ「なし」と明記）
