@@ -1,0 +1,195 @@
+Task 09: [FIX] Port the Task 08 layout rebuild onto master and remove a fatal runtime error
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. SITUATION - READ THIS FIRST
+--------------------------------------------------------------------------------
+You previously completed a task ("Task 08") that rebuilt the layout of
+custom_gui/app.py and custom_gui/viewer.py. That work was reviewed and REJECTED
+for one specific reason described in section 2. Everything else about it was
+good and must be preserved.
+
+Your previous work has been pushed to this repository as the branch:
+
+        integration/task-08          (commit d2f7d1d)
+
+That branch was based on an OLDER master. In the meantime, master has advanced
+and now contains an important earlier fix. The current master is commit 99a5f1c.
+
+Your job in this task is to produce, on top of the CURRENT master, a version of
+the layout rebuild that keeps all the good work from integration/task-08 while
+fixing the fatal defect and preserving what master already gained.
+
+You may inspect the branch, for example:
+        git fetch origin
+        git diff master origin/integration/task-08 -- custom_gui/app.py
+        git show origin/integration/task-08:custom_gui/app.py
+
+Do NOT simply merge the branch. Port the changes deliberately, because the two
+versions of custom_gui/app.py conflict with each other in main().
+
+--------------------------------------------------------------------------------
+2. THE FATAL DEFECT THAT CAUSED THE REJECTION
+--------------------------------------------------------------------------------
+In integration/task-08, custom_gui/app.py uses `page.window_width` and
+`page.window_height`:
+
+        win_w=page.window_width or 800,
+        win_h=page.window_height or 600,
+        ...
+        viewer.update_layout(page.window_width or 800, page.window_height or 600)
+
+These attributes DO NOT EXIST in flet 0.27.6, which is the pinned version of this
+project. This was verified directly:
+
+        hasattr(ft.Page, 'window_width')  -> False
+        hasattr(ft.Page, 'window_height') -> False
+        hasattr(ft.Page, 'width')         -> True
+        hasattr(ft.Page, 'window')        -> True
+
+Because of this, the application raises AttributeError as soon as main() runs.
+The unit tests all passed (28 passed) because no test starts the GUI. This is
+exactly the same class of defect as a previous rejection in this project, where
+`ft.colors.transparent` was used and did not exist.
+
+--------------------------------------------------------------------------------
+3. WHAT CURRENT MASTER ALREADY CONTAINS (DO NOT REGRESS THESE)
+--------------------------------------------------------------------------------
+Master (99a5f1c) already includes an earlier fix that your branch does not have:
+
+  - All flet colour/icon references migrated to the capitalised enums
+    `ft.Colors.*` and `ft.Icons.*`. The lowercase `ft.colors` / `ft.icons` are
+    deprecated in flet and are removed in 0.28.
+  - `ft.Colors.TRANSPARENT` is used for the confirmed selection rectangle.
+  - tests/test_flet_constants.py, which statically verifies with `ast` that every
+    `ft.Colors.X` / `ft.Icons.X` referenced under custom_gui/ actually exists.
+
+Your ported result must keep all of the above intact.
+
+--------------------------------------------------------------------------------
+4. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] Remove the fatal defect.
+    - Replace every use of `page.window_width` / `page.window_height` with an
+      attribute that actually exists in flet 0.27.6.
+    - Before you use ANY attribute of `page`, verify it exists. Do not guess.
+
+[B] Port the layout rebuild onto current master.
+    - Keep the expand-based / available-space-driven layout from
+      integration/task-08 (the `update_layout` approach).
+    - Keep master's `ft.Colors.*` / `ft.Icons.*` usage. Do not reintroduce the
+      lowercase deprecated forms.
+    - If both a `resize_viewer` method and an `update_layout` method end up
+      existing in custom_gui/viewer.py, keep only ONE of them and remove the
+      other, so there is a single, unambiguous way to change the viewer size.
+      Update all call sites accordingly.
+
+[C] The original three defects must be fixed (these were the point of Task 08).
+    1. The image must fill the available area and grow when the window is
+       maximised, preserving aspect ratio.
+    2. Selected OCR lines must be drawn as semi-transparent yellow highlights at
+       the correct positions on the image, and the extracted text must appear in
+       the Selections panel under the "Region N" heading.
+    3. Resizing the window must immediately re-render the image, the confirmed
+       rectangles and the highlights at the new scale.
+    Zoom In / Zoom Out / Fit must also visibly change the rendered image size.
+
+[D] Keep the diagnostics from Task 08.
+    - The status bar showing: source image file name, image pixel size, current
+      scale (3 decimals), number of OCR lines loaded, and for the most recent
+      confirmed region its bbox in original image coordinates plus the number of
+      matched lines.
+    - Visible in-app error reporting when the image file cannot be found or OCR
+      fails. It must never fail silently.
+
+[E] STRENGTHEN THE REGRESSION TEST - this is the most important item.
+    The existing tests did not catch `page.window_width`, so extend the guard.
+    - Modify tests/test_flet_constants.py (you ARE allowed to modify this one
+      file, by exception) so that, in addition to its current checks, it also
+      statically verifies attribute access on the flet Page object:
+        * Parse every .py file under custom_gui/ with `ast`.
+        * Find every attribute access of the form `page.<name>` and
+          `self.page.<name>`.
+        * Assert that `hasattr(ft.Page, name)` is True for each of them.
+        * On failure, the message must name the file and the offending attribute.
+    - Verify your new check actually works: it must FAIL if `page.window_width`
+      is present, and PASS on your fixed code. State in your report how you
+      confirmed this.
+    - Keep tests/test_app_structure.py and its existing checks working.
+
+[F] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely.
+    - The three pure functions in custom_gui/viewer.py
+        original_to_display / display_to_original / calculate_fit_scale
+      MUST keep their exact current signatures and formulas.
+    - Do not delete, skip or weaken any existing test other than the permitted
+      extension of tests/test_flet_constants.py described in [E].
+
+--------------------------------------------------------------------------------
+5. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/app.py
+    custom_gui/viewer.py
+    tests/test_flet_constants.py    (extension only - keep all existing checks)
+    tests/test_app_structure.py     (only if required to keep it passing)
+
+--------------------------------------------------------------------------------
+6. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py     (DO NOT MODIFY)
+    tests/test_smoke.py, tests/test_viewer.py, tests/test_ocr_bridge.py,
+    tests/test_selection.py, tests/test_region_filter.py,
+    tests/test_text_assembler.py, tests/test_vertical_order.py (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+7. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Making OCR asynchronous or adding a progress bar.
+    - Resizing or moving existing rectangles; a file picker dialog.
+    - txt / CSV export, PDF support, folder batch processing.
+    - Changing OCR, filtering, coordinate or text assembly logic.
+    - Adding or upgrading dependencies.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+8. IMPORTANT LESSON TO APPLY
+--------------------------------------------------------------------------------
+Two rejections in this project were caused by referencing a flet attribute that
+does not exist, and unit tests did not catch either of them because no test
+starts a GUI. Before using any flet API you are not certain about, check it, for
+example with a short throwaway snippet:
+
+        python -c "import flet as ft; print(hasattr(ft.Page, 'width'))"
+
+Prefer APIs you have verified over APIs you remember.
+
+--------------------------------------------------------------------------------
+9. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not invent workarounds. If you are blocked, stop, keep what works, and
+      report exactly what blocked you.
+    - Priority if you run out of time: [A] and [E] first, then [C], then [B]
+      and [D].
+    - If this instruction contradicts the actual state of the code, do not guess.
+      Stop and report the contradiction.
+
+--------------------------------------------------------------------------------
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[F] to how you satisfied it.
+    2. The list of changed files and the reason for each change.
+    3. The full output of `python -m pytest tests/ -v`.
+    4. Which flet Page attribute you used instead of window_width/window_height,
+       and how you verified that it exists.
+    5. How you confirmed the new check in [E] actually fails on the bad code.
+    6. Whether you kept `resize_viewer` or `update_layout`, and why.
+    7. Anything that cannot be verified without a GUI, stated explicitly.
+    8. Open questions or compromises. Write "none" if there are none.

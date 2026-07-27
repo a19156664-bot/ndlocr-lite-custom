@@ -14,6 +14,7 @@ def test_flet_constants_exist():
                 
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Attribute):
+                        # Check ft.Colors / ft.Icons
                         if isinstance(node.value, ast.Attribute):
                             if isinstance(node.value.value, ast.Name) and node.value.value.id == 'ft':
                                 module_name = node.value.attr
@@ -22,6 +23,18 @@ def test_flet_constants_exist():
                                     flet_module = getattr(ft, module_name)
                                     if not hasattr(flet_module, attr_name):
                                         errors.append(f"{filepath}: ft.{module_name}.{attr_name} does not exist.")
+                        
+                        # Check page.attr
+                        if isinstance(node.value, ast.Name) and node.value.id == 'page':
+                            attr_name = node.attr
+                            if not hasattr(ft.Page, attr_name):
+                                errors.append(f"{filepath}: page.{attr_name} does not exist on ft.Page.")
+                        
+                        # Check self.page.attr
+                        elif isinstance(node.value, ast.Attribute) and isinstance(node.value.value, ast.Name) and node.value.value.id == 'self' and node.value.attr == 'page':
+                            attr_name = node.attr
+                            if not hasattr(ft.Page, attr_name):
+                                errors.append(f"{filepath}: self.page.{attr_name} does not exist on ft.Page.")
 
     if errors:
         raise AssertionError("\n".join(errors))
