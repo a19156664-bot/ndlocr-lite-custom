@@ -1,0 +1,305 @@
+Task 25: [NEW] "Right-to-left" button - repair text from pre-war right-to-left horizontal writing
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. PURPOSE - THE REAL PROBLEM, WITH REAL DATA
+--------------------------------------------------------------------------------
+Japanese magazines from the early Showa era (1920s-1930s) print horizontal text
+RIGHT TO LEFT. Modern OCR reads left to right, so every such line comes out
+character-reversed. The OCR engine itself is not wrong - it simply has no way to
+know the page's writing direction.
+
+This is REAL OUTPUT from this application, verified by the human owner:
+
+    Region 5:
+        く近が嬢ヒツリトイデの染馴おんさ皆（合聯發ドツウリハ）
+        。すで眞寫の中度支おるす演出に１風暴］書映トンウマラバ
+
+Reversing each line character by character, AND flipping the direction of the
+bracket characters, produces correct Japanese:
+
+        （ハリウツド發聯合）皆さんお馴染のデイトリツヒ嬢が近く
+        バラマウント映書［暴風１に出演するお支度中の寫眞です。
+
+Note carefully what happens to the brackets. A naive character reversal alone
+would leave them backwards:
+
+        ）ハリウツド發聯合（      <- wrong, brackets inverted
+        （ハリウツド發聯合）      <- correct, brackets also mirrored
+
+The human owner has explicitly decided that brackets MUST be mirrored.
+
+--------------------------------------------------------------------------------
+2. THE SPECIFICATION - DECIDED BY THE HUMAN OWNER. DO NOT REDESIGN.
+--------------------------------------------------------------------------------
+2.1 The unit of conversion is ONE LINE.
+
+    Text is split on newlines. Each line is reversed INDEPENDENTLY. The ORDER OF
+    THE LINES DOES NOT CHANGE.
+
+    This is the owner's requirement, stated as:
+        "改行マークがあればそこまでを1文として右から変換をおこなってください"
+        (if there is a newline, treat up to it as one sentence and convert that)
+
+    Worked example given by the owner:
+
+        input           1234567890
+        output          0987654321
+
+        input           1234567890
+                        0987654321
+
+        output          0987654321
+                        1234567890
+
+    WARNING: that second example is ambiguous on its own, because those two
+    lines happen to be each other's reverse. Do NOT implement it as "reverse the
+    order of the lines". It is "reverse the characters within each line, keeping
+    the lines in their original order". Verify your understanding against this
+    UNAMBIGUOUS case, which you must include as a test:
+
+        input           ABC
+                        123
+
+        output          CBA
+                        321
+
+    (NOT "123 / ABC", which is what line-order reversal would give.)
+
+2.2 Digits are reversed like any other character.
+    The owner's own example requires 1234567890 -> 0987654321. Do not add
+    special handling to keep numbers intact.
+
+2.3 Brackets are mirrored.
+    After reversing, every character that is one half of a directional pair must
+    be replaced by its partner. At minimum handle these pairs, in BOTH
+    directions:
+
+        （ ）    (fullwidth parenthesis, U+FF08 / U+FF09)
+        ( )      (ASCII parenthesis)
+        「 」    (U+300C / U+300D)
+        『 』    (U+300E / U+300F)
+        【 】    (U+3010 / U+3011)
+        ［ ］    (fullwidth square, U+FF3B / U+FF3D)
+        [ ]      (ASCII square)
+        ｛ ｝    (fullwidth brace, U+FF5B / U+FF5D)
+        { }      (ASCII brace)
+        〔 〕    (U+3014 / U+3015)
+        〈 〉    (U+3008 / U+3009)
+        《 》    (U+300A / U+300B)
+        < >      (ASCII angle)
+        ＜ ＞    (fullwidth angle, U+FF1C / U+FF1E)
+
+    Define this as a single explicit mapping table in the code with a comment
+    explaining why it exists. Do not try to derive it from unicodedata.
+
+2.4 The operation must be its own inverse.
+    Applying the conversion twice must return the ORIGINAL string exactly. This
+    follows from the mapping being symmetric, and it means the button doubles as
+    an undo. Assert it in a test.
+
+--------------------------------------------------------------------------------
+3. CURRENT CODE CONTRACT (on master - use it, do not change it)
+--------------------------------------------------------------------------------
+custom_gui/app.py, class SelectableImageViewer(ImageViewer):
+
+    self.image_states       dict keyed by image path, each value a dict:
+                              "selections"  -> SelectionContainer
+                              "ocr_state"   -> OcrState
+                              "ocr_results" -> list of OCR line dicts
+                              "ocr_error"   -> str or None
+                              "edits"       -> {rect_id: str}
+    self.selection_container / self.ocr_results / self.edits
+                            views onto the CURRENT image's entry
+    self.active_region_id   rect_id of the highlighted region card, or None
+    self.editing_region_id  rect_id currently open in a TextField, or None
+    self._update_selections_ui()
+                            REBUILDS the whole right-hand panel from scratch on
+                            every pan, zoom, resize, rectangle change and OCR
+                            completion. Nothing may live only in a widget.
+    self.latest_region_info / self._update_status()
+
+Inside `_update_selections_ui`, for each rectangle, the panel already computes:
+
+        filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
+        extracted_text = assemble_text(filtered_lines)
+        has_edit       = rect.rect_id in self.edits
+        display_text   = self.edits[rect.rect_id] if has_edit else extracted_text
+        label_suffix   = " (edited)" if has_edit else ""
+
+and builds a Row of buttons: EDIT, RESTORE (only when an edit exists), DELETE.
+
+custom_gui/exporter.py:
+    build_export_rows(image_name, rects, ocr_results, edited_texts=None)
+        # when rect_id is in edited_texts, that string is exported instead of
+        # the assembled OCR text; line_count still counts raw OCR lines.
+
+Verified flet 0.27.6 constants (the commander checked these):
+    ft.Icons.SWAP_HORIZ                    exists
+    ft.Icons.FORMAT_TEXTDIRECTION_R_TO_L   exists
+    ft.Icons.RESTORE / EDIT / DELETE       exist
+
+NEVER use `self.image` or `self.scale` as attribute names. Both are reserved by
+flet and previously caused a fatal startup crash in this project.
+
+--------------------------------------------------------------------------------
+4. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] New PURE module `custom_gui/rtl.py`. It must NOT import flet.
+
+        MIRRORED_CHARS = { ... }          # the table from 2.3, symmetric
+
+        def reverse_line(line: str) -> str
+            # reverse the characters of ONE line and mirror bracket characters
+
+        def convert_right_to_left(text: str) -> str
+            # split on newline, apply reverse_line to each line,
+            # KEEP THE LINE ORDER, rejoin with newline
+
+    Document in the docstrings that the unit is the line, that line order is
+    preserved, and that the function is its own inverse.
+
+[B] A "right-to-left" button on every region card in the right-hand panel.
+    - Use ft.Icons.SWAP_HORIZ or ft.Icons.FORMAT_TEXTDIRECTION_R_TO_L, with a
+      tooltip a Japanese user will understand, for example "右から変換".
+    - Place it in the existing button Row alongside EDIT / RESTORE / DELETE.
+    - It converts THE TEXT CURRENTLY DISPLAYED for that region. If the region
+      already has an edit, convert the edited text, not the raw OCR text. What
+      the user sees is what gets converted.
+
+[C] The result is stored as an EDIT, reusing the existing mechanism.
+    Write the converted string into `self.edits[rect_id]`. Do NOT invent a
+    second storage mechanism and do NOT modify `self.ocr_results`.
+
+    This is deliberate, and you must preserve all four consequences:
+      1. The converted text is what gets EXPORTED (Task 24 already wires
+         `edited_texts=self.edits` into `build_export_rows`).
+      2. The card is marked " (edited)" automatically.
+      3. The existing RESTORE button reverts to the raw OCR text.
+      4. It survives panel rebuilds, panning, zooming and image switching,
+         because it lives in `image_states[path]["edits"]`.
+
+[D] Pressing the button twice returns to the original text.
+    Because the operation is its own inverse, converting twice yields the
+    original string. Verify this at the UI level too: after two presses, the
+    displayed text equals what was displayed before the first press.
+
+[E] Edge cases - none may crash.
+    - Empty text (a region containing no OCR lines): produces empty text, no
+      exception, and should not create a pointless edit entry. Decide whether to
+      skip creating the edit for empty text, and state your decision.
+    - A single line with no trailing newline.
+    - Text ending with a newline: the trailing empty line must be preserved, so
+      that applying the conversion twice still returns the exact original.
+    - Text with three or more lines.
+    - A line containing no brackets at all.
+    - A line containing an UNMATCHED bracket, for example "あいう）": it must
+      still be mirrored, producing "（ういあ". Do not require pairs to balance.
+
+[F] Tests - `tests/test_rtl.py`, no GUI, no real OCR. Concrete strings only.
+      (a) convert_right_to_left("1234567890") == "0987654321"
+      (b) THE DISAMBIGUATION TEST:
+          convert_right_to_left("ABC\n123") == "CBA\n321"
+          Also assert it does NOT equal "123\nABC".
+      (c) The real data from section 1:
+          convert_right_to_left("く近が嬢ヒツリトイデの染馴おんさ皆（合聯發ドツウリハ）")
+              == "（ハリウツド發聯合）皆さんお馴染のデイトリツヒ嬢が近く"
+          Copy these strings EXACTLY. Do not retype them by hand from the
+          description; copy them from this instruction file.
+      (d) Bracket mirroring on its own: "「あい」" round-trips correctly, and
+          assert the exact expected output.
+      (e) Unmatched bracket: convert_right_to_left("あいう）") == "（ういあ"
+      (f) Self-inverse: for at least three different inputs including one with
+          brackets and one with a trailing newline,
+          convert_right_to_left(convert_right_to_left(s)) == s
+      (g) Line order is preserved for a three-line input - assert the exact
+          three-line result.
+      (h) Empty string and a string that is only "\n" do not raise; assert the
+          exact returned values.
+
+    Also add a test at the app level that pressing the conversion handler for a
+    region writes the converted text into `self.edits[rect_id]`, and that
+    pressing it twice removes the difference (the stored text equals the
+    original OCR text again, or the edit is cleared - state which behaviour you
+    implemented and assert it).
+
+[G] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely (74+ tests).
+    - Do NOT modify custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+      custom_gui/selection.py, custom_gui/text_assembler.py,
+      custom_gui/viewer.py, custom_gui/image_sequence.py, custom_gui/exporter.py.
+    - Do NOT modify ANY existing file under tests/. In particular
+      tests/test_flet_constants.py is a guard test: if it objects to your code,
+      CHANGE YOUR CODE. NEVER add an exemption to it. Note that a local variable
+      named `page` will collide with it - name yours something else.
+    - Everything a human has verified must keep working: rectangle selection,
+      the Select/Pan toggle, panning, yellow highlights, the "Region N" label
+      drawn OUTSIDE the rectangle, async OCR with its progress ring, CSV/TXT
+      export for the current image and for all images, folder loading,
+      Prev/Next/Ctrl+N, and F2 / EDIT text correction with RESTORE.
+    - Guard every `.update()` call on a control with `if self.page:`.
+    - Do not run real OCR in your tests.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Two previous tasks left probe files at the
+      repository root and the commander had to delete them.
+
+--------------------------------------------------------------------------------
+5. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/rtl.py            (new file)
+    custom_gui/app.py
+    tests/test_rtl.py            (new file)
+
+--------------------------------------------------------------------------------
+6. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/exporter.py, custom_gui/ocr_bridge.py,
+    custom_gui/region_filter.py, custom_gui/selection.py,
+    custom_gui/text_assembler.py, custom_gui/viewer.py,
+    custom_gui/image_sequence.py                              (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+7. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Detecting the writing direction automatically. The user decides, per
+      region, by pressing the button.
+    - Applying the conversion to a whole image or to all regions at once.
+    - Re-ordering the OCR LINES within a region. Only the characters inside each
+      line change.
+    - Vertical writing (縦書き). The OCR already handles that via is_vertical.
+    - Changing the OCR engine, the region filter or the text assembler.
+    - Persisting the setting so it is remembered for the next region or image.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+8. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [A] and [F] first (the pure function and
+      its tests), then [B] and [C], then [D] and [E].
+
+--------------------------------------------------------------------------------
+9. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[G] to how you satisfied it.
+    2. The full MIRRORED_CHARS table you implemented.
+    3. Your decision on empty text in [E], and why.
+    4. Whether two presses clear the edit or store the original text, and why.
+    5. The list of changed files and the reason for each change.
+    6. The output of `git status` showing no stray files.
+    7. The full output of `python -m pytest tests/ -v`.
+    8. Anything that cannot be verified without a GUI, stated explicitly.
+    9. Open questions or compromises. Write "none" if there are none.
