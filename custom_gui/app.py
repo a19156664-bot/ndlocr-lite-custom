@@ -8,6 +8,8 @@ from custom_gui.text_assembler import assemble_text
 from custom_gui.exporter import build_export_rows, build_export_rows_multi, rows_to_csv_text, rows_to_txt_text
 from custom_gui.rtl import convert_right_to_left
 import os
+import tempfile
+from custom_gui.pdf_loader import build_source_list, ensure_page_rendered, plan_pdf_pages
 from enum import Enum, auto
 
 class OcrState(Enum):
@@ -55,6 +57,9 @@ class SelectableImageViewer(ImageViewer):
         self.active_region_id = None
         self.editing_region_id = None
         
+        self.pdf_cache_dir = tempfile.mkdtemp(prefix="ndlocr_pdf_")
+        self.pdf_page_map = {}
+        
         self.mode_state = InteractionMode()
             
         self.mode_toggle = ft.SegmentedButton(
@@ -73,6 +78,12 @@ class SelectableImageViewer(ImageViewer):
             on_click=self._on_open_folder_click
         )
         
+        self.btn_open_pdf = ft.IconButton(
+            icon=ft.Icons.PICTURE_AS_PDF,
+            tooltip="PDFを開く",
+            on_click=self._on_open_pdf_click
+        )
+        
         self.btn_prev = ft.IconButton(
             icon=ft.Icons.NAVIGATE_BEFORE,
             tooltip="Previous Image",
@@ -89,6 +100,7 @@ class SelectableImageViewer(ImageViewer):
 
         self.controls_row.controls.insert(0, self.btn_next)
         self.controls_row.controls.insert(0, self.btn_prev)
+        self.controls_row.controls.insert(0, self.btn_open_pdf)
         self.controls_row.controls.insert(0, self.btn_open_folder)
 
         self.export_button = ft.PopupMenuButton(
@@ -269,6 +281,15 @@ class SelectableImageViewer(ImageViewer):
             self.update()
 
 
+    def _on_open_pdf_click(self, e):
+        self._file_picker_mode = "pdf"
+        if self.page:
+            self.file_picker.pick_files(
+                dialog_title="Open PDF",
+                allowed_extensions=["pdf"],
+                allow_multiple=True
+            )
+            
     def _on_open_folder_click(self, e):
         self._file_picker_mode = "folder"
         if self.page:
@@ -306,12 +327,25 @@ class SelectableImageViewer(ImageViewer):
         self.active_region_id = None
         self.editing_region_id = None
         
+        if path in self.pdf_page_map:
+            try:
+                pdf_path, page_index = self.pdf_page_map[path]
+                ensure_page_rendered(path, pdf_path, page_index)
+            except Exception as e:
+                self.ocr_error = f"Failed to render page: {str(e)}"
+                state["ocr_state"] = OcrState.ERROR
+                state["ocr_error"] = self.ocr_error
+                
         try:
             from PIL import Image
             with Image.open(path) as img:
                 self.img_w, self.img_h = img.size
         except Exception as e:
             self.img_w, self.img_h = 800, 600
+            if not self.ocr_error:
+                self.ocr_error = f"Failed to open {os.path.basename(path)}: {str(e)}"
+                state["ocr_state"] = OcrState.ERROR
+                state["ocr_error"] = self.ocr_error
             
         self.image_control.src = path
         self.image_control.width = self.img_w
@@ -416,13 +450,35 @@ class SelectableImageViewer(ImageViewer):
             return
             
         if self._file_picker_mode == "folder":
-            paths = list_images_in_folder(e.path)
+            paths, registry = build_source_list(e.path, self.pdf_cache_dir)
             if not paths:
                 self.latest_region_info = f"No images found in {os.path.basename(e.path)}"
                 self._update_status()
             else:
+                self.pdf_page_map.update(registry)
                 self.sequence = ImageSequence(paths)
-                self.latest_region_info = f"Opened folder {os.path.basename(e.path)} ({len(paths)} images)"
+                self.latest_region_info = f"Opened folder {os.path.basename(e.path)} ({len(paths)} images/pages)"
+                self._switch_image(self.sequence.current())
+            return
+            
+        if self._file_picker_mode == "pdf":
+            paths = []
+            files = e.files if e.files else []
+            # Files are not ordered in guaranteed way by flet in all platforms, but let's sort by name
+            files.sort(key=lambda f: f.name.lower())
+            
+            for f in files:
+                pdf_pages = plan_pdf_pages(f.path, self.pdf_cache_dir)
+                for png_path, pdf_path, page_index in pdf_pages:
+                    paths.append(png_path)
+                    self.pdf_page_map[png_path] = (pdf_path, page_index)
+            
+            if not paths:
+                self.latest_region_info = "No valid PDF pages found"
+                self._update_status()
+            else:
+                self.sequence = ImageSequence(paths)
+                self.latest_region_info = f"Opened PDF(s) ({len(paths)} pages)"
                 self._switch_image(self.sequence.current())
             return
 
