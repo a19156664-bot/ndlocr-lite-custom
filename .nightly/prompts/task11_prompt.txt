@@ -1,0 +1,156 @@
+Task 11: [NEW] Pan the image by holding Ctrl and dragging
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. PURPOSE
+--------------------------------------------------------------------------------
+This project is a fork of NDLOCR-Lite. The user drags a rectangle on a page image
+and only the OCR text inside that rectangle is shown. The application now works
+on a real machine (image display, zoom, rectangle selection, yellow highlights,
+status bar all confirmed working by a human).
+
+The next request comes directly from the user:
+
+    "I want to grab the image and move it with Ctrl + mouse drag."
+    Reason given: to improve the user experience.
+
+When the image is zoomed in, the user currently has no way to move to the part of
+the page they want to look at. This task adds panning.
+
+--------------------------------------------------------------------------------
+2. CURRENT CODE CONTRACT (already on master - use it, do not change it)
+--------------------------------------------------------------------------------
+custom_gui/viewer.py provides these PURE functions. Their signatures and formulas
+MUST NOT change; existing tests depend on them:
+
+    def original_to_display(x, y, scale, offset_x=0.0, offset_y=0.0) -> (dx, dy)
+        # returns (x * scale + offset_x, y * scale + offset_y)
+
+    def display_to_original(x, y, scale, offset_x=0.0, offset_y=0.0) -> (ox, oy)
+        # returns ((x - offset_x) / scale, (y - offset_y) / scale)
+
+    def calculate_fit_scale(img_w, img_h, win_w, win_h) -> float
+
+class ImageViewer(ft.Container) holds, among others:
+    self.image_control   the ft.Image control  (NOTE: NOT self.image - that name
+                         is reserved by ft.Container and must never be used)
+    self.zoom_scale      the current zoom factor as a float
+                         (NOTE: NOT self.scale - reserved by ft.Control)
+    self.offset_x, self.offset_y     currently always 0.0
+    self.img_w, self.img_h, self.win_w, self.win_h
+
+custom_gui/app.py, class SelectableImageViewer(ImageViewer) handles the drag:
+    _on_pan_start / _on_pan_update / _on_pan_end   via ft.GestureDetector
+    It converts display coordinates to original image coordinates using
+    calculate_normalized_bbox() from custom_gui/selection.py, passing
+    self.zoom_scale, self.offset_x, self.offset_y.
+
+IMPORTANT: offset_x / offset_y already exist and are already threaded through the
+whole coordinate pipeline, but they are always 0.0 today. This task finally makes
+them meaningful. Everything that converts coordinates must keep using them.
+
+--------------------------------------------------------------------------------
+3. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] Ctrl + drag pans the image.
+    - While the Ctrl key is held, dragging on the image moves the image in the
+      drag direction (panning), instead of drawing a selection rectangle.
+    - The pan amount must be stored in self.offset_x / self.offset_y.
+    - Panning must feel direct: dragging 100 display pixels to the right moves
+      the image 100 display pixels to the right.
+
+[B] Plain drag must keep working exactly as before.
+    - WITHOUT Ctrl, dragging must still draw the red rubber-band rectangle and
+      confirm it as a blue rectangle, exactly as it does today.
+    - This is a hard requirement. Do not regress the core feature of the product.
+
+[C] Everything stays aligned after panning.
+    - Confirmed selection rectangles must move with the image.
+    - Yellow OCR highlights must move with the image.
+    - A rectangle drawn AFTER panning must select the correct OCR lines, i.e. the
+      display-to-original conversion must account for the current offset.
+
+[D] Tests (no GUI may be started).
+    Create `tests/test_pan.py` with concrete numeric assertions, not property
+    round-trips:
+      (a) With zoom_scale=1.0 and offset=(0,0), a pan of (+50, +30) must result in
+          offset_x == 50 and offset_y == 30.
+      (b) After that pan, original point (100, 200) must map to display point
+          (150, 230) via original_to_display.
+      (c) After that pan, display point (150, 230) must map back to original
+          (100, 200) via display_to_original.
+      (d) With zoom_scale=2.0 and offset=(50, 30), original (100, 200) must map to
+          display (250, 430).
+      (e) A pan applied twice accumulates: two pans of (+10, +10) give offset
+          (20, 20), not (10, 10).
+    Implement the pan arithmetic in a PURE function (for example
+    `apply_pan(offset_x, offset_y, dx, dy) -> (new_x, new_y)`) so that it is
+    testable without any flet widget, and call that function from the event
+    handler.
+
+[E] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely.
+    - Do not modify the three pure functions in custom_gui/viewer.py.
+    - Do not use `self.image` or `self.scale` as attribute names. They are
+      reserved by flet and caused a fatal crash in this project before.
+      tests/test_flet_constants.py will fail if you reference a flet constant or
+      a page attribute that does not exist. Verify any flet API you are unsure
+      about, for example:
+          python -c "import flet as ft; print(hasattr(ft.Page, 'width'))"
+
+--------------------------------------------------------------------------------
+4. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/app.py
+    custom_gui/viewer.py    (only what panning requires - see the restriction
+                             on the three pure functions)
+    tests/test_pan.py       (new file)
+
+--------------------------------------------------------------------------------
+5. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py     (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+6. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Ctrl + mouse wheel zoom (that is the next task).
+    - Keyboard +/- shortcuts (a later task).
+    - Making OCR asynchronous.
+    - Resizing or moving existing rectangles; file picker; CSV export; PDF.
+    - Changing OCR, filtering or text assembly logic.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+7. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - If flet 0.27.6 cannot report the Ctrl key state in the drag events you are
+      using, STOP and report that finding instead of inventing a different
+      interaction (for example, do not silently substitute a middle-mouse drag or
+      a toolbar toggle button). The commander will decide the alternative.
+    - Priority if you run out of time: [B] first (never break selection), then
+      [A] and [C], then [D].
+
+--------------------------------------------------------------------------------
+8. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[E] to how you satisfied it.
+    2. How you detected the Ctrl key state, and how you verified that this API
+       exists in flet 0.27.6.
+    3. The list of changed files and the reason for each change.
+    4. The full output of `python -m pytest tests/ -v`.
+    5. Anything that cannot be verified without a GUI, stated explicitly, so a
+       human can check it manually.
+    6. Open questions or compromises. Write "none" if there are none.
