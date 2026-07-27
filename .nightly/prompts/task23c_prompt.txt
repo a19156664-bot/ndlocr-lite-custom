@@ -1,0 +1,182 @@
+Task 23c: [FIX] Port Task 23b onto master WITHOUT weakening the guard test
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. WHAT HAPPENED
+--------------------------------------------------------------------------------
+Your Task 23b work is GOOD and the commander verified it:
+
+    - The `self.stack` crash fix is correct. Starting with a missing image and
+      then opening a folder now switches to the first image with no exception.
+      The commander reproduced the failure before and success after.
+    - `build_export_rows_multi` is implemented additively; the existing three
+      exporter functions are unchanged.
+    - `python -m pytest tests/ -q`  ->  61 passed.
+
+It was NOT merged, because of two scope violations. This task fixes ONLY those.
+Everything else must be preserved exactly as you wrote it.
+
+--------------------------------------------------------------------------------
+2. YOUR PREVIOUS WORK IS ON A BRANCH - START FROM IT
+--------------------------------------------------------------------------------
+The commander pushed your Task 23b result so you can port it deliberately:
+
+        origin/integration/task-23b        (commit d8cfdb8)
+
+Inspect it, for example:
+
+        git fetch origin
+        git diff master origin/integration/task-23b
+        git show origin/integration/task-23b:custom_gui/exporter.py
+        git show origin/integration/task-23b:custom_gui/app.py
+        git show origin/integration/task-23b:tests/test_export_multi.py
+        git show origin/integration/task-23b:tests/test_missing_image_recovery.py
+
+Do not blindly merge that branch - it contains the violation. Port it.
+
+--------------------------------------------------------------------------------
+3. VIOLATION 1 - THE SERIOUS ONE. YOU WEAKENED A GUARD TEST.
+--------------------------------------------------------------------------------
+You changed `tests/test_flet_constants.py`:
+
+        -   if not hasattr(ft.Page, attr_name):
+        +   if attr_name not in ['get'] and not hasattr(ft.Page, attr_name):
+
+That file is a BLACKLISTED regression guard. It exists because this project
+shipped a fatal defect (`page.window_width`, which does not exist on ft.Page)
+with every unit test green. AGENTS.md section 5-1 forbids deleting, skipping or
+changing the expectations of an existing test. Adding an exemption to make new
+code pass is exactly that.
+
+THE REAL CAUSE is in your `custom_gui/exporter.py`:
+
+        for page in pages:
+            ...
+            rects = page.get("rects", [])
+            ocr_results = page.get("ocr_results", [])
+            edited_texts = page.get("edited_texts", None)
+
+The guard walks the AST and flags any `page.<attr>` where `<attr>` does not exist
+on `ft.Page`. Your local variable is named `page`, so a plain dictionary lookup
+looked like a flet Page attribute access.
+
+THE FIX IS A RENAME, NOT AN EXEMPTION.
+
+[A] In `custom_gui/exporter.py`, rename that loop variable from `page` to
+    something unambiguous, for example `page_data` or `entry`. Rename EVERY use
+    of it inside the loop. The variable name `page` must not appear in
+    custom_gui/exporter.py at all.
+
+[B] Restore `tests/test_flet_constants.py` to its state on master, byte for byte.
+    The line must read exactly:
+
+                            if not hasattr(ft.Page, attr_name):
+
+    Confirm with `git diff master -- tests/test_flet_constants.py` producing NO
+    output at the end of your work.
+
+[C] Prove the guard still guards. In your report, show that you temporarily
+    changed some `page.width` in custom_gui/app.py to `page.window_width`, ran
+    `python -m pytest tests/test_flet_constants.py -v`, and that it FAILED; then
+    that you reverted it and it passed. Both outputs, in full.
+
+--------------------------------------------------------------------------------
+4. VIOLATION 2 - THE MINOR ONE, AND IT IS NOW ALLOWED
+--------------------------------------------------------------------------------
+You also changed `custom_gui/viewer.py`, which the Task 23b whitelist forbade:
+
+        -   self.image_control.update()
+        -   self.image_container.update()
+        +   if self.page:
+        +       self.image_control.update()
+        +       self.image_container.update()
+
+That change is CORRECT. It matches this project's standing rule that every
+`.update()` call must be guarded with `if self.page:`, and the missing-image
+recovery test needs it. The commander is explicitly authorising it for this task.
+
+[D] KEEP this change. It is now inside the whitelist. Do not extend
+    custom_gui/viewer.py any further: the pure functions
+    original_to_display / display_to_original / calculate_fit_scale /
+    apply_pan / calculate_label_position and class InteractionMode must not
+    change.
+
+--------------------------------------------------------------------------------
+5. EVERYTHING ELSE FROM TASK 23b MUST SURVIVE
+--------------------------------------------------------------------------------
+[E] Keep the Part 1 crash fix: `self.stack` is built unconditionally in
+    `__init__`, while the red error Text is still what `image_container` shows
+    in the error state.
+
+[F] Keep `build_export_rows_multi(pages)` with its documented input shape,
+    its image-order-then-rectangle-order contract, and the skipping of images
+    that have no rectangles.
+
+[G] Keep the export scope choice in the UI (current image only / all images),
+    the guard rails (nothing to export, images excluded because OCR has not
+    finished with a count in the status bar, cancel, write failure), and
+    encoding=\"utf-8-sig\" for CSV and \"utf-8\" for TXT with the standard
+    library `csv` module and `newline=\"\"`.
+
+[H] Keep `tests/test_export_multi.py` and `tests/test_missing_image_recovery.py`
+    with all of their assertions.
+
+--------------------------------------------------------------------------------
+6. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+    - `python -m pytest tests/ -v` passes completely (63+ tests).
+    - `git diff master -- tests/test_flet_constants.py` is EMPTY.
+    - The identifier `page` does not appear as a variable in
+      custom_gui/exporter.py.
+    - The final diff touches ONLY the files in the whitelist below.
+    - NO scratch or probe files anywhere in the repository. Your previous task
+      left test_flet.py, test_keys.py and test_ui_updates.py at the repository
+      root and the commander had to delete them. Check with `git status` before
+      you finish.
+
+--------------------------------------------------------------------------------
+7. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/app.py
+    custom_gui/exporter.py                    (ADDITIVE only, plus the rename)
+    custom_gui/viewer.py                      (ONLY the if self.page: guard in
+                                               _update_viewer described in [D])
+    tests/test_export_multi.py                (new file)
+    tests/test_missing_image_recovery.py      (new file)
+
+--------------------------------------------------------------------------------
+8. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    tests/test_flet_constants.py              (MUST END UP IDENTICAL TO master)
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py,
+    custom_gui/image_sequence.py                              (DO NOT MODIFY)
+    every other existing file under tests/                    (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+9. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects to your code, CHANGE YOUR CODE. If you ever believe a guard test is
+      genuinely wrong, STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+--------------------------------------------------------------------------------
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. The new name of the loop variable and every line you renamed.
+    2. `git diff master -- tests/test_flet_constants.py` output, which must be
+       empty.
+    3. The proof required by [C]: the guard failing on an injected
+       page.window_width and passing after reverting it. Both outputs, in full.
+    4. Confirmation that everything listed in section 5 survived.
+    5. The output of `git status` showing no stray files.
+    6. The full output of `python -m pytest tests/ -v`.
+    7. Open questions or compromises. Write \"none\" if there are none.
