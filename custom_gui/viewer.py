@@ -29,6 +29,23 @@ def apply_pan(offset_x: float, offset_y: float, dx: float, dy: float) -> Tuple[f
     """
     return (offset_x + dx, offset_y + dy)
 
+def calculate_label_position(rect_left: float, rect_top: float, label_height: float, margin: float = 2.0) -> Tuple[float, float]:
+    """
+    Calculates the position of the label for a selection rectangle.
+    
+    The label is placed outside, immediately above the rectangle, aligned with its left edge.
+    If placing it above the rectangle would cause it to have a negative y coordinate (clipping),
+    the label is placed just inside the top edge of the rectangle instead, preventing it from going off-screen.
+    
+    Returns:
+        (label_left, label_top) coordinates.
+    """
+    label_top = rect_top - label_height - margin
+    if label_top < 0:
+        label_top = max(0.0, rect_top + margin)
+    
+    return (rect_left, label_top)
+
 class InteractionMode:
     def __init__(self):
         self.current = "SELECT"

@@ -1,5 +1,5 @@
 import flet as ft
-from custom_gui.viewer import ImageViewer, original_to_display, apply_pan, InteractionMode
+from custom_gui.viewer import ImageViewer, original_to_display, apply_pan, InteractionMode, calculate_label_position
 from custom_gui.selection import SelectionContainer, calculate_normalized_bbox
 from custom_gui.ocr_bridge import run_ocr_and_parse
 from custom_gui.region_filter import filter_lines_by_region
@@ -317,10 +317,22 @@ class SelectableImageViewer(ImageViewer):
                 left=dx1,
                 top=dy1,
                 width=w,
-                height=h,
-                content=ft.Text(rect.label, color=ft.Colors.BLUE, weight=ft.FontWeight.BOLD)
+                height=h
             )
             self.rects_layer.controls.append(drawn_rect)
+            
+            label_height = 20.0  # Estimated height of the label
+            label_left, label_top = calculate_label_position(dx1, dy1, label_height)
+            
+            label_container = ft.Container(
+                content=ft.Text(rect.label, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, size=14),
+                bgcolor=ft.Colors.with_opacity(0.7, ft.Colors.BLUE),
+                padding=ft.padding.symmetric(horizontal=4, vertical=2),
+                border_radius=2,
+                left=label_left,
+                top=label_top,
+            )
+            self.rects_layer.controls.append(label_container)
             
             # 抽出対象の行をフィルタリングしてハイライト & テキスト生成
             filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
