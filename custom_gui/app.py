@@ -1,4 +1,5 @@
 import flet as ft
+from custom_gui.image_sequence import ImageSequence, list_images_in_folder
 from custom_gui.viewer import ImageViewer, original_to_display, apply_pan, InteractionMode, calculate_label_position
 from custom_gui.selection import SelectionContainer, calculate_normalized_bbox
 from custom_gui.ocr_bridge import run_ocr_and_parse
@@ -29,16 +30,27 @@ class SelectableImageViewer(ImageViewer):
     def __init__(self, image_src: str, img_w: float, img_h: float, win_w: float, win_h: float, **kwargs):
         super().__init__(image_src, img_w, img_h, win_w, win_h, **kwargs)
         
-        self.selection_container = SelectionContainer()
+        # New state variables for per-image state
+        self.image_states = {}
+        self.image_states[image_src] = {
+            "selections": SelectionContainer(),
+            "ocr_state": OcrState.IDLE if os.path.exists(image_src) else OcrState.ERROR,
+            "ocr_results": [],
+            "ocr_error": None if os.path.exists(image_src) else f"Error: Image not found at {image_src}"
+        }
+        
+        self.selection_container = self.image_states[image_src]["selections"]
+        self.ocr_state = self.image_states[image_src]["ocr_state"]
+        self.ocr_results = self.image_states[image_src]["ocr_results"]
+        self.ocr_error = self.image_states[image_src]["ocr_error"]
+        
+        self.sequence = ImageSequence([image_src])
+        
         self.drag_start_point = None
         self.drag_current_point = None
         self.active_rect = None
-        self.drag_current_point = None
         
         self.mode_state = InteractionMode()
-        
-        self.ocr_results = []
-        self.ocr_state = OcrState.IDLE if os.path.exists(image_src) else OcrState.ERROR
             
         self.mode_toggle = ft.SegmentedButton(
             segments=[
@@ -50,6 +62,30 @@ class SelectableImageViewer(ImageViewer):
         )
         self.controls_row.controls.append(self.mode_toggle)
         
+        self.btn_open_folder = ft.IconButton(
+            icon=ft.Icons.FOLDER_OPEN,
+            tooltip="Open Folder",
+            on_click=self._on_open_folder_click
+        )
+        
+        self.btn_prev = ft.IconButton(
+            icon=ft.Icons.NAVIGATE_BEFORE,
+            tooltip="Previous Image",
+            on_click=self._on_prev_click,
+            disabled=not self.sequence.has_prev()
+        )
+        
+        self.btn_next = ft.IconButton(
+            icon=ft.Icons.NAVIGATE_NEXT,
+            tooltip="Next Image (Ctrl+N)",
+            on_click=self._on_next_click,
+            disabled=not self.sequence.has_next()
+        )
+
+        self.controls_row.controls.insert(0, self.btn_next)
+        self.controls_row.controls.insert(0, self.btn_prev)
+        self.controls_row.controls.insert(0, self.btn_open_folder)
+
         self.export_button = ft.IconButton(
             icon=ft.Icons.SAVE,
             tooltip="Export Results",
@@ -57,6 +93,7 @@ class SelectableImageViewer(ImageViewer):
         )
         self.controls_row.controls.append(self.export_button)
         
+        self._file_picker_mode = "save"
         self.file_picker = ft.FilePicker(on_result=self._on_file_picker_result)
         # The file_picker will be added to page.overlay when start_ocr or main runs,
         # but to be safe, we'll try to add it when the component is mounted (using did_mount) 
@@ -161,43 +198,52 @@ class SelectableImageViewer(ImageViewer):
                 self.page.update()
 
     def start_ocr(self, page: ft.Page):
-        if self.ocr_state == OcrState.ERROR:
+        target_path = self.image_src
+        state = self.image_states[target_path]
+        
+        if state["ocr_state"] in (OcrState.ERROR, OcrState.RUNNING, OcrState.DONE):
             return
             
-        self.ocr_state = OcrState.RUNNING
-        self.progress_ring.visible = True
-        if hasattr(self, 'status_text'):
-            self.status_text.value = self._get_status_message()
-            
-        if self.page:
-            self.status_row.update()
+        state["ocr_state"] = OcrState.RUNNING
+        if self.image_src == target_path:
+            self.ocr_state = OcrState.RUNNING
+            self.progress_ring.visible = True
+            if hasattr(self, 'status_text'):
+                self.status_text.value = self._get_status_message()
+            if self.page:
+                self.status_row.update()
             
         def _run_ocr():
             try:
-                results = run_ocr_and_parse(self.image_src)
-                self._on_ocr_complete(results, None)
+                results = run_ocr_and_parse(target_path)
+                self._on_ocr_complete(results, None, target_path=target_path)
             except Exception as e:
-                self._on_ocr_complete(None, str(e))
+                self._on_ocr_complete(None, str(e), target_path=target_path)
                 
         page.run_thread(_run_ocr)
         
-    def _on_ocr_complete(self, results, error):
-        self.progress_ring.visible = False
+    def _on_ocr_complete(self, results, error, target_path=None):
+        if target_path is None:
+            target_path = self.image_src
+        state = self.image_states[target_path]
         if error:
-            self.ocr_state = OcrState.ERROR
-            self.ocr_error = error
+            state["ocr_state"] = OcrState.ERROR
+            state["ocr_error"] = error
         else:
-            self.ocr_state = OcrState.DONE
-            self.ocr_results = results
+            state["ocr_state"] = OcrState.DONE
+            state["ocr_results"] = results
             
-        if hasattr(self, 'status_text'):
-            self.status_text.value = self._get_status_message()
+        if self.image_src == target_path:
+            self.ocr_state = state["ocr_state"]
+            self.ocr_error = state["ocr_error"]
+            self.ocr_results = state["ocr_results"]
             
-        if self.page:
-            self.status_row.update()
-            
-        # Reprocess selections if any were drawn before OCR finished
-        self._update_selections_ui()
+            self.progress_ring.visible = False
+            if hasattr(self, 'status_text'):
+                self.status_text.value = self._get_status_message()
+            if self.page:
+                self.status_row.update()
+            self._update_selections_ui()
 
 
     def _on_mode_change(self, e):
@@ -210,6 +256,80 @@ class SelectableImageViewer(ImageViewer):
             self.status_text.value = self._get_status_message()
         if self.page:
             self.update()
+
+
+    def _on_open_folder_click(self, e):
+        self._file_picker_mode = "folder"
+        if self.page:
+            self.file_picker.get_directory_path(dialog_title="Open Folder")
+            
+    def _on_prev_click(self, e):
+        if self.sequence.has_prev():
+            self._switch_image(self.sequence.prev())
+            
+    def _on_next_click(self, e):
+        if self.sequence.has_next():
+            self._switch_image(self.sequence.next())
+            
+    def _switch_image(self, path: str):
+        if not path:
+            return
+            
+        if path not in self.image_states:
+            self.image_states[path] = {
+                "selections": SelectionContainer(),
+                "ocr_state": OcrState.IDLE if os.path.exists(path) else OcrState.ERROR,
+                "ocr_results": [],
+                "ocr_error": None if os.path.exists(path) else f"Error: Image not found at {path}"
+            }
+            
+        state = self.image_states[path]
+        
+        self.image_src = path
+        self.selection_container = state["selections"]
+        self.ocr_state = state["ocr_state"]
+        self.ocr_results = state["ocr_results"]
+        self.ocr_error = state["ocr_error"]
+        
+        try:
+            from PIL import Image
+            with Image.open(path) as img:
+                self.img_w, self.img_h = img.size
+        except Exception as e:
+            self.img_w, self.img_h = 800, 600
+            
+        self.image_control.src = path
+        self.image_control.width = self.img_w
+        self.image_control.height = self.img_h
+        
+        from custom_gui.viewer import calculate_fit_scale
+        self.zoom_scale = calculate_fit_scale(self.img_w, self.img_h, self.win_w, self.win_h)
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        
+        if self.ocr_error:
+            self.image_container.content = ft.Text(self.ocr_error, color=ft.Colors.RED, weight=ft.FontWeight.BOLD)
+        else:
+            self.image_container.content = self.stack
+            
+        self.btn_prev.disabled = not self.sequence.has_prev()
+        self.btn_next.disabled = not self.sequence.has_next()
+        
+        if self.page:
+            self.btn_prev.update()
+            self.btn_next.update()
+            self.image_container.update()
+            
+        self.update_layout(self.win_w, self.win_h)
+        self._update_viewer()
+        self._update_selections_ui()
+        
+        self.progress_ring.visible = (self.ocr_state == OcrState.RUNNING)
+        if self.page:
+            self.status_row.update()
+        
+        if self.ocr_state == OcrState.IDLE and self.page:
+            self.start_ocr(self.page)
 
     def _on_export_click(self, e):
         rects = self.selection_container.get_all()
@@ -225,6 +345,7 @@ class SelectableImageViewer(ImageViewer):
             
         default_filename = f"{os.path.splitext(os.path.basename(self.image_src))[0]}.csv"
         
+        self._file_picker_mode = "save"
         if self.page:
             self.file_picker.save_file(
                 dialog_title="Export OCR Results",
@@ -234,9 +355,19 @@ class SelectableImageViewer(ImageViewer):
 
     def _on_file_picker_result(self, e: ft.FilePickerResultEvent):
         if not e.path:
-            # User canceled
             return
             
+        if self._file_picker_mode == "folder":
+            paths = list_images_in_folder(e.path)
+            if not paths:
+                self.latest_region_info = f"No images found in {os.path.basename(e.path)}"
+                self._update_status()
+            else:
+                self.sequence = ImageSequence(paths)
+                self.latest_region_info = f"Opened folder {os.path.basename(e.path)} ({len(paths)} images)"
+                self._switch_image(self.sequence.current())
+            return
+
         try:
             path_csv = e.path
             if not path_csv.lower().endswith(".csv"):
@@ -278,9 +409,11 @@ class SelectableImageViewer(ImageViewer):
                 self.status_text.update()
 
     def _get_status_message(self):
-        filename = os.path.basename(self.image_src)
+        filename = os.path.basename(self.image_src) if self.image_src else "None"
         ocr_status = get_ocr_status_text(self.ocr_state, len(self.ocr_results))
-        return (f"File: {filename} | Size: {self.img_w}x{self.img_h} | Scale: {self.zoom_scale:.3f} | Mode: {self.mode_state.current} | "
+        idx = self.sequence.index + 1 if self.sequence.count > 0 else 0
+        seq_str = f"[{idx}/{self.sequence.count}]"
+        return (f"{seq_str} File: {filename} | Size: {self.img_w}x{self.img_h} | Scale: {self.zoom_scale:.3f} | Mode: {self.mode_state.current} | "
                 f"{ocr_status} | Last: {self.latest_region_info}")
 
     def update_layout(self, win_w: float, win_h: float):
@@ -486,13 +619,19 @@ class SelectableImageViewer(ImageViewer):
         self._update_selections_ui()
 
 def main(page: ft.Page):
-    # Use repository bundled image for offline operation
+    from PIL import Image
     image_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+    
+    try:
+        with Image.open(image_path) as img:
+            img_w, img_h = img.size
+    except Exception:
+        img_w, img_h = 2048, 1446
     
     viewer = SelectableImageViewer(
         image_src=image_path,
-        img_w=2048,
-        img_h=1446,
+        img_w=img_w,
+        img_h=img_h,
         win_w=page.width if page.width else 800,
         win_h=page.height if page.height else 600,
         expand=True
@@ -502,12 +641,17 @@ def main(page: ft.Page):
         viewer.update_layout(page.width, page.height)
         page.update()
         
+    def on_keyboard(e: ft.KeyboardEvent):
+        if e.key == "N" and e.ctrl:
+            if viewer.btn_next and not viewer.btn_next.disabled:
+                viewer._on_next_click(None)
+                
     page.on_resized = on_resize
+    page.on_keyboard_event = on_keyboard
     page.add(viewer)
     viewer.update_layout(page.width if page.width else 800, page.height if page.height else 600)
     page.update()
     
-    # Start OCR in background thread after UI is drawn
     viewer.start_ocr(page)
 
 if __name__ == "__main__":
