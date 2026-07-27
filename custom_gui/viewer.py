@@ -32,14 +32,14 @@ class ImageViewer(ft.Container):
         self.win_w = win_w
         self.win_h = win_h
         
-        self.scale = calculate_fit_scale(img_w, img_h, win_w, win_h)
+        self.zoom_scale = calculate_fit_scale(img_w, img_h, win_w, win_h)
         self.offset_x = 0.0
         self.offset_y = 0.0
         
-        self.image = ft.Image(
+        self.image_control = ft.Image(
             src=self.image_src,
-            width=self.img_w * self.scale,
-            height=self.img_h * self.scale,
+            width=self.img_w * self.zoom_scale,
+            height=self.img_h * self.zoom_scale,
             fit=ft.ImageFit.CONTAIN
         )
         
@@ -50,41 +50,49 @@ class ImageViewer(ft.Container):
         self.controls_row = ft.Row([self.zoom_in_btn, self.zoom_out_btn, self.fit_btn])
         
         self.image_container = ft.Container(
-            content=self.image,
-            width=self.win_w,
-            height=self.win_h,
+            content=self.image_control,
+            width=self.img_w * self.zoom_scale,
+            height=self.img_h * self.zoom_scale,
             alignment=ft.alignment.top_left,
         )
         
+        self.scrollable_image = ft.Column(
+            [ft.Row([self.image_container], scroll=ft.ScrollMode.AUTO, expand=True)],
+            scroll=ft.ScrollMode.AUTO,
+            expand=True
+        )
+
         self.content = ft.Column([
             self.controls_row,
-            self.image_container
-        ])
+            self.scrollable_image
+        ], expand=True)
         
     def zoom_in(self, e):
-        self.scale *= 1.2
+        self.zoom_scale *= 1.2
         self._update_viewer()
+        self.update()
         
     def zoom_out(self, e):
-        self.scale /= 1.2
+        self.zoom_scale /= 1.2
         self._update_viewer()
+        self.update()
         
     def fit(self, e):
-        self.scale = calculate_fit_scale(self.img_w, self.img_h, self.win_w, self.win_h)
+        self.zoom_scale = calculate_fit_scale(self.img_w, self.img_h, self.win_w, self.win_h)
         self._update_viewer()
+        self.update()
         
-    def resize_viewer(self, win_w: float, win_h: float):
+
+    def _update_viewer(self):
+        self.image_control.width = self.img_w * self.zoom_scale
+        self.image_control.height = self.img_h * self.zoom_scale
+        self.image_container.width = self.img_w * self.zoom_scale
+        self.image_container.height = self.img_h * self.zoom_scale
+        self.image_control.update()
+        self.image_container.update()
+
+    def update_layout(self, win_w: float, win_h: float):
         self.win_w = win_w
         self.win_h = win_h
-        self.image_container.width = self.win_w
-        self.image_container.height = self.win_h
-        # Keep scale logic by recalculating the fit scale if it was previously set to fit
-        # To just always resize correctly we update scale to fit new dimensions
-        self.scale = calculate_fit_scale(self.img_w, self.img_h, self.win_w, self.win_h)
+        self.zoom_scale = calculate_fit_scale(self.img_w, self.img_h, self.win_w, self.win_h)
         self._update_viewer()
-        
-    def _update_viewer(self):
-        self.image.width = self.img_w * self.scale
-        self.image.height = self.img_h * self.scale
-        self.image.update()
-
