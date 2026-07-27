@@ -1,0 +1,64 @@
+Task 01: [NEW] custom_gui パッケージ雛形と pytest テスト基盤の構築
+
+本リポジトリのルートにある AGENTS.md（プロジェクト憲法）を必ず読み、その規約に従って作業すること。
+
+1. 目的・背景 (Purpose & Background):
+本プロジェクトは NDLOCR-Lite（国立国会図書館 / CC BY 4.0）を fork し、
+「マウスで矩形範囲を選択して、その範囲だけOCR結果を取り出す」機能を追加するものである。
+上流のコードは一切変更せず、新規ディレクトリ custom_gui/ にのみ機能を追加する方針（C方式）を採る。
+本タスクはその第一歩として、後続タスクが乗るための「空の土台」を作ることだけを目的とする。
+機能実装は一切行わない。
+
+2. 完了条件 (Definition of Done):
+   - `custom_gui/__init__.py` を新規作成し、リポジトリルートで
+     `python -c "import custom_gui"` がエラーなく成功すること。
+   - `tests/` ディレクトリと `tests/test_smoke.py` を新規作成し、
+     リポジトリルートで `python -m pytest tests/ -v` を実行すると
+     1件以上のテストが収集され、全件グリーンで完了すること。
+     （test_smoke.py は「custom_gui が import できること」を検証する内容とする。
+       `assert True` のような検証内容のないテストは不可）
+   - 上流ファイル（`src/` `ndlocr-lite-gui/` `train/` `resource/` `LICENCE`
+     `LICENCE_DEPENDENCEIES` `README.md` `pyproject.toml` `requirements.txt`）に
+     一切の変更・追加・削除がないこと。
+
+3. 変更許可スコープ (Allowed Scope / Whitelist):
+   - `custom_gui/**`
+   - `tests/**`
+
+4. 変更禁止スコープ (Prohibited Scope / Blacklist):
+   - `src/**`
+   - `ndlocr-lite-gui/**`
+   - `train/**`
+   - `resource/**`
+   - `LICENCE`, `LICENCE_DEPENDENCEIES`
+   - `README.md`
+   - `pyproject.toml`, `requirements.txt`
+   - `.github/**`
+   - `.nightly/**`
+   - `AGENTS.md`, `CLAUDE.md`, `task_template.md`
+   - `scripts/**`
+   - `.agents/**`
+
+5. 既存ユニットテストの絶対保護:
+   - 既存テストの削除・スキップ・期待値変更を固く禁止する。
+   - 既存テストが失敗する場合、テストコードを修正してグリーンにするのではなく、
+     失敗内容と原因を報告して停止すること。
+
+6. 今回やらないこと (Out of Scope):
+   - GUI・画面の実装（flet のウィンドウ作成を含む）
+   - OCR処理の呼び出し・実装
+   - 矩形選択に関する実装
+   - 上流コードのリファクタリング、フォーマット変更、型注釈の追加
+   - 依存パッケージの追加（requirements.txt / pyproject.toml の変更）
+   - 国立国会図書館の著作権表示・クレジット・ライセンス条項の削除、改変、移動
+
+7. 詰まった場合の指示 (Failsafe):
+   - 完了条件を満たせない障害に遭遇した場合、回避策を発明せず、
+     できた部分までで作業を止め、障害の内容を報告すること。
+   - 本指示とコードの実態が矛盾していた場合も、推測で埋めずに報告を優先すること。
+
+8. 提出時の説明に含めること:
+   1. 完了条件との対応表（各条件を満たした方法）
+   2. 変更ファイル一覧と各変更の理由
+   3. `python -m pytest tests/ -v` の実行結果
+   4. 未確定事項・妥協した点（なければ「なし」と明記）
