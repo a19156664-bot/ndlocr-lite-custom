@@ -1,0 +1,262 @@
+Task 23: [NEW] Open a folder of images and move between them (Next / Prev / Ctrl+N)
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. PURPOSE
+--------------------------------------------------------------------------------
+Today the application opens exactly ONE image, hardcoded in main():
+
+    image_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+    viewer = SelectableImageViewer(image_src=image_path,
+                                   img_w=2048, img_h=1446, ...)
+
+Note that the image dimensions are hardcoded too. Both must go.
+
+The user scans historical documents. A scanned volume is one FOLDER of page
+images. The human owner has decided the entry point:
+
+    "Open a FOLDER. List the images inside it in filename order.
+     Move through them with a Next button and Ctrl+N."
+
+--------------------------------------------------------------------------------
+2. VERIFIED ENVIRONMENT - USE THESE, THEY EXIST
+--------------------------------------------------------------------------------
+The commander verified all of the following against this repository's pinned
+environment. Do not add dependencies.
+
+    ft.FilePicker.get_directory_path(dialog_title=None, initial_directory=None)
+    ft.Page.on_keyboard_event                     exists
+    ft.KeyboardEvent  ->  key: str, shift: bool, ctrl: bool, alt: bool, meta: bool
+    ft.Icons.FOLDER_OPEN / NAVIGATE_NEXT / NAVIGATE_BEFORE    all exist
+    Pillow 12.1.1 is already installed:
+        from PIL import Image
+        Image.open("resource/digidepo_2531162_0024.jpg").size  ->  (2048, 1446)
+
+Use Pillow to read each image's real dimensions. Do NOT hardcode sizes and do
+NOT add an image library.
+
+--------------------------------------------------------------------------------
+3. CURRENT CODE CONTRACT (on master - use it, do not change it)
+--------------------------------------------------------------------------------
+custom_gui/viewer.py - PURE functions, signatures MUST NOT change:
+    original_to_display(x, y, scale, offset_x=0.0, offset_y=0.0)
+    display_to_original(x, y, scale, offset_x=0.0, offset_y=0.0)
+    calculate_fit_scale(img_w, img_h, win_w, win_h)
+    apply_pan(offset_x, offset_y, dx, dy)
+    calculate_label_position(rect_left, rect_top, label_height, margin=2.0)
+    class InteractionMode                          # .current, .set_mode(mode)
+
+class ImageViewer(ft.Container).__init__(image_src, img_w, img_h, win_w, win_h)
+    self.image_control   the ft.Image  (NEVER self.image  - reserved, crashed us)
+    self.zoom_scale      float         (NEVER self.scale  - reserved, crashed us)
+    self.offset_x, self.offset_y, self.img_w, self.img_h, self.win_w, self.win_h
+    self.controls_row    toolbar Row
+    self.image_container, self.scrollable_image
+    zoom_in / zoom_out / fit / update_layout(win_w, win_h) / _update_viewer()
+
+class SelectableImageViewer(ImageViewer) in custom_gui/app.py:
+    self.image_src, self.ocr_results, self.ocr_state, self.ocr_error
+    self.selection_container   SelectionContainer
+    self.mode_state, self.status_text, self.status_row, self.progress_ring
+    self.file_picker           ft.FilePicker already in page.overlay via did_mount
+    self.export_button
+    start_ocr(page)            launches OCR via page.run_thread
+    _on_ocr_complete(results, error)
+    _update_selections_ui() / _update_status() / _get_status_message()
+    did_mount()
+
+    class OcrState(Enum): IDLE / RUNNING / DONE / ERROR
+    def get_ocr_status_text(state, line_count=0) -> str
+
+custom_gui/selection.py:
+    @dataclass SelectionRect: rect_id: str, bbox: (x1,y1,x2,y2), label: str
+    class SelectionContainer: add(bbox, label=None) / get_all() / delete_by_id(id)
+
+--------------------------------------------------------------------------------
+4. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] New PURE module `custom_gui/image_sequence.py`. It must NOT import flet.
+
+        SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
+
+        def list_images_in_folder(folder) -> List[str]
+            # Full paths of supported images DIRECTLY inside `folder`
+            # (do not recurse into sub-folders).
+            # Extension matching is CASE-INSENSITIVE: "0002.JPG" counts.
+            # Sorted by file name, ascending, so 0001 comes before 0002.
+            # A folder with no images returns [] - not an error.
+
+        class ImageSequence:
+            def __init__(self, paths: List[str])
+            current() -> Optional[str]      # None when the list is empty
+            index    -> int                 # 0-based; -1 or 0 when empty, your
+                                            # choice, but document it
+            count    -> int
+            has_next() -> bool
+            has_prev() -> bool
+            next() -> Optional[str]         # advances and returns the new current
+            prev() -> Optional[str]
+            goto(i) -> Optional[str]
+
+        Navigation must CLAMP at the ends. It must NOT wrap around: calling
+        next() on the last image leaves you on the last image. Document this.
+
+[B] "Open Folder" button.
+    - Add it to `self.controls_row` with ft.Icons.FOLDER_OPEN.
+    - It calls `self.file_picker.get_directory_path(...)`.
+    - Reuse the EXISTING `self.file_picker`; do not create a second one. Its
+      `on_result` handler currently assumes a save-file result, so you must make
+      that handler distinguish between "the user was saving a file" and "the user
+      was choosing a folder". State clearly in your report how you did this.
+    - A folder containing no supported images must show a clear status bar
+      message such as "No images found in <folder>" and must NOT change the
+      currently displayed image.
+
+[C] Navigation controls.
+    - "Prev" and "Next" buttons in the toolbar (ft.Icons.NAVIGATE_BEFORE /
+      NAVIGATE_NEXT).
+    - Ctrl+N moves to the next image, via `page.on_keyboard_event` checking
+      `e.key` and `e.ctrl`.
+    - Buttons must be DISABLED (not merely inert) when there is nowhere to go:
+      Prev on the first image, Next on the last, and both when no folder is open.
+    - The status bar must show the position, e.g. `2 / 12`, alongside the
+      existing fields.
+
+[D] Switching image actually switches everything.
+    When the current image changes:
+      - `self.image_src` and `self.image_control.src` point at the new file.
+      - `self.img_w` / `self.img_h` are the NEW image's real dimensions, read
+        with Pillow. Do not assume 2048x1446.
+      - The zoom resets to fit the new image (`calculate_fit_scale`) and
+        `offset_x` / `offset_y` reset to 0.0.
+      - The Selections panel, rectangles and highlights show the NEW image's
+        data, not the previous image's.
+
+[E] Per-image state is REMEMBERED. This is the core requirement.
+    - Each image keeps its OWN rectangles and its OWN OCR results.
+    - Going to image 2, drawing a rectangle, going back to image 1 and returning
+      to image 2 must show that rectangle again.
+    - OCR results are CACHED per image: returning to an image that has already
+      been OCR'd must NOT re-run OCR. It takes about 50 seconds.
+    - Keep this state in a small, GUI-free structure so it is testable, for
+      example a dict keyed by image path holding a SelectionContainer, the OCR
+      line list and the OcrState.
+
+[F] OCR stays asynchronous and lazy.
+    - OCR runs only for the image being displayed, and only if it has not been
+      run for that image yet.
+    - It must keep using `page.run_thread` and must NOT block the UI. The whole
+      point of Task 12 was that the window stays usable; do not regress it.
+    - If the user moves to another image while OCR is still running, the app must
+      not crash and must not write the finished results onto the WRONG image.
+      State in your report how you prevented that.
+    - The progress indicator and status text keep working per image.
+
+[G] Backwards compatibility on startup.
+    With no folder chosen, the application must still start on the bundled image
+    `resource/digidepo_2531162_0024.jpg` exactly as it does today, reading its
+    size with Pillow rather than the hardcoded 2048x1446.
+
+[H] Tests - `tests/test_image_sequence.py`, no GUI, no real OCR.
+    Concrete assertions, not properties. Use pytest's `tmp_path` to build a fake
+    folder. At minimum:
+      (a) A folder containing 0002.jpg, 0001.png, 0003.JPG, notes.txt and a
+          sub-folder returns EXACTLY 3 paths, whose basenames are
+          ["0001.png", "0002.jpg", "0003.JPG"] in that order. This covers
+          sorting, case-insensitive extensions, non-image rejection and
+          no-recursion in one assertion.
+      (b) An empty folder returns [].
+      (c) ImageSequence over 3 paths: index starts at 0; next() twice reaches
+          index 2; a THIRD next() leaves index at 2 and has_next() is False.
+      (d) prev() from index 0 leaves index at 0 and has_prev() is False.
+      (e) goto(1) then current() returns the second path; goto(99) does not
+          raise and does not move past the end - assert the exact resulting
+          index.
+      (f) ImageSequence([]) - current() is None, count is 0, has_next() and
+          has_prev() are both False, and next() does not raise.
+    Add a test for the per-image state store from [E] asserting that rectangles
+    added while on image A are still there after switching to B and back to A,
+    and that the OCR cache for A is not cleared by visiting B.
+
+[I] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely (57+ tests).
+    - Do NOT modify custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+      custom_gui/selection.py, custom_gui/text_assembler.py,
+      custom_gui/exporter.py.
+    - Do not modify the pure functions in custom_gui/viewer.py.
+    - Everything a human has already verified must keep working: rectangle
+      selection, the Select/Pan toggle, panning, yellow highlights, the
+      "Region N" label drawn OUTSIDE the rectangle, the extracted text panel,
+      the async OCR progress indicator and the CSV/TXT export button.
+    - Guard every `.update()` call on a control with `if self.page:`.
+    - Do not run real OCR in your tests.
+
+--------------------------------------------------------------------------------
+5. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/image_sequence.py     (new file)
+    custom_gui/app.py
+    custom_gui/viewer.py             (ONLY if switching the displayed image
+                                      genuinely requires it; the pure functions
+                                      must not change)
+    tests/test_image_sequence.py     (new file)
+
+--------------------------------------------------------------------------------
+6. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py,
+    custom_gui/exporter.py                                    (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+7. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Exporting ALL images into one file. Export stays exactly as it is today:
+      it writes the CURRENT image only. Aggregated export is the next task.
+      Do not change custom_gui/exporter.py.
+    - Pre-loading or batch-OCRing every image in the folder. OCR stays lazy.
+    - Editing the extracted text (a later task).
+    - Recursing into sub-folders.
+    - Thumbnails, a preview strip, or drag-and-drop.
+    - PDF support.
+    - Resizing or moving existing rectangles.
+    - Mouse-wheel or keyboard zoom.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6 and Pillow
+      is already present.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+8. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [A] and [H] first (the pure logic and its
+      tests), then [D] and [E], then [B] and [C], then [F], then [G].
+    - This is a large task. If you cannot finish all of it, a SMALLER CORRECT
+      result is far better than a large broken one. Never leave the existing
+      single-image behaviour broken.
+    - If this instruction contradicts the actual state of the code, do not guess.
+      Stop and report the contradiction.
+
+--------------------------------------------------------------------------------
+9. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[I] to how you satisfied it.
+    2. The exact public API of custom_gui/image_sequence.py.
+    3. How one FilePicker serves both "save file" and "choose folder".
+    4. How you prevented a late-finishing OCR from being applied to the wrong
+       image after the user navigated away.
+    5. Where per-image state lives and how it is keyed.
+    6. The list of changed files and the reason for each change.
+    7. The full output of `python -m pytest tests/ -v`.
+    8. Anything that cannot be verified without a GUI, stated explicitly, so a
+       human can check it manually.
+    9. Open questions or compromises. Write "none" if there are none.
