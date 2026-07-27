@@ -23,6 +23,20 @@ def calculate_fit_scale(img_w: float, img_h: float, win_w: float, win_h: float) 
         return 1.0
     return min(win_w / img_w, win_h / img_h)
 
+def apply_pan(offset_x: float, offset_y: float, dx: float, dy: float) -> Tuple[float, float]:
+    """
+    Calculate the new offsets after panning by dx and dy.
+    """
+    return (offset_x + dx, offset_y + dy)
+
+class InteractionMode:
+    def __init__(self):
+        self.current = "SELECT"
+        
+    def set_mode(self, mode: str):
+        if mode in ["SELECT", "PAN"]:
+            self.current = mode
+
 class ImageViewer(ft.Container):
     def __init__(self, image_src: str, img_w: float, img_h: float, win_w: float, win_h: float, **kwargs):
         super().__init__(**kwargs)
