@@ -1,0 +1,154 @@
+Task 21: [FIX] Draw the "Region N" label outside the rectangle so it stops covering the text
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. THE PROBLEM - REPORTED BY THE HUMAN USER
+--------------------------------------------------------------------------------
+The user's exact words:
+
+    "Region NN の表示を枠外に表示させる。
+     理由：OCR文字と重なっており、見えない為。"
+    (Show the "Region NN" caption outside the rectangle, because right now it
+     overlaps the OCR characters and they cannot be read.)
+
+The purpose of this application is to read the scanned page. A caption painted
+on top of the page defeats that purpose.
+
+The cause is in `custom_gui/app.py`, in `_update_selections_ui`. The label is
+passed as the CONTENT of the selection rectangle container, so it is rendered
+INSIDE the rectangle, on top of the image:
+
+        drawn_rect = ft.Container(
+            border=ft.border.all(2, ft.Colors.BLUE),
+            bgcolor=ft.Colors.TRANSPARENT,
+            left=dx1, top=dy1, width=w, height=h,
+            content=ft.Text(rect.label, color=ft.Colors.BLUE,
+                            weight=ft.FontWeight.BOLD)     # <-- this
+        )
+        self.rects_layer.controls.append(drawn_rect)
+
+--------------------------------------------------------------------------------
+2. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] The rectangle no longer contains the label.
+    - The selection rectangle keeps its blue 2px border and transparent fill.
+    - It must have NO text content of its own. Nothing is painted over the page
+      inside the rectangle.
+
+[B] The label is drawn as a separate control, outside the rectangle.
+    - Default position: immediately ABOVE the rectangle, left-aligned with its
+      left edge, so the caption sits in the margin above the selection.
+    - Give it a readable background (for example an opaque or high-opacity
+      container behind the text) so it is legible over any part of the scan.
+    - It must still be visually associated with its rectangle at a glance.
+
+[C] It must never be clipped off the top of the image.
+    - If the rectangle is near the top edge and the label would be drawn at a
+      negative y, place it just BELOW the rectangle's top edge instead (still
+      outside the drawn area if possible, otherwise immediately inside the top).
+    - Express this decision as a PURE function so it can be tested without a GUI,
+      for example:
+
+          def calculate_label_position(rect_left, rect_top, label_height,
+                                       margin=2.0) -> (label_left, label_top)
+
+      Returning a y above the rectangle when there is room, and a fallback y when
+      there is not. Choose the exact contract yourself, but it MUST be pure,
+      GUI-free, and documented with a docstring.
+
+[D] Everything keeps following the image.
+    - The label must move with its rectangle when the user pans (Pan mode) and
+      when the user zooms, exactly like the rectangle itself.
+    - It must be positioned using the display coordinates already computed for
+      the rectangle in `_update_selections_ui`, i.e. derived from
+      `original_to_display(x, y, self.zoom_scale, self.offset_x, self.offset_y)`.
+
+[E] Tests (no GUI window may be opened).
+    Create `tests/test_label_position.py` with CONCRETE NUMERIC assertions, not
+    property round-trips. At minimum:
+      (a) A rectangle with plenty of room above, e.g. rect_top = 300 and
+          label_height = 20, places the label ABOVE it: assert the exact expected
+          y value your formula produces, and assert it is strictly less than 300.
+      (b) The label's left edge equals the rectangle's left edge (or your
+          documented offset from it) - assert the exact number.
+      (c) A rectangle at rect_top = 0 does NOT produce a negative y: assert the
+          exact fallback value.
+      (d) A rectangle at rect_top = 5 with label_height = 20 (not enough room)
+          also does NOT produce a negative y.
+
+--------------------------------------------------------------------------------
+3. REGRESSION SAFETY - READ THIS
+--------------------------------------------------------------------------------
+    - `python -m pytest tests/ -v` must pass completely.
+    - Rectangle selection, the yellow OCR highlights and the extracted text in
+      the Selections panel are the core of this product and a human has verified
+      them working. Do not regress them.
+    - The Select / Pan mode toggle must keep working.
+    - Do not modify the pure functions in custom_gui/viewer.py:
+          original_to_display / display_to_original / calculate_fit_scale /
+          apply_pan / class InteractionMode
+    - NEVER use `self.image` or `self.scale` as attribute names. Both are
+      reserved by flet and previously caused a fatal startup crash here.
+    - Guard every `.update()` call on a control with `if self.page:` - unguarded
+      update() calls have already caused failures in this project.
+    - tests/test_flet_constants.py fails if you reference a flet constant or a
+      `page.` attribute that does not exist. Verify anything you are unsure of.
+    - The full suite currently takes about 100 seconds because
+      tests/test_ocr_bridge.py runs real OCR. Do not modify that file and do not
+      make your new tests run real OCR.
+
+--------------------------------------------------------------------------------
+4. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/app.py
+    custom_gui/viewer.py            (only if the pure helper belongs there; the
+                                     existing pure functions must not change)
+    tests/test_label_position.py    (new file)
+
+--------------------------------------------------------------------------------
+5. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py     (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+6. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Renaming or renumbering the regions themselves.
+    - Making the label editable or draggable.
+    - Exporting txt / CSV.
+    - Multiple images, folder loading, a "next image" button.
+    - Editing extracted text.
+    - Mouse-wheel or keyboard zoom.
+    - Resizing or moving existing rectangles; PDF support.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+7. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [A] and [B] first, then [D], then [C] and
+      [E].
+    - If this instruction contradicts the actual state of the code, do not guess.
+      Stop and report the contradiction.
+
+--------------------------------------------------------------------------------
+8. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[E] to how you satisfied it.
+    2. The exact signature and contract of your pure positioning function.
+    3. How you made the label legible over a dark or busy part of the scan.
+    4. The list of changed files and the reason for each change.
+    5. The full output of `python -m pytest tests/ -v`.
+    6. Anything that cannot be verified without a GUI, stated explicitly.
+    7. Open questions or compromises. Write "none" if there are none.
