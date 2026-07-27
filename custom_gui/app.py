@@ -82,8 +82,8 @@ class SelectableImageViewer(ImageViewer):
         self.drag_start_point = (e.local_x, e.local_y)
         self.drag_current_point = None
         self.active_rect = ft.Container(
-            border=ft.border.all(2, ft.colors.RED),
-            bgcolor=ft.colors.with_opacity(0.2, ft.colors.RED),
+            border=ft.border.all(2, ft.Colors.RED),
+            bgcolor=ft.Colors.with_opacity(0.2, ft.Colors.RED),
             left=e.local_x,
             top=e.local_y,
             width=0,
@@ -154,13 +154,13 @@ class SelectableImageViewer(ImageViewer):
             h = dy2 - dy1
             
             drawn_rect = ft.Container(
-                border=ft.border.all(2, ft.colors.BLUE),
-                bgcolor=ft.colors.transparent,
+                border=ft.border.all(2, ft.Colors.BLUE),
+                bgcolor=ft.Colors.TRANSPARENT,
                 left=dx1,
                 top=dy1,
                 width=w,
                 height=h,
-                content=ft.Text(rect.label, color=ft.colors.BLUE, weight=ft.FontWeight.BOLD)
+                content=ft.Text(rect.label, color=ft.Colors.BLUE, weight=ft.FontWeight.BOLD)
             )
             self.rects_layer.controls.append(drawn_rect)
             
@@ -176,7 +176,7 @@ class SelectableImageViewer(ImageViewer):
                 
                 # Selection Rectと区別するため黄色系の半透明塗りつぶし (borderなし)
                 highlight = ft.Container(
-                    bgcolor=ft.colors.with_opacity(0.4, ft.colors.YELLOW),
+                    bgcolor=ft.Colors.with_opacity(0.4, ft.Colors.YELLOW),
                     left=ldx1,
                     top=ldy1,
                     width=ldx2 - ldx1,
@@ -192,7 +192,7 @@ class SelectableImageViewer(ImageViewer):
             item_content = ft.Column([
                 ft.Row([
                     ft.Text(f"{rect.label}:", weight=ft.FontWeight.BOLD),
-                    ft.IconButton(icon=ft.icons.DELETE, on_click=delete_rect)
+                    ft.IconButton(icon=ft.Icons.DELETE, on_click=delete_rect)
                 ]),
                 ft.Text(extracted_text, selectable=True)
             ])
@@ -200,7 +200,7 @@ class SelectableImageViewer(ImageViewer):
             item = ft.Container(
                 content=item_content,
                 padding=10,
-                border=ft.border.all(1, ft.colors.OUTLINE),
+                border=ft.border.all(1, ft.Colors.OUTLINE),
                 border_radius=5
             )
             
@@ -210,6 +210,19 @@ class SelectableImageViewer(ImageViewer):
         self.rects_layer.update()
         self.selections_list.update()
 
+    def resize_viewer(self, win_w: float, win_h: float):
+        super().resize_viewer(win_w, win_h)
+        self.highlight_layer.width = self.win_w
+        self.highlight_layer.height = self.win_h
+        self.rects_layer.width = self.win_w
+        self.rects_layer.height = self.win_h
+        self.gesture_detector.width = self.win_w
+        self.gesture_detector.height = self.win_h
+        self.stack.width = self.win_w
+        self.stack.height = self.win_h
+        self.selections_list.height = self.win_h
+        self._update_selections_ui()
+
     def _update_viewer(self):
         super()._update_viewer()
         self._update_selections_ui()
@@ -218,13 +231,26 @@ def main(page: ft.Page):
     # Use repository bundled image for offline operation
     image_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
     
+    # Calculate initial window size excluding the selections list panel width (300)
+    initial_win_w = page.width - 300 if page.width > 300 else 800
+    initial_win_h = page.height if page.height > 0 else 600
+    
     viewer = SelectableImageViewer(
         image_src=image_path,
         img_w=2048,
         img_h=1446,
-        win_w=800,
-        win_h=600
+        win_w=initial_win_w,
+        win_h=initial_win_h
     )
+    
+    def on_resized(e):
+        new_win_w = page.width - 300 if page.width > 300 else 800
+        new_win_h = page.height if page.height > 0 else 600
+        viewer.resize_viewer(new_win_w, new_win_h)
+        page.update()
+        
+    page.on_resized = on_resized
+    
     page.add(viewer)
 
 if __name__ == "__main__":

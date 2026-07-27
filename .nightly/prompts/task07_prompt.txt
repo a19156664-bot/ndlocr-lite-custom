@@ -1,0 +1,124 @@
+Task 07: [FIX] 選択確定時の例外による表示不具合と、ウィンドウサイズ追従の修正
+
+本リポジトリのルートにある AGENTS.md（プロジェクト憲法）を必ず読み、その規約に従って作業すること。
+
+1. 目的・背景 (Purpose & Background):
+実機で動作確認したところ、以下3つの不具合が確認された。
+  (症状1) 画像の表示が小さすぎる。ウィンドウを最大化しても画像は縮小されたまま
+  (症状2) ドラッグして離しても赤い枠が消えず、青い確定枠に変わらない
+  (症状3) 右側の Selections パネルに「Region 1」も抽出テキストも表示されない
+
+指揮官による原因調査の結果、以下2点が根本原因として特定済みである。
+**原因の調査は完了しているため、原因究明からやり直す必要はない。下記の修正を実施すること。**
+
+  【原因A】症状2・3の真因（1箇所の例外が両方を引き起こしている）
+    custom_gui/app.py の _update_selections_ui() 内に
+        bgcolor=ft.colors.transparent
+    という記述がある。**flet に小文字の `transparent` 属性は存在しない**
+    （検証結果: hasattr(ft.colors, 'transparent') は False、
+       hasattr(ft.colors, 'TRANSPARENT') は True）。
+    このため確定矩形を描画する時点で AttributeError が発生し、
+    _update_selections_ui() が中断する。結果として
+      - rects_layer.update() が呼ばれず、削除済みの赤枠が画面に残る
+      - selections_list.update() が呼ばれず、パネルが空のままになる
+    という2つの症状が同時に発生している。
+
+  【原因B】症状1の真因
+    custom_gui/app.py の main() が win_w=800, win_h=600 をハードコードしている。
+    このためウィンドウを最大化しても表示領域は 800x600 のまま固定され、
+    2048x1446 の画像が約39%に縮小表示される。
+    ウィンドウサイズに追従する仕組みが実装されていない。
+    （画像の実寸 2048x1446 は宣言値と一致しており、座標系の誤りではない）
+
+2. 完了条件 (Definition of Done):
+
+  【A. 原因Aの修正 + 非推奨APIの移行】
+   - `ft.colors.transparent` を、存在する正しい定数に修正すること。
+   - あわせて `custom_gui/` 配下の **全ての `ft.colors.*` を `ft.Colors.*` へ、
+     全ての `ft.icons.*` を `ft.Icons.*` へ移行**すること。
+     理由: flet 0.25 で colors/icons enum は非推奨となり、0.28 で削除予定である
+     （本プロジェクトは flet 0.27.6 を使用しており、現時点で DeprecationWarning が出ている）。
+   - 移行後、`ft.Colors` / `ft.Icons` に**実在する定数名のみ**を使用すること。
+
+  【B. 原因Aの再発防止テスト（最重要）】
+   - `tests/test_flet_constants.py` を新規作成すること。
+     このテストは `custom_gui/` 配下の全 .py ファイルのソースを **ast モジュールで静的解析**し、
+     `ft.Colors.XXX` / `ft.Icons.XXX` / `ft.colors.XXX` / `ft.icons.XXX` の形で
+     参照されている**全ての属性名を収集**し、それらが実際に flet に存在することを
+     `hasattr` で検証すること。
+   - 存在しない属性が1つでもあれば、そのファイル名・属性名を含むメッセージでテストが失敗すること。
+   - このテストは GUI を起動せずに動作すること（ast による静的解析のみ）。
+   - 意図: 今回の不具合は「定数名のタイプミスが実行時まで発覚しない」ことが原因である。
+     同種の不具合を今後は必ずテストで検出できるようにする。
+
+  【C. 原因Bの修正（ウィンドウサイズ追従）】
+   - アプリ起動時、画像がウィンドウの表示領域いっぱいに（アスペクト比を保って）表示されること。
+   - **ウィンドウをリサイズすると、それに追従して表示領域と画像の表示倍率が更新されること。**
+     flet の `page.on_resized` イベント等を利用してよい。
+   - リサイズ後も、既に確定済みの選択矩形とハイライトが
+     **画像上の正しい位置に追従して再描画される**こと。
+   - `main()` の `win_w` / `win_h` のハードコードを解消すること。
+     初期ウィンドウサイズを設定する場合は `page.window` の設定を用いてよい。
+
+  【D. 全体】
+   - `python -m pytest tests/ -v` が全件グリーンで完了すること。
+   - 既存の全機能（矩形の追加・削除、ハイライト、テキスト表示、Zoom In/Out/Fit）が
+     引き続き動作すること。
+
+3. 変更許可スコープ (Allowed Scope / Whitelist):
+   - `custom_gui/app.py`
+   - `custom_gui/viewer.py`（ウィンドウ追従のために必要な場合のみ変更可。
+     ただし既存の3つの純粋関数
+       original_to_display / display_to_original / calculate_fit_scale
+     のシグネチャと計算式は**変更禁止**。既存テストが依存しているため）
+   - `tests/test_flet_constants.py`（新規）
+
+4. 変更禁止スコープ (Prohibited Scope / Blacklist):
+   - `custom_gui/ocr_bridge.py`, `custom_gui/selection.py`,
+     `custom_gui/region_filter.py`, `custom_gui/text_assembler.py`（**変更禁止**）
+   - `tests/test_smoke.py`, `tests/test_viewer.py`, `tests/test_ocr_bridge.py`,
+     `tests/test_selection.py`, `tests/test_region_filter.py`,
+     `tests/test_text_assembler.py`, `tests/test_vertical_order.py`
+     （既存テスト。**変更禁止**）
+   - `src/**`, `ndlocr-lite-gui/**`, `train/**`, `resource/**`
+   - `LICENCE`, `LICENCE_DEPENDENCEIES`, `README.md`
+   - `pyproject.toml`, `requirements.txt`
+   - `.github/**`, `.nightly/**`, `.agents/**`, `scripts/**`
+   - `AGENTS.md`, `CLAUDE.md`, `task_template.md`
+
+5. 既存ユニットテストの絶対保護:
+   - 既存テスト7ファイルの削除・スキップ・期待値変更を固く禁止する。
+   - 既存テストが失敗する場合、テストコードを修正せず、失敗内容と原因を報告して停止すること。
+   - 特に tests/test_viewer.py は viewer.py の3関数の計算式に依存している。
+     ウィンドウ追従の実装でこれらの関数を書き換えてはならない。
+
+6. 今回やらないこと (Out of Scope):
+   - OCR の非同期化・進捗表示（別タスクで対応予定。今回は同期実行のままでよい）
+   - 矩形のリサイズ・移動などの編集機能（別タスクで対応）
+   - ファイル選択ダイアログの実装（別タスクで対応）
+   - txt / CSV 出力、PDF対応、フォルダ一括処理
+   - OCR処理・フィルタ処理・テキスト組み立てのロジック変更
+   - 依存パッケージの追加・バージョン変更
+   - 国立国会図書館の著作権表示・クレジット・ライセンス条項の削除、改変、移動
+
+7. 技術的ヒント:
+   - 症状2・3は同一の例外に起因するため、原因Aの修正だけで両方が解消される見込みである。
+   - ast による属性名の収集は `ast.Attribute` ノードを走査し、
+     `node.value` が `ft.Colors` 等（`ast.Attribute` の入れ子）である場合に
+     `node.attr` を集める形で実装できる。
+   - GUI の自動テストが困難な部分はテスト対象外として構わないが、
+     完了条件Bの静的解析テストは**必ず実装すること**（GUI起動が不要なため実装可能）。
+
+8. 詰まった場合の指示 (Failsafe):
+   - 完了条件を満たせない障害に遭遇した場合、回避策を発明せず、
+     できた部分までで作業を止め、障害の内容を報告すること。
+   - 特に、ウィンドウ追従（完了条件C）の実装が flet の制約で困難な場合は、
+     無理な回避策を実装せず、A・B のみを完了させて C の障害内容を報告すること。
+     **A・B の修正は C より優先度が高い。**
+
+9. 提出時の説明に含めること:
+   1. 完了条件との対応表（A〜D の各条件を満たした方法）
+   2. 変更ファイル一覧と各変更の理由
+   3. `python -m pytest tests/ -v` の実行結果
+   4. `ft.colors` → `ft.Colors` へ移行した箇所の一覧
+   5. 未確定事項・妥協した点（なければ「なし」と明記）

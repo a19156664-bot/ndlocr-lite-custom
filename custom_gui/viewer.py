@@ -73,6 +73,16 @@ class ImageViewer(ft.Container):
         self.scale = calculate_fit_scale(self.img_w, self.img_h, self.win_w, self.win_h)
         self._update_viewer()
         
+    def resize_viewer(self, win_w: float, win_h: float):
+        self.win_w = win_w
+        self.win_h = win_h
+        self.image_container.width = self.win_w
+        self.image_container.height = self.win_h
+        # Keep scale logic by recalculating the fit scale if it was previously set to fit
+        # To just always resize correctly we update scale to fit new dimensions
+        self.scale = calculate_fit_scale(self.img_w, self.img_h, self.win_w, self.win_h)
+        self._update_viewer()
+        
     def _update_viewer(self):
         self.image.width = self.img_w * self.scale
         self.image.height = self.img_h * self.scale
