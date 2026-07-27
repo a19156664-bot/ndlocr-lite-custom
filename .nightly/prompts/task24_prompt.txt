@@ -1,0 +1,268 @@
+Task 24: [NEW] Correct OCR mistakes in place - press F2 to edit a region's text
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. PURPOSE
+--------------------------------------------------------------------------------
+The user's exact words:
+
+    "リアルタイム修正（右側の枠に表示されている文字を F2キーを押下することで
+     編集可能とする）"
+    (Real-time correction: make the characters shown in the right-hand panel
+     editable by pressing the F2 key.)
+
+OCR of historical documents is never perfect. The user wants to fix mistakes
+without leaving the application, and the corrected text is what should be
+exported.
+
+--------------------------------------------------------------------------------
+2. DECISIONS ALREADY MADE - IMPLEMENT THESE, DO NOT REDESIGN
+--------------------------------------------------------------------------------
+    1. The edited text is what gets EXPORTED.
+    2. The raw OCR text is KEPT SEPARATELY and is never overwritten, so the user
+       can revert a region to the original OCR output.
+    3. An edit belongs to ONE REGION of ONE IMAGE. Editing region 1 of page 5
+       must not affect region 1 of page 6.
+
+--------------------------------------------------------------------------------
+3. CURRENT CODE CONTRACT (on master - use it, do not change it)
+--------------------------------------------------------------------------------
+custom_gui/app.py, class SelectableImageViewer(ImageViewer):
+
+    self.image_src                current image path
+    self.image_states             dict keyed by image path, each value a dict:
+                                     "selections"  -> SelectionContainer
+                                     "ocr_state"   -> OcrState
+                                     "ocr_results" -> list of OCR line dicts
+                                     "ocr_error"   -> str or None
+    self.selection_container      the CURRENT image's SelectionContainer
+    self.ocr_results              the CURRENT image's OCR lines
+    self.selections_list          ft.ListView, the right-hand panel
+    self.sequence                 ImageSequence
+    self.latest_region_info       str shown after "Last:" in the status bar
+    self.status_text / self.status_row / self.progress_ring
+    self._update_selections_ui()  REBUILDS the whole right-hand panel
+    self._update_status()
+    _switch_image(path)
+
+`_update_selections_ui()` currently builds, for each rectangle:
+
+        filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
+        extracted_text = assemble_text(filtered_lines)
+        ...
+        item_content = ft.Column([
+            ft.Row([
+                ft.Text(f"{rect.label}:", weight=ft.FontWeight.BOLD),
+                ft.IconButton(icon=ft.Icons.DELETE, on_click=delete_rect)
+            ]),
+            ft.Text(extracted_text, selectable=True)
+        ])
+
+CRITICAL: this method throws the panel away and rebuilds it from scratch on every
+pan, zoom, resize, rectangle add/delete and OCR completion. Any edited text MUST
+survive that rebuild, which means it CANNOT live only in the widget.
+
+custom_gui/selection.py (DO NOT MODIFY):
+    @dataclass SelectionRect: rect_id: str, bbox: tuple, label: str
+    class SelectionContainer: add(bbox, label=None) / get_all() / delete_by_id(id)
+
+custom_gui/exporter.py:
+    build_export_rows(image_name, rects, ocr_results) -> List[dict]
+    rows_to_csv_text(rows) -> str
+    rows_to_txt_text(rows) -> str
+
+NEVER use `self.image` or `self.scale` as attribute names. Both are reserved by
+flet and previously caused a fatal startup crash in this project.
+
+--------------------------------------------------------------------------------
+4. VERIFIED FLET 0.27.6 API
+--------------------------------------------------------------------------------
+    ft.Page.on_keyboard_event                    exists and is ALREADY IN USE in
+                                                 main() for Ctrl+N. You must ADD
+                                                 to that handler, not replace it.
+    ft.KeyboardEvent -> key: str, shift, ctrl, alt, meta (all bool)
+    ft.TextField(multiline=True, ...)            exists
+    ft.Icons.EDIT / ft.Icons.SAVE / ft.Icons.DELETE   all exist
+    ft.Colors.*                                  capitalised enums only
+
+Verify anything else you are unsure of, for example:
+    python -c "import flet as ft; print(hasattr(ft.Icons, 'RESTORE'))"
+
+For the F2 key, check what `e.key` actually reports. Do not assume. If it is not
+"F2", use whatever flet really reports and say so in your report.
+
+--------------------------------------------------------------------------------
+5. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] An "active region" concept exists.
+    - Clicking a region card in the right-hand panel makes it the ACTIVE region.
+    - The active card is visually obvious (for example a thicker or coloured
+      border). Exactly one region is active at a time.
+    - The active region must survive `_update_selections_ui()` rebuilds. Store
+      the active region's rect_id, not the widget.
+    - If no region has been clicked, the most recently added region is active.
+    - Switching to another image clears or re-resolves the active region so it
+      never points at a region belonging to a different image.
+
+[B] F2 starts editing the active region.
+    - Pressing F2 replaces that region's read-only ft.Text with an editable
+      ft.TextField(multiline=True) pre-filled with the CURRENT text (the edited
+      text if one exists, otherwise the OCR text).
+    - Also provide a mouse route: an edit icon button (ft.Icons.EDIT) on each
+      region card that does the same thing. Keyboard-only is not acceptable for
+      a desktop app.
+    - Pressing F2 when no region exists must do nothing and must not raise.
+
+[C] Committing and cancelling.
+    - There must be an obvious way to COMMIT the edit (for example a save icon
+      button, and/or Ctrl+Enter) and an obvious way to CANCEL it (for example an
+      Escape key and/or a cancel button). Whichever you choose, they must be
+      visible in the UI, not hidden shortcuts only.
+    - Commit stores the text. Cancel discards it and restores what was shown
+      before the edit started.
+    - While a TextField is focused and the user types, global shortcuts must NOT
+      hijack the keystrokes. In particular typing "n" inside the field must not
+      trigger the Ctrl+N navigation, and F2 must not restart the edit. State in
+      your report how you prevented that.
+
+[D] Edits are stored per image AND per region, and survive everything.
+    - Store edited text in a GUI-free structure, keyed by image path and
+      rect_id, for example an "edits" entry inside `self.image_states[path]`.
+    - An edit must survive: panning, zooming, window resize, adding another
+      rectangle, OCR completing afterwards, navigating to another image and
+      coming back.
+    - Deleting a region must delete its edit too, so a NEW region that happens to
+      reuse the same rect_id can never inherit a stale edit.
+
+[E] Reverting is possible.
+    - Each edited region offers a way to restore the original OCR text
+      (for example an ft.Icons.RESTORE button, shown only when an edit exists).
+    - After reverting, the region shows the OCR text again and exports the OCR
+      text.
+    - The raw OCR result must never be modified. Reverting simply drops the edit.
+
+[F] Edited regions are visually marked.
+    - A region whose text has been edited must be distinguishable at a glance
+      from one showing raw OCR, for example an "(edited)" suffix on the label or
+      a small icon. A user must never be unsure whether they are looking at OCR
+      output or their own correction.
+
+[G] Export uses the edited text.
+    - Extend `custom_gui/exporter.py` ADDITIVELY:
+
+          build_export_rows(image_name, rects, ocr_results, edited_texts=None)
+
+      where `edited_texts` is a dict {rect_id: str}. When a rect_id is present
+      there, its text is used INSTEAD of the assembled OCR text.
+    - `line_count` keeps meaning "how many OCR lines fell inside the rectangle".
+      It is NOT the number of lines in the edited text. Document this in the
+      docstring.
+    - The default `edited_texts=None` MUST preserve today's behaviour exactly,
+      because tests/test_exporter.py already asserts it and you may not modify
+      that file.
+    - The export call site in app.py passes the current image's edits.
+
+[H] Tests - `tests/test_text_edit.py`, no GUI, no real OCR.
+    Concrete assertions. Put the edit store logic in a GUI-free helper so it can
+    be tested directly. At minimum:
+      (a) Setting an edit for image A / rect "1" then reading it back returns
+          exactly that string.
+      (b) An edit for image A / rect "1" does NOT appear for image B / rect "1".
+      (c) Deleting region "1" removes its edit; adding a new region that reuses
+          rect_id "1" then reads back NO edit.
+      (d) Reverting removes the edit and the raw OCR line list is unchanged -
+          assert the OCR list is identical (same length and same text values)
+          before and after.
+      (e) build_export_rows with edited_texts={"1": "corrected text"} produces
+          "corrected text" in row 0's text field, while row 1 (not edited) still
+          contains its assembled OCR text - assert both exact strings.
+      (f) build_export_rows with edited_texts=None produces exactly the same
+          rows as calling it without the argument at all - assert equality of
+          the two results.
+      (g) With an edit applied, `line_count` still equals the number of OCR lines
+          inside the rectangle, NOT the line count of the edited string. Use an
+          edited string with a different number of newlines to make this
+          meaningful, and assert the exact integer.
+
+[I] Regression safety.
+    - `python -m pytest tests/ -v` must pass completely (61+ tests).
+    - Do NOT modify custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+      custom_gui/selection.py, custom_gui/text_assembler.py,
+      custom_gui/image_sequence.py.
+    - Do not modify the pure functions in custom_gui/viewer.py.
+    - Everything a human has verified must keep working: rectangle selection,
+      the Select/Pan toggle, panning, yellow highlights, the "Region N" label
+      drawn OUTSIDE the rectangle, async OCR with its progress ring, CSV/TXT
+      export, folder loading and Prev/Next/Ctrl+N navigation.
+    - Guard every `.update()` call on a control with `if self.page:`.
+    - Do not run real OCR in your tests.
+
+--------------------------------------------------------------------------------
+6. ALLOWED SCOPE (WHITELIST)
+--------------------------------------------------------------------------------
+    custom_gui/app.py
+    custom_gui/exporter.py       (ADDITIVE changes only - the existing three
+                                  functions must keep working unchanged when the
+                                  new argument is omitted)
+    tests/test_text_edit.py      (new file)
+
+--------------------------------------------------------------------------------
+7. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+    custom_gui/selection.py, custom_gui/text_assembler.py,
+    custom_gui/viewer.py, custom_gui/image_sequence.py       (DO NOT MODIFY)
+    all existing files under tests/                          (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+8. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Editing individual OCR LINES or their bounding boxes. The unit of editing
+      is the whole region's text.
+    - Undo/redo history beyond the single "revert to OCR" action.
+    - Saving edits to disk or reloading them on next launch. Edits live in memory
+      for this session; export is how they leave the application.
+    - Exporting all images into one file (a separate task).
+    - Re-running OCR on the edited region.
+    - Spell checking or any automatic correction.
+    - Resizing or moving existing rectangles.
+    - Mouse-wheel or keyboard zoom.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+--------------------------------------------------------------------------------
+9. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you. A previous failsafe report from you about a flet
+      API limitation was correct and appreciated; use the same judgement.
+    - If flet 0.27.6 cannot deliver the F2 key to you while a control has focus,
+      STOP and report that finding. Do NOT silently substitute a different key
+      or drop the keyboard route. The commander will decide the alternative.
+    - Priority if you run out of time: [D] and [H] first (the store and its
+      tests), then [B] and [C], then [G], then [A], then [E] and [F].
+    - If this instruction contradicts the actual state of the code, do not guess.
+      Stop and report the contradiction.
+
+--------------------------------------------------------------------------------
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[I] to how you satisfied it.
+    2. What `e.key` actually reports for F2, and how you verified it.
+    3. How you stopped global shortcuts from firing while the user types in the
+       TextField.
+    4. Where edits are stored and how they are keyed.
+    5. Exactly how you kept build_export_rows backwards compatible.
+    6. The list of changed files and the reason for each change.
+    7. The full output of `python -m pytest tests/ -v`.
+    8. Anything that cannot be verified without a GUI, stated explicitly, so a
+       human can check it manually. Be thorough here - most of this task is
+       interactive and the commander cannot click.
+    9. Open questions or compromises. Write "none" if there are none.
