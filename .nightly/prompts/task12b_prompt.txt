@@ -1,0 +1,148 @@
+Task 12b: [FIX] Make the async-OCR regression test actually able to fail
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+--------------------------------------------------------------------------------
+1. WHAT HAPPENED
+--------------------------------------------------------------------------------
+Your Task 12 implementation was accepted and merged. It is measurably correct:
+the commander ran it headlessly and confirmed __init__ now takes 0.01 s instead
+of ~53 s, the UI renders in 0.02 s, and OCR completes on a background thread
+after 68.66 s producing 26 lines with status "Lines: 26".
+
+However ONE condition, [G].2, was NOT met. The instruction said:
+
+    "This is the regression test for the whole task - it must fail if someone
+     puts the OCR call back into __init__."
+
+The commander verified this by deliberately re-injecting the original defect into
+`custom_gui/app.py`:
+
+        self.ocr_results = []
+        self.ocr_state = OcrState.IDLE if os.path.exists(image_src) else OcrState.ERROR
+        # === DELIBERATE DEFECT RE-INJECTION ===
+        if os.path.exists(image_src):
+            self.ocr_results = run_ocr_and_parse(image_src)
+
+and then ran the suite. Result:
+
+        tests/test_async_ocr.py .....   5 passed in 4.09s
+
+All five tests passed WITH the defect present. The test cannot detect the bug it
+was written for, so it is worthless as a regression guard.
+
+--------------------------------------------------------------------------------
+2. ROOT CAUSE - ALREADY DIAGNOSED. DO NOT RE-INVESTIGATE.
+--------------------------------------------------------------------------------
+`tests/test_async_ocr.py::test_viewer_init_does_not_run_ocr` constructs the
+viewer with a NON-EXISTENT file:
+
+        viewer = SelectableImageViewer(
+            image_src="dummy.jpg",
+            img_w=100, img_h=100,
+            win_w=100, win_h=100
+        )
+
+The defective code is guarded by `if os.path.exists(image_src):`. Because
+"dummy.jpg" does not exist, that branch is never entered, the monkeypatched OCR
+function is never called, and `ocr_called` stays False. The assertion passes
+regardless of whether the defect is present.
+
+Every other test in the file constructs the viewer the same way, so several of
+them are exercising the `OcrState.ERROR` path rather than the normal path they
+appear to be testing.
+
+--------------------------------------------------------------------------------
+3. DEFINITION OF DONE
+--------------------------------------------------------------------------------
+[A] Use a REAL, EXISTING image path in the tests.
+    The repository bundles `resource/digidepo_2531162_0024.jpg` (2048 x 1446).
+    Use it, so `os.path.exists()` is True and the code under test takes the
+    normal path. Build the path with `os.path.join` so it works on any platform,
+    and assert at the top of the test that the file exists, so the test fails
+    loudly rather than silently passing if the resource ever moves.
+
+    The real OCR must NEVER run in the test suite - it takes about 50 seconds.
+    Always monkeypatch `custom_gui.app.run_ocr_and_parse`.
+
+[B] Make test_viewer_init_does_not_run_ocr genuinely detect the defect.
+    Monkeypatch `custom_gui.app.run_ocr_and_parse` with a function that records
+    it was called (a flag, or better, one that raises AssertionError immediately),
+    construct the viewer with the REAL image path, and assert it was never
+    called.
+    With the defect re-injected, this test MUST FAIL.
+
+[C] Fix the other tests in the same file so they exercise the real path.
+    - test_update_selections_ui_no_crash_with_empty_ocr
+    - test_on_ocr_complete_success
+    - test_on_ocr_complete_error
+    Each must use the real bundled image path with the OCR function
+    monkeypatched. Keep every existing assertion that is still meaningful.
+    Note that with a real path, `self.ocr_state` after __init__ is
+    `OcrState.IDLE`, not `OcrState.ERROR`. Assert that explicitly in at least
+    one test - it is part of the contract.
+
+[D] Add a test for the ERROR-on-missing-file path, deliberately.
+    The `image_src` does-not-exist behaviour IS real behaviour worth testing, it
+    just must not be the accidental default. Add an explicit test that passes a
+    path that does not exist and asserts `viewer.ocr_state == OcrState.ERROR`,
+    and that `start_ocr` returns without starting any work in that state.
+
+[E] PROVE BOTH DIRECTIONS - THIS IS THE PRIMARY DELIVERABLE.
+    In your report you must show:
+      1. The suite passing on the current, correct code.
+      2. The output of re-injecting the defect shown in section 1 into
+         `custom_gui/app.py` and running `python -m pytest tests/test_async_ocr.py -v`,
+         demonstrating that test_viewer_init_does_not_run_ocr FAILS.
+      3. Confirmation that you then REVERTED the deliberate defect, and that
+         `git diff custom_gui/app.py` is empty at the end of your work.
+
+    A test that cannot fail is not a test. Do not skip step 2.
+
+--------------------------------------------------------------------------------
+4. ALLOWED SCOPE (WHITELIST) - NARROW ON PURPOSE
+--------------------------------------------------------------------------------
+    tests/test_async_ocr.py     (you ARE allowed to modify this one file)
+
+    You may TEMPORARILY edit custom_gui/app.py to perform the defect re-injection
+    required by [E], but you MUST revert it. The final diff must contain
+    tests/test_async_ocr.py and nothing else.
+
+--------------------------------------------------------------------------------
+5. PROHIBITED SCOPE (BLACKLIST)
+--------------------------------------------------------------------------------
+    custom_gui/**                            (no permanent changes at all)
+    every other file under tests/            (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+--------------------------------------------------------------------------------
+6. OUT OF SCOPE
+--------------------------------------------------------------------------------
+    - Changing the async OCR implementation. It is correct and already merged.
+    - tests/test_ui_build.py, which has a separate known weakness (Task 15).
+    - Speeding up tests/test_ocr_bridge.py, which deliberately runs real OCR and
+      accounts for most of the roughly 95 second suite runtime. Do not touch it.
+    - Any new feature.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+
+--------------------------------------------------------------------------------
+7. FAILSAFE
+--------------------------------------------------------------------------------
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - If you conclude the defect genuinely cannot be detected by a test, STOP and
+      explain why rather than shipping a test that always passes.
+
+--------------------------------------------------------------------------------
+8. WHAT YOUR SUBMISSION MUST DESCRIBE
+--------------------------------------------------------------------------------
+    1. A table mapping each condition [A]-[E] to how you satisfied it.
+    2. The pytest output WITH the defect injected (must show a FAILURE) and
+       WITHOUT it (must show all passing). Both, in full.
+    3. Confirmation that custom_gui/app.py is unmodified in your final diff.
+    4. The full output of `python -m pytest tests/ -v`.
+    5. Open questions or compromises. Write "none" if there are none.

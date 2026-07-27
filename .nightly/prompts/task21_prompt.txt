@@ -78,6 +78,25 @@ INSIDE the rectangle, on top of the image:
           also does NOT produce a negative y.
 
 --------------------------------------------------------------------------------
+2.5 CONTEXT YOU MUST KNOW - OCR IS NOW ASYNCHRONOUS
+--------------------------------------------------------------------------------
+Task 12 was merged just before this task. OCR no longer runs in __init__:
+
+    class OcrState(Enum):  IDLE / RUNNING / DONE / ERROR
+    def get_ocr_status_text(state, line_count=0) -> str
+    SelectableImageViewer.start_ocr(page)      # page.run_thread(...)
+    SelectableImageViewer._on_ocr_complete(results, error)
+    self.ocr_state, self.progress_ring, self.status_row
+
+Consequences for you:
+  - After __init__, `self.ocr_results` is `[]`. `_update_selections_ui()` can and
+    will run with no OCR lines. Your label code must work in that state.
+  - `_update_selections_ui()` may be reached from a background thread after OCR
+    finishes. Every `.update()` call inside it is guarded with `if self.page:`.
+    Keep it that way for anything you add.
+  - Do NOT put any slow work in __init__.
+
+--------------------------------------------------------------------------------
 3. REGRESSION SAFETY - READ THIS
 --------------------------------------------------------------------------------
     - `python -m pytest tests/ -v` must pass completely.
