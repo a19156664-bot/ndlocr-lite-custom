@@ -66,3 +66,42 @@ def rows_to_txt_text(rows: list) -> str:
         return ""
         
     return "\n\n".join(blocks) + "\n"
+
+def build_export_rows_multi(pages: list) -> list:
+    """
+    Builds export rows from multiple pages.
+    
+    Args:
+        pages: List of dictionaries, where each dictionary represents one image's data.
+               Format: {
+                   "image_name": str,
+                   "rects": list,
+                   "ocr_results": list,
+                   "edited_texts": dict (optional)
+               }
+               Alternatively, the tuple format is (image_path, rects, ocr_results, edited_texts).
+               
+    Returns:
+        List of rows representing all the regions across all passed images.
+        Rows are ordered by image (as provided in `pages`) and within an image by region order.
+    """
+    all_rows = []
+    for page_data in pages:
+        if isinstance(page_data, tuple):
+            image_name = page_data[0]
+            rects = page_data[1]
+            ocr_results = page_data[2]
+            edited_texts = page_data[3] if len(page_data) > 3 else None
+        else:
+            image_name = page_data["image_name"]
+            rects = page_data.get("rects", [])
+            ocr_results = page_data.get("ocr_results", [])
+            edited_texts = page_data.get("edited_texts", None)
+            
+        if not rects:
+            continue
+            
+        rows = build_export_rows(image_name, rects, ocr_results, edited_texts)
+        all_rows.extend(rows)
+        
+    return all_rows
