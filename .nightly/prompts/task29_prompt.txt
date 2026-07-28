@@ -1,0 +1,369 @@
+Task 29: [FEATURE] OCR result cache + batch OCR runner (pure modules, images only)
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+This task adds TWO NEW MODULES and ONE SMALL REFACTOR. There is NO GUI work in
+this task. Do not touch custom_gui/app.py. A separate task will wire these
+modules into the interface.
+
+================================================================================
+1. WHY
+================================================================================
+Today the application OCRs a page lazily, the first time you look at it. The
+commander measured the real cost on this machine:
+
+    model load ............. ~35.0 s   (paid EVERY time src/ocr.py starts)
+    actual OCR ............. ~ 8.5 s   (per 2048x1446 image)
+    -> ~43.5 s per page, every page, every session
+
+Running src/ocr.py ONCE over a whole directory pays the 35 s only once:
+
+    164 pages, lazily ...... 164 x 43.5 s = ~119 min, and again next session
+    164 pages, batched ..... 35 s + 164 x 8.5 s = ~24 min, once, then cached
+
+The commander verified that `--sourcedir` and `--sourceimg` produce BYTE
+IDENTICAL text, bounding boxes and confidence values. Batching does not change
+OCR quality. Do not attempt to prove or disprove this; it is settled.
+
+So: run the OCR for a whole folder in one process, store the normalised result
+per image on disk, and let the viewer read it back instantly.
+
+================================================================================
+2. SCOPE OF THIS TASK - READ THIS TWICE
+================================================================================
+IN scope : ordinary image files (.jpg .jpeg .png .tif .tiff)
+OUT of scope: PDF. Deliberately deferred to a later task.
+
+You must NOT render PDFs, import custom_gui/pdf_loader.py, or add pypdfium2 or
+reportlab anywhere in this task.
+
+BUT the cache key MUST already be shaped so PDF pages can slot in later without
+changing the format or the call sites. That is why `page_index` appears in the
+signatures below. In this task `page_index` is always None at every call site,
+yet the functions must handle an integer correctly and you must test that.
+Retro-fitting this later would invalidate every cache file a user has built.
+
+================================================================================
+3. FACTS ABOUT src/ocr.py - VERIFIED BY THE COMMANDER, USE THEM
+================================================================================
+3.1 The command to run
+
+    <python> src/ocr.py --sourcedir <DIR> --output <OUTDIR> --json-only
+
+    --sourcedir globs EVERY file directly inside DIR and OCRs each supported
+                image. It does not recurse.
+    --json-only suppresses the .xml and .txt files. Use it. We only need JSON.
+    --viz       defaults to False. Do not pass it. It would write viz_*.png.
+
+3.2 What it writes, and WHEN
+
+    For each input image <stem>.<ext> it writes <OUTDIR>/<stem>.json, and it
+    writes that file AS SOON AS THAT IMAGE FINISHES - inside the loop, not at
+    the end. Two consequences you must exploit:
+
+      * PROGRESS can be measured by counting *.json files in OUTDIR.
+      * CANCELLING is not destructive: whatever finished is already on disk and
+        must be harvested into the cache.
+
+3.3 The per-image JSON shape
+
+    {
+      "contents": [ [ {line}, {line}, ... ] ],      <- list of ONE list
+      "imginfo": {"img_width":..., "img_height":...,
+                  "img_path":..., "img_name":...}
+    }
+
+    and each {line} is
+
+    {"boundingBox": [[xmin,ymin],[xmin,ymax],[xmax,ymin],[xmax,ymax]],
+     "id": 0, "isVertical": "true"|"false", "text": "...",
+     "isTextline": "true", "confidence": 0.97, "class_index": 1}
+
+    This is EXACTLY the shape custom_gui/ocr_bridge.py already parses.
+
+3.4 What you must NOT use
+
+    --sourcepdf renders at --pdf-render-dpi, default 150.0, while this project
+    displays PDF pages at 300 DPI (pdf_loader.RENDER_DPI). Its bounding boxes
+    would be off by a factor of two, and its JSON has a different nested shape.
+    Never call it.
+
+================================================================================
+4. DELIVERABLE 1 - custom_gui/ocr_cache.py   (NEW FILE)
+================================================================================
+Pure module. No flet import. No subprocess. No GUI. Standard library only.
+
+    CACHE_DIR_NAME = ".ndlocr_cache"
+    SCHEMA_VERSION = 1
+
+    cache_dir_for(source_path) -> str
+        The directory that holds the cache for this source file:
+        <folder of source_path>/.ndlocr_cache
+        Returns the path. Does NOT create it.
+
+    cache_path_for(source_path, page_index=None) -> str
+        page_index is None -> <cache dir>/<stem>.json
+        page_index is int  -> <cache dir>/<stem>_p{page_index+1:04}.json
+        So page_index=0 gives <stem>_p0001.json. This matches the PNG naming
+        pdf_loader already uses, so the later PDF task lines up for free.
+
+    save_cache(source_path, results, page_index=None) -> str
+        Creates the cache directory if needed and writes:
+        {"schema": SCHEMA_VERSION,
+         "source_name": <basename of source_path>,
+         "source_size": <st_size of source_path>,
+         "source_mtime": <st_mtime of source_path>,
+         "page_index": page_index,
+         "results": results}
+        Written UTF-8, ensure_ascii=False. Returns the path written.
+        Write to a temporary file in the same directory and os.replace() it into
+        position, so a crash or a cancel mid-write can never leave a truncated
+        JSON file behind.
+
+    load_cache(source_path, page_index=None) -> Optional[list]
+        Returns the results list, or None. Return None - never raise - when:
+          the cache file does not exist
+          the source file does not exist
+          the JSON is corrupt or not a dict
+          "schema" != SCHEMA_VERSION
+          source_size or source_mtime no longer match the file on disk (STALE)
+        On success each entry's "bbox" MUST be returned as a TUPLE of four
+        floats, matching what run_ocr_and_parse returns in memory. JSON has no
+        tuples, so you must convert on load. Existing code unpacks these.
+
+    is_cached(source_path, page_index=None) -> bool
+        True only if load_cache would return a list. Do not duplicate the
+        validation logic - reuse it.
+
+The stored entries are exactly the dicts run_ocr_and_parse already returns:
+    {"text": str, "bbox": (x1,y1,x2,y2), "confidence": float,
+     "is_vertical": bool, "source_image": str}
+
+STALENESS NOTE: mtime is a float and JSON round-trips it. Compare with a small
+tolerance (1e-6) rather than ==, so a value that survived a JSON round trip is
+not judged stale.
+
+================================================================================
+5. DELIVERABLE 2 - custom_gui/batch_ocr.py   (NEW FILE)
+================================================================================
+Pure module. No flet import. It may import ocr_cache and ocr_bridge. It must
+never import custom_gui/app.py.
+
+    plan_batch(image_paths) -> (to_ocr, already_cached)
+        Splits the list using ocr_cache.is_cached. Preserves input order.
+        Returns two lists of paths. Does no work.
+
+    run_batch(image_paths, progress=None, should_cancel=None, python_exe=None)
+            -> BatchResult
+
+        BatchResult carries at least:
+            ok           list of paths successfully cached
+            skipped      list of paths that were already cached
+            failed       list of (path, reason)
+            cancelled    bool
+
+        Sequence:
+
+        [1] plan_batch. If nothing to do, return immediately with cancelled
+            False. Do not start a subprocess.
+
+        [2] Reject duplicate basenames among the paths to OCR. src/ocr.py names
+            its output <stem>.json, so two files with the same basename from
+            different folders would silently overwrite each other. Detect this
+            and put every colliding path into `failed` with a clear reason
+            rather than producing wrong results.
+
+        [3] Build a staging directory (tempfile.mkdtemp) containing one entry
+            per image to OCR. Try os.link() first - a hard link costs no disk
+            and no copy. If os.link raises for ANY reason (different volume,
+            filesystem without hard links, permissions), fall back to
+            shutil.copy2 for that file. Both must work; test both paths.
+            Reason: --sourcedir OCRs everything in the directory it is given, so
+            we cannot point it at the user's folder when only some pages need
+            work - a resume after cancel would redo everything.
+
+        [4] Run src/ocr.py ONCE over the staging directory with subprocess.Popen
+            (not subprocess.run - you must be able to poll and to kill it),
+            writing into a separate temporary output directory, with
+            --json-only.
+            Use python_exe if given, otherwise sys.executable. Run it with the
+            repository root as cwd, exactly as ocr_bridge.py does.
+
+        [5] While it runs, poll about once a second:
+              - count the *.json files in the output directory and, if the
+                count changed, call progress(done, total) if progress is given.
+                progress must never be called from inside the polling sleep
+                more often than the count actually changes.
+              - if should_cancel is given and should_cancel() returns True,
+                terminate the process: proc.terminate(), wait briefly, then
+                proc.kill() if it is still alive. Set cancelled True and go to
+                [6] anyway. DO NOT throw away completed work.
+
+        [6] Harvest. For every image that was to be OCR'd, look for its
+            <stem>.json in the output directory:
+              present -> parse it with the shared parser from ocr_bridge (see
+                         Deliverable 3), save_cache it against the ORIGINAL
+                         source path, append to ok
+              absent  -> append to failed with a reason. If we cancelled, the
+                         reason must say so; a page that was simply never
+                         reached is not a defect.
+
+        [7] Always delete both temporary directories, even on exception or
+            cancel. Use try/finally. Never delete anything the user owns.
+
+        A non-zero exit code from src/ocr.py when we did NOT cancel is a
+        failure: record stderr in the reason for the images that produced no
+        JSON. Do not raise out of run_batch for that - the caller is a GUI and
+        must stay alive. Only genuinely programmer-level errors may propagate.
+
+================================================================================
+6. DELIVERABLE 3 - the small refactor in custom_gui/ocr_bridge.py
+================================================================================
+`run_ocr_and_parse` currently runs the subprocess AND parses the JSON in one
+function, so batch_ocr cannot reuse the parsing. Duplicating that normalisation
+would let the two copies drift apart, which is not acceptable.
+
+Extract the parsing into a module-level function and have run_ocr_and_parse call
+it. Suggested:
+
+    parse_ocr_json(json_path, source_name) -> List[Dict[str, Any]]
+
+It must contain the EXISTING logic unchanged: the "contents" list-of-lists walk,
+the boundingBox handling for both [[x,y],...] and ["x y",...] forms, the x1<x2 /
+y1<y2 correction, the isVertical string-or-bool handling, the confidence default,
+and "source_image".
+
+THIS IS A PURE REFACTOR. `run_ocr_and_parse` keeps its exact signature and its
+exact behaviour. tests/test_ocr_bridge.py must pass untouched - that is your
+proof you changed nothing. If you cannot do this without altering behaviour,
+STOP and report it instead of improvising.
+
+Do not change anything else in that file.
+
+WARNING: the existing loop in that file uses a local variable named `page`.
+tests/test_flet_constants.py is a guard test that objects to that name. Do not
+introduce any NEW variable called `page` in any file you touch, and do not
+"fix" the guard test.
+
+================================================================================
+7. DEFINITION OF DONE
+================================================================================
+[A] custom_gui/ocr_cache.py exists with the five functions in section 4 and the
+    documented behaviour, including the page_index form.
+[B] custom_gui/batch_ocr.py exists with plan_batch and run_batch as specified,
+    including hard-link-with-copy-fallback staging, one single subprocess,
+    progress polling, non-destructive cancel, and guaranteed temp cleanup.
+[C] parse_ocr_json extracted in ocr_bridge.py, run_ocr_and_parse unchanged in
+    signature and behaviour, tests/test_ocr_bridge.py untouched and passing.
+[D] Tests - tests/test_ocr_cache.py (new) and tests/test_batch_ocr.py (new).
+    No GUI, no real OCR, no model, no network. Build real images with Pillow
+    under pytest's tmp_path. Mock the subprocess.
+
+    tests/test_ocr_cache.py must cover:
+      (a) round trip: save_cache then load_cache returns equal results, and
+          bbox comes back as a TUPLE, not a list.
+      (b) the file lands exactly at <folder>/.ndlocr_cache/<stem>.json.
+      (c) page_index=0 lands at <stem>_p0001.json and round trips; page_index=11
+          gives _p0012.json. Both distinct from the page_index=None file for the
+          same source, and all three can coexist.
+      (d) STALENESS: save, then modify the source image so its size AND mtime
+          change, then load_cache returns None and is_cached is False.
+      (e) corrupt JSON -> load_cache returns None, no exception.
+      (f) a cache file whose "schema" is 999 -> None, no exception.
+      (g) missing source file -> None, no exception.
+      (h) mtime survives the JSON round trip - a freshly saved cache is NOT
+          judged stale. Assert is_cached is True immediately after save_cache.
+          A tolerance bug here would silently disable the whole feature.
+
+    tests/test_batch_ocr.py must cover:
+      (i) plan_batch splits correctly when some images are already cached.
+      (j) run_batch with a FAKE subprocess that writes plausible <stem>.json
+          files into the output directory: every image ends up in ok, the cache
+          files exist afterwards, and load_cache returns the right text.
+      (k) src/ocr.py is invoked EXACTLY ONCE for N images. Assert the call
+          count. This is the entire point of the task - if it is called per
+          image the feature is worthless.
+      (l) the command line contains --sourcedir, --output and --json-only and
+          does NOT contain --sourcepdf or --viz.
+      (m) CANCEL: should_cancel returns True after some outputs exist. Assert
+          cancelled is True, that the images whose JSON existed are in ok and
+          ARE cached on disk, and that no exception escaped.
+      (n) progress is called with increasing done values and a correct total.
+      (o) duplicate basenames from two different folders are reported in failed
+          and do not overwrite each other.
+      (p) the staging copy fallback: force os.link to raise and assert the batch
+          still completes through shutil.copy2.
+      (q) both temporary directories are gone when run_batch returns, on the
+          success path AND on the cancel path.
+      (r) a non-zero exit with no output JSON puts the images in failed, with a
+          reason, and does not raise.
+
+    For (k), (l), (m), (p), (r) you will need to patch subprocess.Popen inside
+    custom_gui.batch_ocr. Write a small fake process class in the test file.
+
+    A test that cannot fail when the behaviour is wrong is worthless. This
+    project has already shipped five such tests. For (k) and (m) specifically,
+    state in your report what you changed in the code to prove each test FAILS,
+    and paste that failing output.
+
+[E] `python -m pytest tests/ -v` passes completely.
+
+================================================================================
+8. REGRESSION SAFETY
+================================================================================
+    - Do NOT modify custom_gui/app.py. None of this is wired to the GUI yet.
+      That is the next task and it is deliberately separate.
+    - Do NOT modify any EXISTING file under tests/.
+    - Do NOT modify custom_gui/pdf_loader.py, ocr_scheduler.py, viewer.py,
+      image_sequence.py, region_filter.py, selection.py, text_assembler.py,
+      exporter.py, rtl.py.
+    - custom_gui/ocr_bridge.py receives ONLY the extraction described in
+      section 6.
+    - Do NOT modify src/**. The upstream OCR script is a black box we call.
+    - No new dependencies. flet stays pinned at 0.27.6. Standard library plus
+      what is already installed.
+    - NEVER use `self.image` or `self.scale` as attribute names anywhere. Both
+      are reserved by flet and previously caused a fatal startup crash here.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Four previous tasks left probe files at
+      the repository root and the commander had to delete them.
+
+================================================================================
+9. OUT OF SCOPE
+================================================================================
+    - Any GUI change: buttons, progress rings, status text, keyboard shortcuts.
+    - PDF of any kind: rendering, batching, --sourcepdf, text-layer PDFs.
+    - Persisting rectangles or F2 edits. This cache holds OCR output only.
+    - Cache eviction, size limits, or a "clear cache" command.
+    - Parallelism, GPU, --device cuda, or tuning any OCR threshold.
+    - Changing how region filtering or text assembly works.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+10. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: ocr_cache.py complete and tested first,
+      then the ocr_bridge extraction, then batch_ocr.py.
+
+================================================================================
+11. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [A]-[E] to how you satisfied it.
+    2. The exact command line your code builds for src/ocr.py.
+    3. How you proved src/ocr.py is invoked exactly once (test (k)), including
+       the defect you injected to make that test fail, and the failing output.
+    4. How cancel keeps completed work, and the failing output for test (m).
+    5. The full diff of custom_gui/ocr_bridge.py, so the refactor can be seen to
+       be behaviour-neutral.
+    6. The list of changed and added files with the reason for each.
+    7. The output of `git status` showing no stray files.
+    8. The full output of `python -m pytest tests/ -v`.
+    9. Anything that cannot be verified without the real OCR model, stated
+       explicitly. The commander will run the real batch on real images.
+   10. Open questions or compromises. Write "none" if there are none.
