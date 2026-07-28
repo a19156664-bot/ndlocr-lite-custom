@@ -1,0 +1,201 @@
+Task 32: [UX] Enter commits an F2 correction; Shift+Enter inserts a line break
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+Small, self contained. One control, one behaviour.
+
+================================================================================
+1. WHAT THE USER ASKED FOR
+================================================================================
+"右枠での修正完了後にENTERキーを押下で保存を実行。
+ 理由：保存ボタンの押下忘れの防止および効率化。"
+
+Today, correcting a region's text in the right hand panel means clicking the
+small save (disk) icon. Users forget to click it and lose the correction. The
+user wants Enter to commit.
+
+================================================================================
+2. THE API IS AVAILABLE - THE COMMANDER VERIFIED IT
+================================================================================
+flet 0.27.6's ft.TextField accepts `multiline`, `shift_enter` and `on_submit`
+together. Verified by constructing one and reading the values back:
+
+    multiline   = True
+    shift_enter = True
+    on_submit   = True
+
+`shift_enter=True` means: Shift+Enter inserts a line break, and a plain Enter
+fires `on_submit`. Do not implement your own key handling, do not add a
+KeyboardListener, and do not set multiline=False - OCR text is frequently
+several lines and the user must still be able to add a line break.
+
+================================================================================
+3. THE CODE AS IT IS TODAY
+================================================================================
+In `custom_gui/app.py`, inside `_update_selections_ui`, for the region being
+edited:
+
+    if is_editing:
+        tf = ft.TextField(
+            value=display_text,
+            multiline=True,
+            autofocus=True
+        )
+        content_area = ft.Column([
+            tf,
+            ft.Row([
+                ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save (Commit)",
+                              on_click=lambda e, rid=rect.rect_id, tf=tf: commit_edit(e, rid, tf)),
+                ft.IconButton(icon=ft.Icons.CANCEL, tooltip="Cancel",
+                              on_click=cancel_edit)
+            ])
+        ])
+
+and the existing handlers, in the same scope:
+
+    def commit_edit(e, rid=rect.rect_id, text_field=None):
+        self.edits[rid] = text_field.value
+        self.editing_region_id = None
+        self._update_selections_ui()
+
+    def cancel_edit(e, rid=rect.rect_id):
+        self.editing_region_id = None
+        self._update_selections_ui()
+
+================================================================================
+4. DELIVERABLES
+================================================================================
+[A] Enter commits.
+
+    Give the TextField `shift_enter=True` and an `on_submit` that commits
+    exactly what the save button commits - the same `commit_edit`, with the
+    same rect_id and the same text field. After it, `self.edits[rid]` holds the
+    new text, `self.editing_region_id` is None, and the panel shows the saved
+    value with the "(edited)" suffix.
+
+    Committing through Enter and committing through the button must be
+    indistinguishable in their effect. Do not duplicate the logic - route both
+    to the same function.
+
+[B] Shift+Enter still inserts a line break.
+
+    Keep multiline=True. Do not clamp max_lines in a way that prevents this.
+
+[C] The save and cancel buttons stay.
+
+    Do not remove them. Not every user will discover the key, and the user only
+    asked to ADD the shortcut. Update the save button's tooltip to mention it,
+    for example "Save (Enter)".
+
+[D] An empty field must behave the same on both paths.
+
+    Whatever committing an empty string does today through the button, Enter
+    must do the same. Do not add new validation.
+
+================================================================================
+5. DEFINITION OF DONE
+================================================================================
+[1] The editing TextField has multiline=True, shift_enter=True and a non-None
+    on_submit.
+[2] Firing on_submit stores the text in self.edits and closes the editor,
+    identically to clicking save.
+[3] The save and cancel buttons still work.
+[4] `python -m pytest tests/ -v` passes completely (144+ tests).
+
+================================================================================
+6. TESTS - add to tests/test_text_edit.py? NO. Create tests/test_edit_enter.py
+================================================================================
+tests/test_text_edit.py is a pre-existing file and MUST NOT be edited. Put the
+new tests in tests/test_edit_enter.py (new file). No GUI window, no real OCR.
+Monkeypatch `custom_gui.app.run_ocr_and_parse`. Build a real image with Pillow
+under tmp_path.
+
+    (a) Put a region into editing state, find the TextField in the right hand
+        panel, and assert multiline is True, shift_enter is True, and on_submit
+        is not None. Locate the field by walking the real control tree - do NOT
+        rebuild the panel yourself in the test. A test that constructs its own
+        widgets proves nothing about the application; this project has shipped
+        six tests that could not detect the bug they were written for.
+    (b) Set the field's value, call its on_submit handler, and assert
+        self.edits[rect_id] equals the new text and self.editing_region_id is
+        None.
+    (c) Do the same through the save button's on_click and assert the resulting
+        state is IDENTICAL to (b) - same edits dict, same editing_region_id.
+    (d) The cancel button still discards: set a value, call cancel, and assert
+        self.edits does NOT contain the rect_id and editing_region_id is None.
+    (e) After committing through Enter, the panel shows the "(edited)" suffix
+        for that region and a Revert button is present.
+    (f) Committing an empty string through on_submit and through the button
+        produce the same self.edits content as each other.
+
+    For (a) and (b), state what you changed in the code to prove each test
+    FAILS, and paste that failing output.
+
+================================================================================
+7. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE: custom_gui/app.py and tests/test_edit_enter.py. Nothing
+      else.
+    - Do NOT modify ANY existing file under tests/.
+      tests/test_flet_constants.py is a guard test: if it objects to your code,
+      CHANGE YOUR CODE. NEVER add an exemption. A local variable named `page`
+      WILL collide with it.
+    - Do NOT undo Task 30c or 30d: the RLock around _update_selections_ui, the
+      layers carrying the pan offset, the offset subtraction in _on_pan_start /
+      _on_pan_update, the batch worker not calling _switch_image, the progress
+      bar and the "Pre-OCR All" button must all stay exactly as they are.
+    - Do not make event handlers async. flet dispatches every non-async handler
+      on a thread pool without serialising them; changing that model is out of
+      scope and dangerous.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - NEVER use `self.image` or `self.scale` as attribute names. Both are
+      reserved by flet and previously caused a fatal startup crash here.
+    - All verified working and must stay working: rectangle selection,
+      Select/Pan, panning, yellow highlights, the "Region N" label outside the
+      rectangle, the lazy OCR scheduler, cache-first reading, Pre-OCR All with
+      its progress bar and cancel, CSV/TXT export for the current image and for
+      all images (TXT is now one flat line joined with U+FF5C), folder loading,
+      PDF loading, Prev/Next/Ctrl+N, F2 correction with revert, the
+      right-to-left button, and the error display for a missing image WITHOUT
+      crashing.
+    - Do not run real OCR in your tests.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. FOUR previous tasks left probe files at
+      the repository root and the commander had to delete them by hand.
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - Editing the text anywhere other than the existing right hand panel. A
+      separate task will add an editor next to the rectangle on the image.
+    - Changing what F2 does, or adding new keyboard shortcuts.
+    - Escape to cancel. Not requested here.
+    - Auto-saving on focus loss.
+    - Changing the export formats.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[4] to how you satisfied it.
+    2. The failing output for tests (a) and (b) against defective code, and the
+       passing output afterwards.
+    3. How you routed the button and Enter to the same commit path.
+    4. How your test locates the TextField in the real control tree.
+    5. The list of changed and added files with the reason for each.
+    6. The output of `git status` showing no stray files.
+    7. The full output of `python -m pytest tests/ -v`.
+    8. State explicitly that the actual key press cannot be verified without a
+       GUI - the commander will confirm Enter and Shift+Enter on the real
+       application.
+    9. Open questions or compromises. Write "none" if there are none.
