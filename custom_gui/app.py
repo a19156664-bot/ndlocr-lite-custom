@@ -158,6 +158,12 @@ class SelectableImageViewer(ImageViewer):
             width=self.win_w,
             height=self.win_h,
         )
+        self.inline_editor_layer = ft.Stack(
+            controls=[],
+            width=self.win_w,
+            height=self.win_h,
+        )
+        self.inline_editing_region_id = None
         
         # Intercept mouse drag events
         self.gesture_detector = ft.GestureDetector(
@@ -211,13 +217,14 @@ class SelectableImageViewer(ImageViewer):
                     self.image_control,
                     self.highlight_layer,
                     self.rects_layer,
-                    self.gesture_detector
+                    self.gesture_detector,
+                    self.inline_editor_layer
                 ],
                 width=self.img_w * self.zoom_scale,
                 height=self.img_h * self.zoom_scale,
             )
             if not hasattr(self, 'stack'):
-                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector])
+                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector, self.inline_editor_layer])
             self.image_container.content = self.stack
         
         # Override overall layout again with status
@@ -634,7 +641,7 @@ class SelectableImageViewer(ImageViewer):
             self.image_container.content = ft.Text(self.ocr_error, color=ft.Colors.RED, weight=ft.FontWeight.BOLD)
         else:
             if not hasattr(self, 'stack'):
-                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector])
+                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector, self.inline_editor_layer])
             self.image_container.content = self.stack
             
         self.btn_prev.disabled = not self.sequence.has_prev()
@@ -851,6 +858,8 @@ class SelectableImageViewer(ImageViewer):
             self.highlight_layer.height = self.img_h * self.zoom_scale
             self.rects_layer.width = self.img_w * self.zoom_scale
             self.rects_layer.height = self.img_h * self.zoom_scale
+            self.inline_editor_layer.width = self.img_w * self.zoom_scale
+            self.inline_editor_layer.height = self.img_h * self.zoom_scale
             self.gesture_detector.width = self.img_w * self.zoom_scale
             self.gesture_detector.height = self.img_h * self.zoom_scale
             self.stack.width = self.img_w * self.zoom_scale
@@ -916,6 +925,8 @@ class SelectableImageViewer(ImageViewer):
             self.highlight_layer.top = self.offset_y
             self.rects_layer.left = self.offset_x
             self.rects_layer.top = self.offset_y
+            self.inline_editor_layer.left = self.offset_x
+            self.inline_editor_layer.top = self.offset_y
             
             self._update_viewer()
 
@@ -939,9 +950,11 @@ class SelectableImageViewer(ImageViewer):
             
             # Don't add if area is 0
             if bbox[2] > bbox[0] and bbox[3] > bbox[1]:
-                self.selection_container.add(bbox)
+                new_rect = self.selection_container.add(bbox)
+                self.inline_editing_region_id = new_rect.rect_id
             
             self._update_selections_ui()
+            self._update_inline_editor()
             
         self.drag_start_point = None
         self.drag_current_point = None
@@ -952,6 +965,8 @@ class SelectableImageViewer(ImageViewer):
             self.highlight_layer.top = self.offset_y
             self.rects_layer.left = self.offset_x
             self.rects_layer.top = self.offset_y
+            self.inline_editor_layer.left = self.offset_x
+            self.inline_editor_layer.top = self.offset_y
             
             # Update drawn rectangles
             self.rects_layer.controls.clear()
@@ -1032,9 +1047,7 @@ class SelectableImageViewer(ImageViewer):
                     self._update_selections_ui()
                 
                 def commit_edit(e, rid=rect.rect_id, text_field=None):
-                    self.edits[rid] = text_field.value
-                    self.editing_region_id = None
-                    self._update_selections_ui()
+                    self.commit_edit(rid, text_field.value)
                 
                 def cancel_edit(e, rid=rect.rect_id):
                     self.editing_region_id = None
@@ -1125,6 +1138,87 @@ class SelectableImageViewer(ImageViewer):
                 self.selections_list.update()
 
 
+    def _update_inline_editor(self):
+        with self.selections_lock:
+            self.inline_editor_layer.controls.clear()
+            if self.inline_editing_region_id is not None:
+                rect = None
+                for r in self.selection_container.get_all():
+                    if r.rect_id == self.inline_editing_region_id:
+                        rect = r
+                        break
+                if rect:
+                    x1, y1, x2, y2 = rect.bbox
+                    filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
+                    extracted_text = assemble_text(filtered_lines)
+                    has_edit = rect.rect_id in self.edits
+                    display_text = self.edits[rect.rect_id] if has_edit else extracted_text
+
+                    dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, 0.0, 0.0)
+                    dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, 0.0, 0.0)
+                    
+                    editor_width = max(200, dx2 - dx1)
+                    
+                    # Estimate height for TextField (approx 60px for single line, maybe more for multi)
+                    # We will use 60.0 as a baseline estimate.
+                    editor_height = 60.0 
+                    
+                    # Position below rectangle by default
+                    top_pos = dy2
+                    
+                    # If it would go off the bottom of the visible area, put it above
+                    view_h = self.img_h * self.zoom_scale
+                    if top_pos + editor_height > view_h and dy1 - editor_height > 0:
+                        top_pos = dy1 - editor_height
+                    
+                    # Clamp left position to stay inside
+                    left_pos = dx1
+                    view_w = self.img_w * self.zoom_scale
+                    if left_pos + editor_width > view_w:
+                        left_pos = view_w - editor_width
+                    if left_pos < 0:
+                        left_pos = 0.0
+                    
+                    tf = ft.TextField(
+                        value=display_text,
+                        multiline=True,
+                        shift_enter=True,
+                        autofocus=True,
+                        width=editor_width,
+                        bgcolor=ft.Colors.WHITE,
+                    )
+                    tf.on_submit = lambda e, rid=rect.rect_id, t=tf: self._commit_inline_edit(e, rid, t)
+                    tf.on_blur = lambda e: self._cancel_inline_edit(e)
+                    
+                    editor_container = ft.Container(
+                        content=tf,
+                        left=left_pos,
+                        top=top_pos,
+                        padding=5,
+                        bgcolor=ft.Colors.with_opacity(0.9, ft.Colors.BLUE_GREY_900),
+                        border_radius=5
+                    )
+                    self.inline_editor_layer.controls.append(editor_container)
+            
+            if getattr(self.inline_editor_layer, 'page', None):
+                self.inline_editor_layer.update()
+
+    def _commit_inline_edit(self, e, rid, text_field):
+        self.commit_edit(rid, text_field.value)
+        self._cancel_inline_edit()
+
+    def commit_edit(self, rid, new_text):
+        with self.selections_lock:
+            self.edits[rid] = new_text
+            if self.editing_region_id == rid:
+                self.editing_region_id = None
+        self._update_selections_ui()
+
+    def _cancel_inline_edit(self, e=None):
+        with self.selections_lock:
+            self.inline_editing_region_id = None
+        self._update_inline_editor()
+
     def _update_viewer(self):
         super()._update_viewer()
         if not getattr(self, 'ocr_error', None):
@@ -1132,6 +1226,8 @@ class SelectableImageViewer(ImageViewer):
             self.highlight_layer.height = self.img_h * self.zoom_scale
             self.rects_layer.width = self.img_w * self.zoom_scale
             self.rects_layer.height = self.img_h * self.zoom_scale
+            self.inline_editor_layer.width = self.img_w * self.zoom_scale
+            self.inline_editor_layer.height = self.img_h * self.zoom_scale
             self.gesture_detector.width = self.img_w * self.zoom_scale
             self.gesture_detector.height = self.img_h * self.zoom_scale
             self.stack.width = self.img_w * self.zoom_scale
@@ -1146,6 +1242,8 @@ class SelectableImageViewer(ImageViewer):
                 self.highlight_layer.update()
             if getattr(self.rects_layer, 'page', None):
                 self.rects_layer.update()
+            if getattr(self.inline_editor_layer, 'page', None):
+                self.inline_editor_layer.update()
 
 def main(page: ft.Page):
     from PIL import Image
@@ -1171,7 +1269,10 @@ def main(page: ft.Page):
         page.update()
         
     def on_keyboard(e: ft.KeyboardEvent):
-        if viewer.editing_region_id is not None:
+        if viewer.editing_region_id is not None or viewer.inline_editing_region_id is not None:
+            if e.key == "Escape":
+                if viewer.inline_editing_region_id is not None:
+                    viewer._cancel_inline_edit()
             # Suppress global shortcuts while editing text
             return
             
