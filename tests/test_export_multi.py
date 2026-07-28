@@ -64,8 +64,8 @@ def test_build_export_rows_multi():
     txt_text = rows_to_txt_text(rows)
     
     # Assert (f): TXT contains disambiguated names
-    assert "=== a.jpg / Region 1 ===" in txt_text
-    assert "=== c.jpg / Region 1 ===" in txt_text
+    expected_txt = "a.jpg\tEdited A1｜Edited A2｜B text\nc.jpg\tC text\n"
+    assert txt_text == expected_txt
 
 def test_empty_pages_sequence():
     # Assert (g): Empty sequence produces CSV with header only and doesn't raise

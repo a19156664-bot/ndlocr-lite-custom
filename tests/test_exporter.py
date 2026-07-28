@@ -81,11 +81,8 @@ def test_txt_output():
     
     txt_text = rows_to_txt_text(rows)
     
-    assert "=== digidepo_0024.jpg / Region 1 ===" in txt_text
-    assert "第一章 序説\nこの書は" in txt_text
-    
-    assert "=== digidepo_0024.jpg / Region 2 ===" in txt_text
-    assert "明治三十年に至り" in txt_text
+    expected_txt = "第一章 序説｜この書は｜明治三十年に至り｜カンマ,入りテキスト\n"
+    assert txt_text == expected_txt
 
 def test_zero_rects():
     rows = build_export_rows("test.jpg", [], [])
