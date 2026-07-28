@@ -1,0 +1,269 @@
+Task 30d: [FIX+UX] The drag preview offset, and the pre-OCR progress display
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+Task 30c fixed the panning crash and is merged. It left one regression, listed
+first because it is a defect. The rest is the user experience work that was
+deferred from the cancelled Task 30b.
+
+================================================================================
+1. [A] THE REGRESSION - the live drag rectangle is double-offset
+================================================================================
+Task 30c made `highlight_layer` and `rects_layer` carry the pan offset on their
+own `.left` / `.top`, so their children are positioned with
+`original_to_display(..., 0.0, 0.0)`.
+
+`_on_pan_start` was not updated. It still does:
+
+        self.active_rect = ft.Container(left=e.local_x, top=e.local_y, ...)
+        self.rects_layer.controls.append(self.active_rect)
+
+`e.local_x` is already in on-screen coordinates, but the rectangle now sits
+inside a layer that adds the offset again.
+
+Measured by the commander on the real widget tree:
+
+        pan the image by (120, 80)
+        start a SELECT drag at the mouse position (300, 300)
+        -> the red preview rectangle renders at (420, 380)
+        release -> the committed rectangle lands correctly at (300, 300)
+
+So the preview follows the mouse at the wrong place whenever the image has been
+panned. Only the preview is wrong; the stored bbox and the OCR results are
+correct.
+
+Fix `_on_pan_start` and `_on_pan_update` so the preview is drawn in the layer's
+own coordinate space - subtract the offset the layer already applies. Do not
+change `calculate_normalized_bbox`, and do not change the committed geometry:
+after your fix a rectangle drawn from (300, 300) to (700, 650) while panned by
+(120, 80) must still produce the SAME bbox it produces today.
+
+================================================================================
+2. THE USER'S REPORTS ON THE PRE-OCR FEATURE
+================================================================================
+2.1 "I could not find the button." ft.Icons.DOCUMENT_SCANNER looks like a crop
+    frame and the user had to ask where the feature was.
+2.2 "The progress appeared at the bottom right. Please make it clearer."
+2.3 "There are 52 images but the progress says 50." The denominator is the
+    number of pages still needing OCR. The user had browsed 2 pages, which
+    cached them. The arithmetic is right and the display is wrong: a user counts
+    the pages in their folder.
+
+================================================================================
+3. DELIVERABLES
+================================================================================
+[A] The drag preview offset. Described in section 1. This is the priority.
+
+[B] Count the whole folder.
+
+    Progress must be expressed over every page the batch was asked about, with
+    already-cached pages counted as done:
+
+        total = len(candidate_paths)                    # 52
+        done  = len(already_cached) + <finished so far>
+
+    So it starts at 2/52 and ends at 52/52. Do this in the viewer. Do NOT modify
+    custom_gui/batch_ocr.py, whose own callback legitimately reports progress
+    over the work it was given.
+
+[C] A visible progress bar.
+
+    Add an ft.ProgressBar across the top of the viewer area, above the image.
+    visible=False normally, visible only while a batch runs, with
+    value = done / total as a float 0.0-1.0. It must not disturb the layout when
+    hidden and must not change the image geometry: zoom_scale must stay 0.2605
+    for a 2218x3071 image in a 1600x900 window.
+
+[D] Spin the ring, and estimate the time left.
+
+    self.progress_ring.visible must be True while a batch runs.
+
+    Estimate from what actually happened - do not hard code a per page constant:
+
+        per_page  = (now - batch_start) / pages_finished_this_run
+        remaining = per_page * pages_left
+
+    Show nothing until at least one page has finished this run; there is no
+    honest estimate before that. Format for a human - "about 8 min",
+    "about 40 sec". Round it.
+
+[E] Label the button.
+
+    Replace the ft.IconButton with a labelled control in the same toolbar
+    position, third, right after Open PDF. Zoom In / Zoom Out / Fit are already
+    text buttons. Keep the attribute name self.btn_batch_ocr.
+
+        idle    : text "Pre-OCR All"   tooltip explaining PDF pages are skipped
+        running : text "Cancel"        tooltip "Cancel pre-OCR"
+
+[F] Wait for an in-flight lazy OCR before starting the batch.
+
+    `start_ocr` already returns early once self.batch_running is set, so nothing
+    NEW starts, but a job already running keeps going and both processes load
+    the model on a 4 core machine. On click, if a lazy OCR is RUNNING, set
+    batch_running immediately, show "Cancel", and wait for that job to finish ON
+    THE WORKER THREAD before launching run_batch. Report it in the status, for
+    example "Pre-OCR: waiting for the current page...". Cancelling during the
+    wait must abort without launching the batch.
+
+[G] Stop the test suite writing into resource/.
+
+    Task 30's [F] caches successful lazy OCR results, and several existing tests
+    OCR the bundled image resource/digidepo_2531162_0024.jpg, so `pytest`
+    creates resource/.ndlocr_cache/. That dirties the repository, and a stale
+    cache file can short circuit the cache-first path in a later run, making a
+    lazy-OCR test pass for the wrong reason.
+
+    G1. Add `.ndlocr_cache/` to .gitignore.
+    G2. Make the tests that OCR the bundled image work on a COPY under pytest's
+        tmp_path. You MAY edit these existing test files FOR THIS PURPOSE ONLY:
+
+            tests/test_async_ocr.py
+            tests/test_layout_stability.py
+            tests/test_missing_image_recovery.py
+            tests/test_flet_constants.py
+
+        The ONLY permitted change is where the image comes from - copy it into
+        tmp_path with shutil.copy2 and point the test at the copy. NOT ONE
+        ASSERTION MAY CHANGE. No test may be relaxed, skipped, renamed or
+        deleted. If making a test work on a copy would require changing an
+        assertion, STOP and report it instead.
+
+        Prove it: delete resource/.ndlocr_cache, run the full suite, and show
+        `git status` clean afterwards. Put that output in your report.
+
+================================================================================
+4. DEFINITION OF DONE
+================================================================================
+[1] A rectangle drawn while the image is panned previews under the mouse, and
+    commits to the same bbox as before this task.
+[2] Progress reads N/52 for a 52 page folder, starting at the number already
+    cached, ending at 52.
+[3] A progress bar is visible during a batch, hidden otherwise, and does not
+    change zoom_scale.
+[4] The ring spins during a batch and a rounded human estimate appears once at
+    least one page has completed this run.
+[5] The button shows text and toggles to "Cancel".
+[6] Clicking while a lazy OCR runs waits for it without freezing the UI, and
+    cancelling during the wait aborts cleanly.
+[7] `pytest` leaves the repository clean - no resource/.ndlocr_cache.
+[8] `python -m pytest tests/ -v` passes completely (127+ tests).
+
+================================================================================
+5. TESTS
+================================================================================
+Extend tests/test_batch_gui.py and tests/test_concurrency.py - both are yours,
+edit them freely. No GUI window, no real OCR. Monkeypatch
+custom_gui.app.run_ocr_and_parse and custom_gui.app.run_batch.
+
+    (a) [A] THE REGRESSION TEST. Pan by a known non-zero offset, start a SELECT
+        drag at a known point, and assert the preview rectangle's ON SCREEN
+        position - active_rect.left plus rects_layer.left - equals the mouse
+        position. This MUST FAIL against the current merged code. Run it before
+        your fix and paste the failure.
+    (b) [A] With the same pan and the same drag, the committed bbox is
+        UNCHANGED from what the current code produces. Compute the expected
+        value from the current code first and assert the exact numbers, so a
+        future change to the geometry cannot slip through.
+    (c) [B] With 5 images of which 2 are already cached, the progress reported
+        starts at (2, 5) and ends at (5, 5). Assert both.
+    (d) [C][D] The bar is visible during a batch and hidden after; the estimate
+        is absent before the first page completes and present after.
+    (e) [E] The button text is "Pre-OCR All" when idle and "Cancel" while
+        running.
+    (f) [F] With a lazy OCR marked RUNNING, clicking does not call run_batch
+        until that job finishes; cancelling during the wait means run_batch is
+        never called. Assert the call counts.
+    (g) The status string still contains every pre-existing segment: "File:",
+        "Size:", "Scale:", "Mode:", "Last:".
+    (h) The Task 30c guarantees still hold: concurrent _on_pan_update from
+        several threads raises nothing, and N pan events do not create
+        N x (number of lines) controls.
+
+For (a) state what the failing output was before your fix. A test that cannot
+fail is worthless - this project has shipped six of them.
+
+Threads in tests must be joined with a timeout and any exception they raised
+re-raised in the test body.
+
+================================================================================
+6. REGRESSION SAFETY
+================================================================================
+    - Do NOT modify custom_gui/viewer.py. original_to_display,
+      display_to_original, calculate_fit_scale, apply_pan,
+      calculate_label_position and class InteractionMode MUST NOT change.
+    - Do NOT modify custom_gui/ocr_cache.py, batch_ocr.py, pdf_loader.py,
+      ocr_scheduler.py, ocr_bridge.py, image_sequence.py, region_filter.py,
+      selection.py, text_assembler.py, exporter.py, rtl.py.
+    - Existing test files may be touched ONLY as described in [G2].
+      tests/test_flet_constants.py remains a guard test: if it objects to your
+      code, CHANGE YOUR CODE. NEVER add an exemption. A local variable named
+      `page` WILL collide with it.
+    - Do NOT undo Task 30c: the RLock around _update_selections_ui, the layers
+      carrying the pan offset, and the batch worker not calling _switch_image
+      must all stay. Do not make event handlers async.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - NEVER use `self.image` or `self.scale` as attribute names. Both are
+      reserved by flet and previously caused a fatal startup crash here.
+    - All verified working and must stay working: rectangle selection,
+      Select/Pan, panning, yellow highlights, the "Region N" label outside the
+      rectangle, the lazy OCR scheduler, cache-first reading, the Pre-OCR
+      button, CSV/TXT export for the current image and for all images, folder
+      loading, PDF loading by button and by folder including the lazily rendered
+      first page, Prev/Next/Ctrl+N, F2 correction with revert, the right-to-left
+      button, and the error display for a missing image WITHOUT crashing.
+    - Do not run real OCR in your tests.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish.
+
+================================================================================
+7. ALLOWED SCOPE (WHITELIST)
+================================================================================
+    custom_gui/app.py
+    tests/test_batch_gui.py
+    tests/test_concurrency.py
+    tests/test_async_ocr.py              ) image location only, per [G2]
+    tests/test_layout_stability.py       )
+    tests/test_missing_image_recovery.py )
+    tests/test_flet_constants.py         )
+    .gitignore
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - PDF batching or PDF caching. That is a later task.
+    - Persisting rectangles or F2 edits.
+    - A "clear cache" command, cache eviction or size limits.
+    - Starting a batch automatically on folder open. It stays button-triggered.
+    - Parallelism, GPU, --device cuda, --enable-tcy, or any OCR threshold.
+    - Redesigning the toolbar or the right-hand panel beyond [C] and [E].
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [A] first, then [B], then [E], then [C]
+      and [D], then [G], then [F].
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[8] to how you satisfied it.
+    2. The failing output of test (a) before your fix and passing after.
+    3. The exact bbox asserted in test (b), and evidence it matches the current
+       behaviour.
+    4. The exact status string during a batch and when idle.
+    5. The output of `git status` after deleting resource/.ndlocr_cache and
+       running the full suite - it must be clean.
+    6. Confirmation that no assertion in any pre-existing test file changed, and
+       the diff of those files.
+    7. The list of changed files and the reason for each.
+    8. The full output of `python -m pytest tests/ -v`.
+    9. Anything that cannot be verified without a GUI, stated explicitly.
+   10. Open questions or compromises. Write "none" if there are none.
