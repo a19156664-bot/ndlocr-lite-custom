@@ -1,0 +1,216 @@
+Task 28b: [FIX] Finish Task 28 condition [C] - the error display STILL crashes
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+Task 28 is merged. Its [A], [B], [D] and [F] are done and verified on the real
+GUI - do not redo them. Condition [C] is NOT done. This task finishes it.
+
+Do not re-investigate. The commander reproduced this by driving the real widget
+tree in a real flet app. The diagnosis below is exact.
+
+================================================================================
+1. WHAT STILL HAPPENS
+================================================================================
+Switching to an image file that does not exist:
+
+    v._switch_image(<a path that does not exist>)
+    AssertionError: Stack Control must be added to the page first
+
+    custom_gui/app.py:436   _switch_image -> self.update_layout(...)
+    custom_gui/app.py:611   update_layout -> super().update_layout(...)
+    custom_gui/viewer.py:130                -> self._update_viewer()
+    custom_gui/app.py:889   _update_viewer -> self._update_selections_ui()
+    custom_gui/app.py:869   _update_selections_ui -> self.highlight_layer.update()
+                                                     ^^^^^^^^^^^^^^^^^^^^ CRASH
+
+Task 28 fixed exactly one guard, in custom_gui/viewer.py:
+
+        if self.image_control.page:      # correct, keep it
+            self.image_control.update()
+            self.image_container.update()
+
+That was right, but it only rescued image_control. The crash simply moved to the
+NEXT detached control.
+
+================================================================================
+2. WHY
+================================================================================
+On the error path `_switch_image` does
+
+        self.image_container.content = ft.Text(self.ocr_error, ...)
+
+which removes `self.stack` from the control tree. EVERYTHING inside the stack
+goes with it:
+
+        self.image_control        (Task 28 guarded this one)
+        self.highlight_layer      <- still unguarded, crashes
+        self.rects_layer          <- still unguarded, crashes next
+        self.gesture_detector
+
+But `_update_selections_ui` guards on the PARENT:
+
+        if self.page:                     # the VIEWER has a page, so this passes
+            self.highlight_layer.update()  # the LAYER does not -> assert
+            self.rects_layer.update()
+            self.selections_list.update()  # this one IS still attached - fine
+
+`self.page` being set proves nothing about a child that was just detached.
+`self.selections_list` lives in the right-hand panel, not in the stack, so it is
+still attached and must keep updating normally.
+
+Note that `_update_viewer` already skips the SIZING of those layers when
+ocr_error is set. The sizing was guarded; the updating was not.
+
+================================================================================
+3. DEFINITION OF DONE
+================================================================================
+[C1] Auditing every update on the error path.
+     Go through EVERY `.update()` call that can be reached from `_switch_image`
+     when `self.ocr_error` is set, in custom_gui/app.py and custom_gui/viewer.py.
+     For each one, decide whether that specific control can be detached at that
+     moment, and guard the ones that can. Guard the control being updated, not
+     its parent.
+
+     The known call sites to audit are at least:
+         app.py  ~432-434   btn_prev / btn_next / image_container
+         app.py  ~442       status_row
+         app.py  ~869-871   highlight_layer / rects_layer / selections_list
+         app.py  ~888       status_text
+         viewer.py ~123-124 image_control / image_container   (already correct)
+
+     Do not blanket-wrap things in try/except to make the symptom go away. A
+     guard must express WHY the control might not be attached. If you use a
+     helper, give it a name that says what it does, for example:
+
+         def _safe_update(control):
+             if control is not None and control.page:
+                 control.update()
+
+     and say in your report which call sites you changed and which you left
+     alone, with the reason.
+
+[C2] Switching to a missing image must not raise, twice in a row, and switching
+     back to a good image must fully restore the viewer - the stack reattached,
+     rectangles drawable, highlights working. Task 28 already made the
+     reattachment work; do not break it.
+
+[C3] The PDF cold start must keep working exactly as it does now. The commander
+     measured it on the real GUI: opening a 2 page A4 PDF renders page 1, sets
+     no error, and reports img_w=2481 img_h=3508. Both pages work. If your
+     change alters any of that, you have broken a verified feature.
+
+[C4] Zoom stability must survive: zoom_scale stays 0.2605 for a 2218x3071 image
+     in a 1600x900 window, however many pages are turned.
+
+================================================================================
+4. TESTS - THIS IS WHERE TASK 28 FAILED. READ CAREFULLY.
+================================================================================
+tests/test_broken_image.py currently contains this helper:
+
+        def mock_all_updates(viewer):
+            ...
+            viewer.highlight_layer = MagicMock()
+            viewer.rects_layer = MagicMock()
+            viewer.gesture_detector = MagicMock()
+            ...
+
+It replaces the very controls that crash with MagicMocks, so
+`test_missing_image_recovery` passes while the application still crashes. The
+commander only found the defect by driving the real widget tree. This is the
+SIXTH ineffective test in this project. It will not be the seventh.
+
+You MAY modify tests/test_broken_image.py - it is the file Task 28 added and it
+is on the whitelist below. Every OTHER file under tests/ stays untouched.
+
+[T1] `mock_all_updates` MUST NOT replace `highlight_layer`, `rects_layer`,
+     `gesture_detector`, `image_control`, `stack` or `image_container` with
+     MagicMock, in any test in that file. Those are the controls under test.
+     Mocking the thing you are testing proves nothing.
+
+     If a test needs the viewer to believe it is on a page, attach it to a REAL
+     page, or leave `viewer.page` as a stand-in and let the real controls report
+     their real (unattached) state - which is exactly the condition being
+     tested.
+
+[T2] Add a test that fails against the CURRENT merged code:
+     switching to a missing path must not raise, with the real layer objects in
+     place. Run it before your fix and paste the AssertionError. If it passes
+     before your fix, the test is worthless - rewrite it.
+
+[T3] Add a test asserting that after recovering to a good image,
+     `viewer.image_container.content is viewer.stack` and that
+     `highlight_layer`, `rects_layer` and `image_control` are the SAME OBJECTS
+     as before the error visit - not silently recreated.
+
+[T4] Keep and keep passing the existing PDF cold start test, including the
+     exact 2481 x 3508 assertions.
+
+[T5] `python -m pytest tests/ -v` must pass completely.
+
+For [T2] show the FAILING output before your fix and the passing output after,
+both in full.
+
+================================================================================
+5. WHAT YOU CANNOT DO
+================================================================================
+    - Do NOT stop detaching the stack. Option [C](ii) from Task 28 is now off
+      the table; the current display behaviour is verified and the commander
+      does not want it re-architected. Guard the updates.
+    - Do NOT modify custom_gui/pdf_loader.py, ocr_scheduler.py,
+      image_sequence.py, ocr_bridge.py, region_filter.py, selection.py,
+      text_assembler.py, exporter.py, rtl.py.
+    - In custom_gui/viewer.py the pure functions original_to_display,
+      display_to_original, calculate_fit_scale, apply_pan,
+      calculate_label_position and class InteractionMode MUST NOT change.
+    - Do NOT modify ANY existing test file except tests/test_broken_image.py.
+      tests/test_flet_constants.py is a guard test: if it objects to your code,
+      CHANGE YOUR CODE. NEVER add an exemption. A local variable named `page`
+      WILL collide with it.
+    - Do NOT touch custom_gui/ocr_cache.py or custom_gui/batch_ocr.py if they
+      are present. They belong to another task.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - NEVER use `self.image` or `self.scale` as attribute names. Both are
+      reserved by flet and previously caused a fatal startup crash here.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish.
+
+================================================================================
+6. THESE MUST ALL STILL WORK
+================================================================================
+    rectangle selection, Select/Pan, panning, yellow highlights, the "Region N"
+    label outside the rectangle, the OCR progress ring and the one-at-a-time OCR
+    scheduler, CSV/TXT export for the current image and for all images, folder
+    loading, PDF loading (button and folder), Prev/Next/Ctrl+N, F2 correction
+    with revert, the right-to-left button, and stable zoom across page changes.
+
+================================================================================
+7. ALLOWED SCOPE (WHITELIST)
+================================================================================
+    custom_gui/app.py
+    custom_gui/viewer.py             (guards only)
+    tests/test_broken_image.py
+
+================================================================================
+8. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+================================================================================
+9. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. The full list of `.update()` call sites you audited, with a one-line
+       verdict for each: guarded / left alone, and why.
+    2. The failing output of test [T2] against the current merged code.
+    3. The passing output afterwards.
+    4. Confirmation that no control under test is a MagicMock, and how a
+       reviewer can see that at a glance.
+    5. The measured img_w / img_h for the PDF cold start test.
+    6. The list of changed files and the reason for each.
+    7. The output of `git status` showing no stray files.
+    8. The full output of `python -m pytest tests/ -v`.
+    9. Anything that cannot be verified without a GUI, stated explicitly.
+   10. Open questions or compromises. Write "none" if there are none.
