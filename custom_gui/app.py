@@ -10,6 +10,8 @@ from custom_gui.rtl import convert_right_to_left
 import os
 import tempfile
 from custom_gui.pdf_loader import build_source_list, ensure_page_rendered, plan_pdf_pages
+import custom_gui.ocr_cache as ocr_cache
+import custom_gui.batch_ocr as batch_ocr
 from enum import Enum, auto
 
 from custom_gui.ocr_scheduler import OcrScheduler
@@ -71,6 +73,10 @@ class SelectableImageViewer(ImageViewer):
         self.pdf_cache_dir = tempfile.mkdtemp(prefix="ndlocr_pdf_")
         self.pdf_page_map = {}
         
+        self.batch_running = False
+        self._batch_cancel_requested = False
+        self.batch_progress = None
+        
         self.mode_state = InteractionMode()
             
         self.mode_toggle = ft.SegmentedButton(
@@ -95,6 +101,12 @@ class SelectableImageViewer(ImageViewer):
             on_click=self._on_open_pdf_click
         )
         
+        self.btn_batch_ocr = ft.IconButton(
+            icon=ft.Icons.DOCUMENT_SCANNER,
+            tooltip="Pre-OCR all pages (images only; PDF pages are skipped)",
+            on_click=self._on_batch_ocr_click,
+        )
+        
         self.btn_prev = ft.IconButton(
             icon=ft.Icons.NAVIGATE_BEFORE,
             tooltip="Previous Image",
@@ -111,6 +123,7 @@ class SelectableImageViewer(ImageViewer):
 
         self.controls_row.controls.insert(0, self.btn_next)
         self.controls_row.controls.insert(0, self.btn_prev)
+        self.controls_row.controls.insert(0, self.btn_batch_ocr)
         self.controls_row.controls.insert(0, self.btn_open_pdf)
         self.controls_row.controls.insert(0, self.btn_open_folder)
 
@@ -232,6 +245,9 @@ class SelectableImageViewer(ImageViewer):
                 self.page.update()
 
     def start_ocr(self, page: ft.Page, target_path: str = None):
+        if self.batch_running:
+            return
+            
         if target_path is None:
             target_path = self.image_src
         
@@ -287,6 +303,11 @@ class SelectableImageViewer(ImageViewer):
         else:
             state["ocr_state"] = OcrState.DONE
             state["ocr_results"] = results
+            if target_path not in self.pdf_page_map:
+                try:
+                    ocr_cache.save_cache(target_path, results)
+                except Exception:
+                    pass
             
         if self.image_src == target_path:
             self.ocr_state = state["ocr_state"]
@@ -326,6 +347,96 @@ class SelectableImageViewer(ImageViewer):
         if self.page:
             self.update()
 
+
+
+
+    def _run_batch_worker(self, candidate_paths):
+        def _progress_cb(done, total):
+            self.batch_progress = (done, total)
+            if hasattr(self, 'status_text'):
+                self.status_text.value = self._get_status_message()
+            if self.page:
+                self.status_row.update()
+                
+        def _should_cancel_cb():
+            return self._batch_cancel_requested
+            
+        result = batch_ocr.run_batch(
+            candidate_paths, 
+            progress=_progress_cb, 
+            should_cancel=_should_cancel_cb
+        )
+        
+        # Explicitly set to final progress values before clearing
+        total_planned = len(candidate_paths) - len(result.skipped)
+        if total_planned > 0:
+            final_done = len(result.ok) + len(result.failed)
+            self.batch_progress = (final_done, total_planned)
+            if hasattr(self, 'status_text'):
+                self.status_text.value = self._get_status_message()
+            if self.page:
+                self.status_row.update()
+                
+        # Clear batch running flag and batch progress
+        self.batch_running = False
+        self.batch_progress = None
+        
+        # Restore button
+        self.btn_batch_ocr.icon = ft.Icons.DOCUMENT_SCANNER
+        self.btn_batch_ocr.tooltip = "Pre-OCR all pages (images only; PDF pages are skipped)"
+        if self.page:
+            self.btn_batch_ocr.update()
+            
+        pdf_skipped = 0
+        if hasattr(self.sequence, '_paths'):
+            pdf_skipped = len([p for p in self.sequence._paths if p in self.pdf_page_map])
+            
+        cached_count = len(result.skipped) + len(result.ok)
+        
+        if result.cancelled:
+            remaining = total_planned - len(result.ok) - len(result.failed)
+            self.latest_region_info = f"Pre-OCR cancelled: {cached_count} cached, {remaining} remaining"
+        elif len(result.failed) > 0:
+            self.latest_region_info = f"Pre-OCR finished: {cached_count} cached, {len(result.failed)} failed"
+        else:
+            self.latest_region_info = f"Pre-OCR complete: {cached_count} cached, {pdf_skipped} PDF pages skipped"
+            
+        if hasattr(self, 'status_text'):
+            self.status_text.value = self._get_status_message()
+        if self.page:
+            self.status_row.update()
+            
+        # Refresh current image
+        if self.image_src and self.image_src not in self.pdf_page_map:
+            # Re-run the switch logic for the current image
+            self._switch_image(self.image_src)
+
+    def _on_batch_ocr_click(self, e):
+        if self.batch_running:
+            self._batch_cancel_requested = True
+            return
+            
+        candidate_paths = []
+        if hasattr(self.sequence, '_paths'):
+            candidate_paths = [p for p in self.sequence._paths if p not in self.pdf_page_map]
+            
+        if not candidate_paths:
+            self.latest_region_info = "No image pages available for Pre-OCR"
+            if hasattr(self, 'status_text'):
+                self.status_text.value = self._get_status_message()
+            if self.page:
+                self.status_row.update()
+            return
+            
+        self.batch_running = True
+        self._batch_cancel_requested = False
+        
+        self.btn_batch_ocr.icon = ft.Icons.CANCEL
+        self.btn_batch_ocr.tooltip = "Cancel pre-OCR"
+        if self.page:
+            self.btn_batch_ocr.update()
+            
+        self.page.run_thread(self._run_batch_worker, candidate_paths)
 
     def _on_open_pdf_click(self, e):
         self._file_picker_mode = "pdf"
@@ -440,6 +551,26 @@ class SelectableImageViewer(ImageViewer):
         self.progress_ring.visible = (self.ocr_state in (OcrState.RUNNING, OcrState.WAITING))
         if self.page:
             self.status_row.update()
+        
+
+        if self.ocr_state in (OcrState.IDLE, OcrState.WAITING):
+            if path not in self.pdf_page_map:
+                try:
+                    cached_results = ocr_cache.load_cache(path)
+                    if cached_results is not None:
+                        state["ocr_results"] = cached_results
+                        state["ocr_state"] = OcrState.DONE
+                        self.ocr_results = cached_results
+                        self.ocr_state = OcrState.DONE
+                        self.progress_ring.visible = False
+                        if hasattr(self, 'status_text'):
+                            self.status_text.value = self._get_status_message()
+                        if self.page:
+                            self.status_row.update()
+                        self._update_selections_ui()
+                except Exception as e:
+                    # Silently fallback if cache read fails
+                    pass
         
         if self.ocr_state in (OcrState.IDLE, OcrState.WAITING) and self.page:
             self.start_ocr(self.page)
@@ -600,8 +731,12 @@ class SelectableImageViewer(ImageViewer):
         ocr_status = get_ocr_status_text(self.ocr_state, len(self.ocr_results))
         idx = self.sequence.index + 1 if self.sequence.count > 0 else 0
         seq_str = f"[{idx}/{self.sequence.count}]"
-        return (f"{seq_str} File: {filename} | Size: {self.img_w}x{self.img_h} | Scale: {self.zoom_scale:.3f} | Mode: {self.mode_state.current} | "
+        base_str = (f"{seq_str} File: {filename} | Size: {self.img_w}x{self.img_h} | Scale: {self.zoom_scale:.3f} | Mode: {self.mode_state.current} | "
                 f"{ocr_status} | Last: {self.latest_region_info}")
+        if self.batch_progress:
+            done, total = self.batch_progress
+            return f"{base_str} | Pre-OCR: {done}/{total}"
+        return base_str
 
     def update_layout(self, win_w: float, win_h: float):
         self.frame_w = win_w
