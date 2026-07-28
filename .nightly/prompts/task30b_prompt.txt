@@ -1,0 +1,307 @@
+Task 30b: [FIX+UX] Make the pre-OCR progress obvious, and close four defects
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+Task 30 is merged and works. A real user ran it over a 52 page folder
+successfully. This task fixes what that run exposed. Do not re-architect
+anything; every item below is small and independent.
+
+================================================================================
+1. THE USER'S REPORT
+================================================================================
+1.1 "I could not find the button."
+
+    ft.Icons.DOCUMENT_SCANNER looks like a crop frame. The user did not
+    recognise it and had to ask where the feature was.
+
+1.2 "The progress appeared at the bottom right. Please make it clearer."
+
+1.3 "There are 52 images but the progress says 50."
+
+    The denominator is the number of pages that still need OCR. The user had
+    browsed pages 1 and 2, which cached them, so 52 - 2 = 50. The arithmetic is
+    right and the display is wrong: a user counts the pages in their folder.
+
+================================================================================
+2. WHAT THE COMMANDER FOUND DURING ACCEPTANCE
+================================================================================
+2.1 A batch can start while a lazy OCR is still running.
+
+    `start_ocr` returns early when self.batch_running is set, so no NEW lazy OCR
+    begins. But a job already in flight keeps going, so two OCR processes can
+    briefly overlap, each loading the model, on a 4 core machine.
+
+2.2 A race can overwrite a good cache with an empty result.
+
+    Reproduced by switching pages faster than OCR completes:
+
+        _switch_image(p) sets state IDLE, then looks up the cache and sets DONE.
+        Meanwhile _on_ocr_complete for an EARLIER page fires, asks the
+        scheduler what to run next, gets p, and calls start_ocr(p) - which still
+        sees IDLE because the cache lookup has not landed yet.
+        That OCR then completes and writes ITS result into state and into the
+        cache, replacing what was there.
+
+    In real use OCR takes ~13 s so the window is small, but it is real.
+
+2.3 Running the test suite writes into the repository.
+
+    tests/test_async_ocr.py and other existing tests OCR the bundled image
+    resource/digidepo_2531162_0024.jpg. Task 30's [F] now caches successful
+    results, so `pytest` creates
+
+        resource/.ndlocr_cache/digidepo_2531162_0024.json
+
+    Confirmed by deleting it and re-running the suite: it comes back. Two
+    problems: the repository is dirtied, and a stale cache file can short
+    circuit the cache-first path in a LATER test run, making a lazy-OCR test
+    pass for the wrong reason. This project has already shipped six tests that
+    could not detect the bug they were written for.
+
+2.4 Finishing a batch resets the user's zoom and pan.
+
+    `_run_batch_worker` ends with `self._switch_image(self.image_src)`, and
+    `_switch_image` recomputes zoom_scale from calculate_fit_scale and zeroes
+    offset_x / offset_y.
+
+================================================================================
+3. DELIVERABLES
+================================================================================
+[A] Count the whole folder.
+
+    Progress must be expressed over every page the batch was asked about, with
+    already-cached pages counted as already done:
+
+        total   = len(candidate_paths)                 # 52
+        done    = len(already_cached) + <finished so far>
+
+    So the display starts at 2/52 and ends at 52/52. Do this once, in the
+    viewer - do NOT modify custom_gui/batch_ocr.py, whose own callback
+    legitimately reports progress over the work it was given.
+
+[B] A visible progress bar.
+
+    Add an ft.ProgressBar across the top of the viewer area, above the image.
+    visible=False normally; visible only while a batch runs, with
+    value = done / total (a float 0.0-1.0). Remove it from view when the batch
+    ends. It must not disturb the existing layout when hidden, and must not
+    change zoom_scale or the image area geometry - the commander verifies that
+    zoom_scale stays 0.2605 for a 2218x3071 image in a 1600x900 window.
+
+[C] Spin the ring and estimate the time left.
+
+    While a batch runs, self.progress_ring.visible must be True.
+
+    Estimate the remaining time from what has actually happened - measure it,
+    do not hard code a per page constant:
+
+        elapsed_per_page = (now - batch_start) / pages_finished_this_run
+        remaining        = elapsed_per_page * pages_left
+
+    Show nothing until at least one page has finished this run; there is no
+    honest estimate before that. Format it for a human: "about 8 min",
+    "about 40 sec". Round; do not print "7.3184 minutes".
+
+[D] Label the button.
+
+    Replace the ft.IconButton with a labelled control, in the same toolbar
+    position (third, right after Open PDF). Zoom In / Zoom Out / Fit are
+    already text buttons, so a text button is consistent. Keep the attribute
+    name self.btn_batch_ocr so existing tests keep working.
+
+        idle    : text "Pre-OCR All"   tooltip explaining PDF pages are skipped
+        running : text "Cancel"        tooltip "Cancel pre-OCR"
+
+    Use ft.Colors / ft.Icons with capitals if you use them at all - flet 0.27.6
+    requires it.
+
+[E] Wait for an in-flight lazy OCR before starting the batch.
+
+    On click, if a lazy OCR is currently RUNNING, do not launch run_batch
+    immediately. Set batch_running so nothing new starts, then wait for the
+    running job to finish before launching. Do this on the worker thread, not
+    on the UI thread - the window must stay responsive and the button must
+    already show "Cancel". Report the wait in the status, for example
+    "Pre-OCR: waiting for the current page...". Cancelling during that wait
+    must work and must not launch the batch.
+
+[F] Close the cache/OCR race - ONE choke point.
+
+    Make `start_ocr` itself consult the cache before it launches anything:
+    after it has resolved target_path and state, and before
+    ocr_scheduler.request_ocr, if the path is NOT in self.pdf_page_map and
+    ocr_cache.load_cache(target_path) returns a list, adopt that result
+    (state DONE, results stored, current view updated if it is the displayed
+    page) and return WITHOUT running OCR.
+
+    That way it does not matter who calls start_ocr, or when - a cached page can
+    never be re-OCR'd and can never have its cache overwritten. Keep the lookup
+    in _switch_image as well so the display path stays fast; a second call for
+    the same path must not cost a second file read in the common case, so
+    short circuit on state already being DONE.
+
+    Additionally, `_on_ocr_complete` must not overwrite a state that is already
+    DONE with results. If it arrives for a path whose state is DONE and whose
+    ocr_results is non-empty, discard the late result and do not call
+    save_cache.
+
+[G] Stop the test suite writing into resource/.
+
+    Two changes:
+
+    G1. Add a .gitignore entry for the cache directory:
+
+            .ndlocr_cache/
+
+    G2. Make the tests that OCR the bundled image work on a COPY under pytest's
+        tmp_path instead of on resource/ itself. You MAY edit these existing
+        test files FOR THIS PURPOSE ONLY:
+
+            tests/test_async_ocr.py
+            tests/test_layout_stability.py
+            tests/test_missing_image_recovery.py
+            tests/test_flet_constants.py
+
+        The ONLY permitted change is where the image file comes from - copy
+        resource/digidepo_2531162_0024.jpg into tmp_path with shutil.copy2 and
+        point the test at the copy. NOT ONE ASSERTION MAY CHANGE. No test may
+        be relaxed, skipped, renamed or deleted. If making a test work on a copy
+        would require changing an assertion, STOP and report it instead.
+
+        Prove it: delete resource/.ndlocr_cache, run the full suite, and show
+        that `git status` is clean afterwards. Put that output in your report.
+
+[H] Do not reset zoom and pan when a batch finishes.
+
+    Replace the `self._switch_image(self.image_src)` call at the end of
+    `_run_batch_worker` with a refresh that adopts the cached result for the
+    CURRENT page and updates the status, highlights and region list - without
+    touching zoom_scale, offset_x or offset_y, and without reloading the image.
+    If the current page is in self.pdf_page_map, there is nothing to adopt.
+
+================================================================================
+4. DEFINITION OF DONE
+================================================================================
+[1] Progress reads N/52 for a 52 page folder, starting at the number already
+    cached and ending at 52.
+[2] A progress bar is visible during a batch and hidden otherwise.
+[3] The ring spins during a batch, and a rounded human estimate appears once at
+    least one page has completed.
+[4] The button shows text, and toggles to "Cancel" while running.
+[5] Clicking while a lazy OCR runs waits for it, without freezing the UI, and
+    cancelling during the wait aborts cleanly.
+[6] A cached page is never re-OCR'd no matter which path calls start_ocr, and a
+    late OCR result never overwrites a DONE state or its cache file.
+[7] `pytest` leaves the repository clean - no resource/.ndlocr_cache.
+[8] Finishing a batch leaves zoom_scale, offset_x and offset_y untouched.
+[9] `python -m pytest tests/ -v` passes completely (121+ tests).
+
+================================================================================
+5. TESTS
+================================================================================
+Extend tests/test_batch_gui.py (yours from Task 30 - you may edit it freely).
+No GUI window, no real OCR. Monkeypatch custom_gui.app.run_ocr_and_parse and
+custom_gui.app.run_batch. Build real images with Pillow under tmp_path.
+
+    (a) [A] With 5 images of which 2 are already cached, the progress reported
+        to the UI starts at (2, 5) and ends at (5, 5). Assert both, not just
+        the total.
+    (b) [F] THE RACE. Cache a page, then call start_ocr for it DIRECTLY - as
+        the scheduler would - and assert run_ocr_and_parse call count is 0 and
+        the cached results are adopted. This must fail against Task 30's code.
+    (c) [F] A late _on_ocr_complete carrying [] for a path whose state is DONE
+        with results must leave the state and the cache file unchanged. Assert
+        the cache file content is byte-identical before and after.
+    (d) [H] Set a distinctive zoom_scale and non-zero offsets, run a batch to
+        completion, and assert all three are unchanged afterwards.
+    (e) [E] With a lazy OCR marked RUNNING, clicking the button does not call
+        run_batch until that job completes; cancelling during the wait means
+        run_batch is never called at all. Assert the call counts.
+    (f) [B][C] The progress bar is visible during a batch and hidden after, and
+        the estimate string is absent before the first page completes.
+    (g) [D] The button's text is "Pre-OCR All" when idle and "Cancel" while
+        running.
+    (h) The status string still contains every pre-existing segment: "File:",
+        "Size:", "Scale:", "Mode:", "Last:".
+
+For (b) and (d), state what you changed in the code to prove each test FAILS,
+and paste that failing output. A test that cannot fail is worthless - this
+project has shipped six of them.
+
+================================================================================
+6. REGRESSION SAFETY
+================================================================================
+    - Do NOT modify custom_gui/ocr_cache.py, batch_ocr.py, pdf_loader.py,
+      ocr_scheduler.py, ocr_bridge.py, image_sequence.py, region_filter.py,
+      selection.py, text_assembler.py, exporter.py, rtl.py, viewer.py.
+    - Existing test files may be touched ONLY as described in [G2], and ONLY to
+      relocate the image. tests/test_flet_constants.py remains a guard test: if
+      it objects to your code, CHANGE YOUR CODE. NEVER add an exemption. A local
+      variable named `page` WILL collide with it.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - NEVER use `self.image` or `self.scale` as attribute names. Both are
+      reserved by flet and previously caused a fatal startup crash here.
+    - All of this is verified working on the real GUI and must stay working:
+      rectangle selection, Select/Pan, panning, yellow highlights, the
+      "Region N" label outside the rectangle, the lazy OCR scheduler, CSV/TXT
+      export for the current image and for all images, folder loading, PDF
+      loading by button and by folder including the lazily rendered first page,
+      Prev/Next/Ctrl+N, F2 correction with revert, the right-to-left button,
+      the error display for a missing image WITHOUT crashing, cache-first
+      reading, and stable zoom across page changes.
+    - Do not run real OCR in your tests.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish.
+
+================================================================================
+7. ALLOWED SCOPE (WHITELIST)
+================================================================================
+    custom_gui/app.py
+    tests/test_batch_gui.py
+    tests/test_async_ocr.py            ) image location only, per [G2]
+    tests/test_layout_stability.py     )
+    tests/test_missing_image_recovery.py )
+    tests/test_flet_constants.py       )
+    .gitignore
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - PDF batching or PDF caching. That is Task 31.
+    - Persisting rectangles or F2 edits.
+    - A "clear cache" command, cache eviction or size limits.
+    - Starting a batch automatically on folder open. It stays button-triggered.
+    - Parallelism, GPU, --device cuda, --enable-tcy, or any OCR threshold.
+    - Redesigning the toolbar or the right-hand panel beyond items [B] and [D].
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [F] the race first, then [A] the
+      denominator, then [G] the test pollution, then [D], [B], [C], [H], [E].
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[9] to how you satisfied it.
+    2. The failing output for tests (b) and (d) against defective code, and the
+       passing output afterwards.
+    3. Exactly where in start_ocr the cache check sits, and why no caller can
+       bypass it.
+    4. The output of `git status` after deleting resource/.ndlocr_cache and
+       running the full suite - it must be clean.
+    5. Confirmation that no assertion in any pre-existing test file changed,
+       and the diff of those files so it can be checked at a glance.
+    6. The exact status string during a batch and when idle.
+    7. The list of changed files and the reason for each.
+    8. The full output of `python -m pytest tests/ -v`.
+    9. Anything that cannot be verified without a GUI or the real model, stated
+       explicitly. The commander will run the real batch on a real folder.
+   10. Open questions or compromises. Write "none" if there are none.
