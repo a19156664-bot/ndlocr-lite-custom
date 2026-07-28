@@ -81,7 +81,7 @@ def test_txt_output():
     
     txt_text = rows_to_txt_text(rows)
     
-    expected_txt = "第一章 序説｜この書は｜明治三十年に至り｜カンマ,入りテキスト\n"
+    expected_txt = "digidepo_0024.jpg\t第一章 序説｜この書は｜明治三十年に至り｜カンマ,入りテキスト\n"
     assert txt_text == expected_txt
 
 def test_zero_rects():
