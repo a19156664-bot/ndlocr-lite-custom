@@ -53,16 +53,30 @@ def run_ocr_and_parse(image_path: str) -> List[Dict[str, Any]]:
                 raise FileNotFoundError(f"OCR output JSON not found in {temp_dir}")
             json_path = os.path.join(temp_dir, json_files[0])
             
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        return parse_ocr_json(json_path, filename)
+
+
+def parse_ocr_json(json_path: str, source_name: str) -> List[Dict[str, Any]]:
+    """
+    Parse the upstream OCR JSON output into a normalized format.
+    
+    Args:
+        json_path: Path to the JSON output file.
+        source_name: Name of the source image to attach to the results.
+        
+    Returns:
+        List of dictionaries with normalized OCR results.
+    """
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
             
     results = []
     
     # The JSON structure has "contents" which is a list of lists of blocks
     contents = data.get("contents", [])
     
-    for page in contents:
-        for block in page:
+    for pg in contents:
+        for block in pg:
             if "boundingBox" not in block or "text" not in block:
                 continue
                 
@@ -104,7 +118,7 @@ def run_ocr_and_parse(image_path: str) -> List[Dict[str, Any]]:
                 "bbox": (x1, y1, x2, y2),
                 "confidence": confidence,
                 "is_vertical": is_vert,
-                "source_image": filename
+                "source_image": source_name
             })
             
     return results
