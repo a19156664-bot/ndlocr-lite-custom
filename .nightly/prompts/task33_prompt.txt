@@ -1,0 +1,295 @@
+Task 33: [NEW] Edit the OCR text right next to the rectangle, on the image
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+Dispatch note: this task starts from master AFTER Task 32 merged, so the right
+hand panel's TextField already has shift_enter=True and on_submit. Use the same
+pattern here.
+
+================================================================================
+1. WHAT THE USER ASKED FOR
+================================================================================
+"OCRの枠をselectした場合に、右枠に表示する前にselect枠付近にテキスト表示する
+ および編集を可能とする、エンターで右枠に移動。
+ 理由：selectボタンの付近に表示（編集可）させることで校正作業の効率化"
+
+Proof-reading today means: draw a rectangle on the image, then move your eyes
+and your mouse to the panel on the right to read and correct the text. The user
+wants to correct it where they are looking - next to the rectangle.
+
+The commander asked the user to settle two points. Their answers:
+
+    WHEN DOES IT OPEN?  On drawing a NEW rectangle, AND on clicking an EXISTING
+                        rectangle on the image. Both.
+    WHAT IF IT IS CLOSED WITHOUT Enter?
+                        The rectangle stays. Only the edit is discarded.
+
+================================================================================
+2. THE FLOW
+================================================================================
+    draw a rectangle          -> an editor appears next to it, holding the OCR
+                                 text for that region, focused
+    click an existing rectangle -> same, holding that region's current text
+                                 (the edited text if it has been edited)
+    Enter                     -> the text is saved and the editor closes; the
+                                 right hand panel shows it, with "(edited)" if
+                                 it differs from the OCR text
+    Shift+Enter               -> inserts a line break, does NOT close
+    Escape, or clicking away  -> the editor closes, the edit is DISCARDED, and
+                                 the rectangle and its OCR text remain
+
+================================================================================
+3. FOUR TRAPS THE COMMANDER FOUND IN THE CODE - HEED THEM
+================================================================================
+3.1 DO NOT put the editor in `rects_layer`.
+
+    `_update_selections_ui` begins with
+
+        self.rects_layer.controls.clear()
+        self.highlight_layer.controls.clear()
+        self.selections_list.controls.clear()
+
+    and it is called whenever OCR finishes, a page is switched, a region is
+    deleted, and more. An editor living in `rects_layer` would be destroyed
+    mid-typing, losing the user's text and the keyboard focus.
+
+    Add a SEPARATE layer, for example `self.inline_editor_layer = ft.Stack(...)`,
+    which `_update_selections_ui` NEVER clears.
+
+3.2 The new layer must sit ABOVE the gesture detector.
+
+    The stack is built as
+
+        ft.Stack(controls=[image_control, highlight_layer, rects_layer,
+                           gesture_detector])
+
+    `gesture_detector` is on top and swallows pointer events. A TextField
+    underneath it cannot be clicked or typed into. Put the editor layer AFTER
+    gesture_detector.
+
+    The stack is constructed in THREE places in custom_gui/app.py - around lines
+    209, 220 and 637. Update all three, or the editor will silently vanish after
+    a page switch. Find them with `grep -n "ft.Stack(controls=\[self.image_control"`.
+
+3.3 Escape is currently swallowed.
+
+    In `main()`:
+
+        def on_keyboard(e: ft.KeyboardEvent):
+            if viewer.editing_region_id is not None:
+                # Suppress global shortcuts while editing text
+                return
+
+    Escape must reach your handler while the inline editor is open, while
+    Ctrl+N and F2 stay suppressed - typing an "N" must never turn the page.
+    Extend that guard rather than removing it.
+
+3.4 Everything that mutates a layer must hold the lock.
+
+    Task 30c added `self.selections_lock` (an RLock) because flet dispatches
+    every non-async event handler on a thread pool WITHOUT serialising them, and
+    concurrent rebuilds corrupted the control tree. Opening and closing the
+    editor mutates `inline_editor_layer.controls`, so it must hold the same
+    lock. Do not add a second lock - use `self.selections_lock`.
+
+================================================================================
+4. DELIVERABLES
+================================================================================
+[A] The editor layer.
+
+    `self.inline_editor_layer`, a ft.Stack, above the gesture detector in all
+    three stack constructions, carrying the pan offset exactly as
+    `rects_layer` does - set its `.left` / `.top` to `self.offset_x` /
+    `self.offset_y` wherever `rects_layer`'s are set, so it pans with the image.
+    `_update_selections_ui` must not clear it.
+
+[B] Opening it.
+
+    New attribute `self.inline_editing_region_id`, None when closed.
+
+    B1. After `_on_pan_end` adds a new rectangle in SELECT mode, open the editor
+        for it. Note the existing zero-area guard - a rectangle that was not
+        added must not open an editor.
+    B2. Add `on_tap` to the gesture detector. On a tap, convert the tap point to
+        original image coordinates and find the topmost existing rectangle
+        containing it; if there is one, open the editor for it and make it the
+        active region. A tap on empty space closes any open editor (discarding
+        the edit) and does nothing else. A tap produces a zero-area bbox, which
+        the existing guard already discards - do not break that.
+
+    The editor holds the region's current text: the edited text if the region
+    has one in `self.edits`, otherwise the assembled OCR text - the same string
+    the right hand panel would show.
+
+    Position it NEXT TO the rectangle, not on top of it - the user is reading
+    the image underneath. Below the rectangle is the natural place; fall back to
+    above when there is no room below. Clamp it so it stays inside the visible
+    area. Reuse `calculate_label_position` from custom_gui/viewer.py if it
+    helps, but DO NOT MODIFY that function.
+
+    Set `autofocus=True` so the user can type immediately.
+
+[C] Committing.
+
+    `multiline=True, shift_enter=True, on_submit=...` - the same pattern Task 32
+    used in the right hand panel. On submit: store the text in `self.edits[rid]`,
+    clear `self.inline_editing_region_id`, remove the editor, and refresh the
+    panel so the region shows the new text with its "(edited)" suffix and a
+    Revert button.
+
+    Route this through the SAME code path the right hand panel uses to commit,
+    so the two can never drift apart.
+
+[D] Cancelling keeps the rectangle.
+
+    Escape, or `on_blur`, closes the editor and discards what was typed.
+    `self.edits` must be left exactly as it was - if the region had no edit it
+    still has none; if it had an earlier edit that earlier edit survives. The
+    rectangle, its OCR text, its highlights and its entry in the right hand
+    panel all remain.
+
+[E] Do not break the right hand panel.
+
+    F2 still opens the panel editor, its save button and Enter still work, and
+    Revert still works. The two editors must not be open for the same region at
+    once - opening one closes the other.
+
+================================================================================
+5. DEFINITION OF DONE
+================================================================================
+[1] Drawing a rectangle opens an editor next to it, pre-filled and focused.
+[2] Tapping an existing rectangle opens the editor for that region.
+[3] Enter saves and closes; the right hand panel shows the result with
+    "(edited)".
+[4] Shift+Enter inserts a line break and does not close.
+[5] Escape and clicking away close without saving, and the rectangle survives.
+[6] The editor survives an unrelated `_update_selections_ui` - it is not
+    destroyed when OCR finishes while the user is typing.
+[7] The editor pans with the image and disappears on a page switch.
+[8] `python -m pytest tests/ -v` passes completely (144+ tests).
+
+================================================================================
+6. TESTS - tests/test_inline_edit.py (NEW FILE)
+================================================================================
+No GUI window, no real OCR. Monkeypatch `custom_gui.app.run_ocr_and_parse`.
+Build a real image with Pillow under tmp_path. Drive the REAL handlers -
+`_on_pan_start` / `_on_pan_update` / `_on_pan_end`, the gesture detector's
+`on_tap`, and the TextField's own `on_submit` / `on_blur`. Do NOT rebuild any of
+this in the test; a test that constructs its own widgets proves nothing about
+the application. This project has shipped SIX tests that could not detect the
+bug they were written for.
+
+    (a) Drawing a rectangle creates an editor in `inline_editor_layer` whose
+        value is the region's OCR text, and `inline_editing_region_id` is that
+        region. Assert the control is really in that layer.
+    (b) A zero-area drag creates NO rectangle and NO editor.
+    (c) Tapping inside an existing rectangle opens the editor for it with the
+        right text; tapping empty space closes it.
+    (d) on_submit stores the text in `self.edits[rid]`, closes the editor, and
+        the right hand panel entry for that region shows the new text.
+    (e) THE TRAP TEST for 3.1: open the editor, type a value, then call
+        `_update_selections_ui()` - as an OCR completion would - and assert the
+        editor is STILL PRESENT and still holds the typed value. This must FAIL
+        if the editor is placed in `rects_layer`; say so in your report and show
+        that failure.
+    (f) Escape and on_blur both close the editor, leave `self.edits` unchanged,
+        and leave the rectangle in `selection_container`.
+    (g) An edit that already existed survives a cancel.
+    (h) THE ORDER TEST for 3.2: assert `inline_editor_layer` comes AFTER
+        `gesture_detector` in `self.stack.controls`, in every stack the code
+        builds - including after a page switch via `_switch_image`.
+    (i) The editor layer's `.left` / `.top` follow the pan offset, like
+        `rects_layer`.
+    (j) The Task 30c guarantee still holds: concurrent `_on_pan_update` from
+        several threads raises nothing. Join threads with a timeout and
+        re-raise anything they caught.
+    (k) The right hand panel path is untouched: F2 still opens it, its
+        on_submit still commits, Revert still restores the OCR text.
+
+For (a), (e) and (h), state what you changed in the code to prove each test
+FAILS, and paste that failing output.
+
+================================================================================
+7. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE: custom_gui/app.py and tests/test_inline_edit.py. Nothing
+      else.
+    - Do NOT modify custom_gui/viewer.py. original_to_display,
+      display_to_original, calculate_fit_scale, apply_pan,
+      calculate_label_position and class InteractionMode MUST NOT change.
+    - Do NOT modify custom_gui/ocr_cache.py, batch_ocr.py, pdf_loader.py,
+      ocr_scheduler.py, ocr_bridge.py, image_sequence.py, region_filter.py,
+      selection.py, text_assembler.py, exporter.py, rtl.py.
+    - Do NOT modify ANY existing file under tests/.
+      tests/test_flet_constants.py is a guard test: if it objects to your code,
+      CHANGE YOUR CODE. NEVER add an exemption. A local variable named `page`
+      WILL collide with it.
+    - Do NOT undo Tasks 30c, 30d or 32: the RLock, the layers carrying the pan
+      offset, the offset subtraction in `_on_pan_start` / `_on_pan_update`, the
+      batch worker not calling `_switch_image`, the progress bar, the
+      "Pre-OCR All" button, and Enter-to-commit in the right hand panel must all
+      stay exactly as they are.
+    - Do not make event handlers async. flet dispatches every non-async handler
+      on a thread pool without serialising them; changing that model is out of
+      scope and dangerous.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - NEVER use `self.image` or `self.scale` as attribute names. Both are
+      reserved by flet and previously caused a fatal startup crash here.
+    - Everything listed here is verified working and must stay working:
+      rectangle selection, Select/Pan, panning, yellow highlights, the
+      "Region N" label outside the rectangle, the lazy OCR scheduler,
+      cache-first reading, Pre-OCR All with its progress bar and cancel,
+      CSV/TXT export for the current image and for all images (TXT is one flat
+      line joined with U+FF5C), folder loading, PDF loading, Prev/Next/Ctrl+N,
+      F2 correction with revert, the right-to-left button, the error display for
+      a missing image WITHOUT crashing, and zoom_scale staying 0.2605 for a
+      2218x3071 image in a 1600x900 window however many pages are turned.
+    - Do not run real OCR in your tests.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. FOUR previous tasks left probe files at
+      the repository root and the commander had to delete them by hand.
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - Resizing or moving an existing rectangle.
+    - Deleting a rectangle from the image (the panel's delete button stays the
+      way to do it).
+    - Any change to the export formats.
+    - PDF batching or caching.
+    - New keyboard shortcuts beyond Enter, Shift+Enter and Escape.
+    - Making the editor draggable, resizable or dockable.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [A] and [B1] first (new rectangle opens
+      an editor), then [C], then [D], then [B2] (tap an existing rectangle).
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[8] to how you satisfied it.
+    2. The three places you added the editor layer to the stack, and proof that
+       it is above the gesture detector in each.
+    3. The failing output for tests (a), (e) and (h) against defective code, and
+       the passing output afterwards.
+    4. How you positioned the editor relative to the rectangle, and what happens
+       when there is no room below.
+    5. How the inline editor and the right hand panel share the commit path.
+    6. Exactly how Escape reaches your handler while Ctrl+N and F2 stay
+       suppressed.
+    7. The list of changed and added files with the reason for each.
+    8. The output of `git status` showing no stray files.
+    9. The full output of `python -m pytest tests/ -v`.
+   10. State explicitly that real key presses and real mouse taps cannot be
+       verified without a GUI - the commander will confirm on the real
+       application.
+   11. Open questions or compromises. Write "none" if there are none.
