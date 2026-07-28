@@ -88,11 +88,6 @@ def rows_to_txt_text(rows: list) -> str:
     if not any(image_segments.values()):
         return ""
 
-    if len(images_order) == 1:
-        image_name = images_order[0]
-        segments = image_segments[image_name]
-        return SEP.join(segments) + "\n"
-        
     lines = []
     for image_name in images_order:
         segments = image_segments[image_name]
