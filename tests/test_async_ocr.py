@@ -3,8 +3,9 @@ import pytest
 from custom_gui.app import OcrState, get_ocr_status_text, SelectableImageViewer
 
 def test_ocr_status_text_generation():
-    assert get_ocr_status_text(OcrState.IDLE) == "OCR pending..."
-    assert get_ocr_status_text(OcrState.RUNNING) == "OCR processing..."
+    assert get_ocr_status_text(OcrState.IDLE) == "OCR not started"
+    assert get_ocr_status_text(OcrState.WAITING) == "OCR waiting"
+    assert get_ocr_status_text(OcrState.RUNNING) == "OCR running"
     assert get_ocr_status_text(OcrState.ERROR) == "OCR failed"
     assert get_ocr_status_text(OcrState.DONE, 26) == "Lines: 26"
 

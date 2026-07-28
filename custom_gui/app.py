@@ -12,17 +12,22 @@ import tempfile
 from custom_gui.pdf_loader import build_source_list, ensure_page_rendered, plan_pdf_pages
 from enum import Enum, auto
 
+from custom_gui.ocr_scheduler import OcrScheduler
+
 class OcrState(Enum):
     IDLE = auto()
+    WAITING = auto()
     RUNNING = auto()
     DONE = auto()
     ERROR = auto()
 
 def get_ocr_status_text(state: OcrState, line_count: int = 0) -> str:
     if state == OcrState.IDLE:
-        return "OCR pending..."
+        return "OCR not started"
+    elif state == OcrState.WAITING:
+        return "OCR waiting"
     elif state == OcrState.RUNNING:
-        return "OCR processing..."
+        return "OCR running"
     elif state == OcrState.ERROR:
         return "OCR failed"
     elif state == OcrState.DONE:
@@ -31,7 +36,13 @@ def get_ocr_status_text(state: OcrState, line_count: int = 0) -> str:
 
 class SelectableImageViewer(ImageViewer):
     def __init__(self, image_src: str, img_w: float, img_h: float, win_w: float, win_h: float, **kwargs):
-        super().__init__(image_src, img_w, img_h, win_w, win_h, **kwargs)
+        self.frame_w = win_w
+        self.frame_h = win_h
+        available_w = max(100, win_w - 320)
+        available_h = max(100, win_h - 100)
+        super().__init__(image_src, img_w, img_h, available_w, available_h, **kwargs)
+        
+        self.ocr_scheduler = OcrScheduler()
         
         # New state variables for per-image state
         self.image_states = {}
@@ -220,11 +231,29 @@ class SelectableImageViewer(ImageViewer):
                 self.page.overlay.append(self.file_picker)
                 self.page.update()
 
-    def start_ocr(self, page: ft.Page):
-        target_path = self.image_src
-        state = self.image_states[target_path]
+    def start_ocr(self, page: ft.Page, target_path: str = None):
+        if target_path is None:
+            target_path = self.image_src
         
-        if state["ocr_state"] in (OcrState.ERROR, OcrState.RUNNING, OcrState.DONE):
+        state = self.image_states.get(target_path)
+        if not state:
+            return
+            
+        if state["ocr_state"] in (OcrState.ERROR, OcrState.DONE):
+            return
+            
+        start_now = self.ocr_scheduler.request_ocr(target_path)
+        
+        if not start_now:
+            if state["ocr_state"] != OcrState.RUNNING:
+                state["ocr_state"] = OcrState.WAITING
+                if self.image_src == target_path:
+                    self.ocr_state = OcrState.WAITING
+                    self.progress_ring.visible = True
+                    if hasattr(self, 'status_text'):
+                        self.status_text.value = self._get_status_message()
+                    if self.page:
+                        self.status_row.update()
             return
             
         state["ocr_state"] = OcrState.RUNNING
@@ -248,7 +277,10 @@ class SelectableImageViewer(ImageViewer):
     def _on_ocr_complete(self, results, error, target_path=None):
         if target_path is None:
             target_path = self.image_src
-        state = self.image_states[target_path]
+        state = self.image_states.get(target_path)
+        if not state:
+            return
+            
         if error:
             state["ocr_state"] = OcrState.ERROR
             state["ocr_error"] = error
@@ -267,6 +299,26 @@ class SelectableImageViewer(ImageViewer):
             if self.page:
                 self.status_row.update()
             self._update_selections_ui()
+            
+        current_page = self.image_src
+        current_state = self.image_states.get(current_page)
+        needs_ocr = current_state is not None and current_state["ocr_state"] in (OcrState.IDLE, OcrState.WAITING)
+        
+        next_page = self.ocr_scheduler.on_ocr_complete(target_path, current_page, needs_ocr)
+        
+        # When scheduler says current_page should start, it just returns it and sets it as running.
+        # But we need to call start_ocr so that the actual processing begins. 
+        # But wait! If on_ocr_complete sets running_page to current_page, then start_ocr -> request_ocr 
+        # will return False because it's ALREADY running in the scheduler. 
+        # We need to temporarily unset it from scheduler or just bypass request_ocr, OR better:
+        # let request_ocr handle all logic. We shouldn't set running_page inside on_ocr_complete if we 
+        # rely on start_ocr to call request_ocr. 
+        
+        if next_page and self.page:
+            # Check again if it wasn't already processed
+            next_state = self.image_states.get(next_page)
+            if next_state and next_state["ocr_state"] in (OcrState.IDLE, OcrState.WAITING):
+                self.start_ocr(self.page, next_page)
 
 
     def _on_mode_change(self, e):
@@ -352,7 +404,10 @@ class SelectableImageViewer(ImageViewer):
         self.image_control.height = self.img_h
         
         from custom_gui.viewer import calculate_fit_scale
-        self.zoom_scale = calculate_fit_scale(self.img_w, self.img_h, self.win_w, self.win_h)
+        available_w = max(100, self.frame_w - 320)
+        available_h = max(100, self.frame_h - 100)
+        self.zoom_scale = calculate_fit_scale(self.img_w, self.img_h, available_w, available_h)
+        
         self.offset_x = 0.0
         self.offset_y = 0.0
         
@@ -371,15 +426,15 @@ class SelectableImageViewer(ImageViewer):
             self.btn_next.update()
             self.image_container.update()
             
-        self.update_layout(self.win_w, self.win_h)
+        self.update_layout(self.frame_w, self.frame_h)
         self._update_viewer()
         self._update_selections_ui()
         
-        self.progress_ring.visible = (self.ocr_state == OcrState.RUNNING)
+        self.progress_ring.visible = (self.ocr_state in (OcrState.RUNNING, OcrState.WAITING))
         if self.page:
             self.status_row.update()
         
-        if self.ocr_state == OcrState.IDLE and self.page:
+        if self.ocr_state in (OcrState.IDLE, OcrState.WAITING) and self.page:
             self.start_ocr(self.page)
 
     def _collect_all_export_pages(self):
@@ -446,7 +501,7 @@ class SelectableImageViewer(ImageViewer):
             )
 
     def _on_file_picker_result(self, e: ft.FilePickerResultEvent):
-        if not e.path:
+        if not e.path and not e.files:
             return
             
         if self._file_picker_mode == "folder":
@@ -542,6 +597,8 @@ class SelectableImageViewer(ImageViewer):
                 f"{ocr_status} | Last: {self.latest_region_info}")
 
     def update_layout(self, win_w: float, win_h: float):
+        self.frame_w = win_w
+        self.frame_h = win_h
         available_w = max(100, win_w - 320)
         available_h = max(100, win_h - 100)
         super().update_layout(available_w, available_h)
