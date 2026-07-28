@@ -1,0 +1,288 @@
+Task 30c: [CRITICAL FIX] Panning corrupts the control tree - concurrent event handlers
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+This is a crash that makes the application unusable. It takes priority over
+everything else. Task 30b was cancelled; do not look for it.
+
+The commander diagnosed this from a full traceback off the user's machine plus
+the flet source. Do not re-investigate. Fix what is described.
+
+================================================================================
+1. THE CRASH
+================================================================================
+The user pans the image (Mode: PAN, dragging) and gets:
+
+    File "custom_gui/app.py", line 813, in _on_pan_update
+        self._update_viewer()
+    File "custom_gui/app.py", line 1028, in _update_viewer
+        self._update_selections_ui()
+    File "custom_gui/app.py", line 1009, in _update_selections_ui
+        _safe_update(self.rects_layer)
+    File ".../flet/core/control.py", line 493, in build_update_commands
+        assert self.__uid is not None
+    AssertionError
+
+After that first failure everything is broken - panning, region selection and
+page turns all raise, because the Python control tree and the flet client are
+now out of sync. Restarting the application recovers it.
+
+================================================================================
+2. ROOT CAUSE - CONFIRMED, NOT A GUESS
+================================================================================
+2.1 flet runs every non-async event handler on a THREAD POOL, unserialised.
+
+    .venv/Lib/site-packages/flet/core/page.py, on_event_async:
+
+        if asyncio.iscoroutinefunction(handler):
+            await handler(ce)
+        else:
+            self.run_thread(handler, ce)      # <- ThreadPoolExecutor, no lock
+
+    During a drag, on_pan_update fires dozens of times a second. Each firing is
+    a SEPARATE thread pool task, and they overlap.
+
+2.2 `_update_selections_ui` is not atomic.
+
+    It clears three control lists and rebuilds them, then updates them:
+
+        self.rects_layer.controls.clear()
+        self.highlight_layer.controls.clear()
+        self.selections_list.controls.clear()
+        ... append many new controls ...
+        _safe_update(self.highlight_layer)
+        _safe_update(self.rects_layer)
+        self.selections_list.update()
+
+    Two overlapping pan events therefore clear and rebuild the SAME lists while
+    both are inside page.update(). flet assigns control uids only after its
+    send_commands round trip, so an interleaving leaves a control in the tree
+    with __uid still None, and the next update asserts.
+
+    page.update() holds a lock, but that lock only serialises update against
+    update. It does not stop another thread mutating the tree mid-update.
+
+2.3 Why it only appeared now.
+
+    The race has existed since Task 04/05 (`git log -S "self._update_selections_ui()"`
+    confirms). It was harmless because the rebuild was tiny:
+
+        for line in filtered_lines:            # <- OCR lines inside the region
+            highlight = ft.Container(...)
+            self.highlight_layer.controls.append(highlight)
+
+    Before pre-OCR, a freshly opened page had no results yet, so filtered_lines
+    was empty and the critical section was a few microseconds. After Task 30's
+    cache, EVERY page has its full OCR result the instant it is shown - 26 to
+    144 lines in the user's material - so every single pan event now rebuilds
+    dozens of controls. The window went from negligible to easy to hit.
+
+    Task 30 is the trigger, not the cause. Do not "fix" the cache.
+
+================================================================================
+3. DELIVERABLES
+================================================================================
+[A] Stop rebuilding everything on every pan event. THIS IS THE MAIN FIX.
+
+    In `_on_pan_update`, the PAN branch currently ends with
+
+        self._update_viewer()
+        self._update_selections_ui()
+
+    Panning only changes self.offset_x / self.offset_y. The rectangles and the
+    yellow highlights do not change shape - they only need to move by the same
+    amount as the image.
+
+    Preferred solution: move the layers instead of rebuilding their contents.
+    `self.image_control` is already panned with `.left` / `.top`. Do the same
+    for `self.highlight_layer` and `self.rects_layer` as whole controls, so a
+    pan becomes a handful of attribute writes and one update, with NO control
+    creation and NO list mutation.
+
+    That means the children of those layers must be positioned WITHOUT the pan
+    offset baked in, and the layer itself carries the offset. Keep using
+    `original_to_display` from custom_gui/viewer.py - it takes offset_x and
+    offset_y, so pass 0.0 for them when positioning children and put the offset
+    on the layer. Do NOT modify custom_gui/viewer.py.
+
+    If you cannot make that work correctly, the fallback is to keep rebuilding
+    but do it at most once every 100 ms during a drag, with a final rebuild in
+    `_on_pan_end`. Say clearly which one you implemented and why.
+
+    Either way, `_on_pan_update` in PAN mode must no longer call
+    `_update_selections_ui` on every event.
+
+[B] Make `_update_selections_ui` atomic.
+
+    Even with [A], other threads still call it: `_on_pan_end`, `_switch_image`,
+    `delete_rect`, `_on_ocr_complete` and the batch worker. Any two of those can
+    overlap because they are all dispatched on the thread pool.
+
+    Guard the whole body - the clears, the rebuild AND the update calls - with a
+    `threading.RLock` held on the viewer. RLock, not Lock: `delete_rect` calls
+    `_update_selections_ui` from inside a handler that may already hold it.
+
+    Create the lock in `__init__`. Never hold it while doing file I/O or OCR.
+
+[C] The batch worker must not rebuild the control tree from its own thread.
+
+    `_run_batch_worker` ends with
+
+        self._switch_image(self.image_src)
+
+    which swaps `image_container.content` and rebuilds every layer, from the
+    worker thread, while the user may be dragging. The commander reproduced a
+    crash from this independently: with that call blocked, 3 cycles and 47
+    interleaved drag/page-turn operations ran clean; with it, the run died on
+    operation 6.
+
+    Replace it with a minimal refresh that adopts the cached result for the
+    CURRENT page and refreshes the status and the layers under the lock from
+    [B], WITHOUT swapping `image_container.content`, WITHOUT reloading the
+    image, and WITHOUT touching zoom_scale, offset_x or offset_y. If the current
+    page is in `self.pdf_page_map`, there is nothing to adopt.
+
+    The progress callback may keep updating `status_text` and `status_row` - a
+    text value and one update is not a tree mutation - but it must not touch the
+    layers.
+
+[D] Do not regress the pan feel.
+
+    Panning must still move the image, the rectangles and the highlights
+    together, one to one with the mouse. Zoom must still work after panning, and
+    `apply_pan` semantics must not change.
+
+================================================================================
+4. DEFINITION OF DONE
+================================================================================
+[1] Dragging in PAN mode no longer creates or destroys controls per event.
+[2] `_update_selections_ui` is serialised by an RLock covering mutation AND
+    update.
+[3] The batch worker no longer calls `_switch_image`, and no longer swaps
+    container content from its thread.
+[4] Rectangles and highlights stay aligned with the image while panning, at any
+    zoom, and after switching pages.
+[5] zoom_scale stays 0.2605 for a 2218x3071 image in a 1600x900 window, however
+    many pages are turned - the existing stability guarantee.
+[6] `python -m pytest tests/ -v` passes completely (121+ tests).
+
+================================================================================
+5. TESTS - tests/test_concurrency.py (NEW FILE)
+================================================================================
+No GUI window, no real OCR. Monkeypatch `custom_gui.app.run_ocr_and_parse`.
+Build real images with Pillow under tmp_path.
+
+    (a) THE REGRESSION TEST. Give the viewer a page with MANY OCR results - at
+        least 120 lines, like the user's material - and at least one selection
+        rectangle covering them, so `_update_selections_ui` has real work to do.
+        Then call `_on_pan_update` (PAN mode) from SEVERAL THREADS at once,
+        hundreds of times, and assert that no exception escapes and that the
+        three layers end up internally consistent.
+
+        This test MUST FAIL against the current code. Run it before your fix and
+        paste the failure. If it passes before your fix it does not reproduce
+        the bug and is worthless - make it harder until it fails.
+
+    (b) Call `_update_selections_ui` concurrently from several threads and
+        assert no exception and that `len(highlight_layer.controls)` equals what
+        a single quiet call produces - no duplicates, no leftovers from a
+        half-finished rebuild.
+
+    (c) [A] Count control creation: with a spy on the layers, assert that N pan
+        events in PAN mode do NOT create N x (number of lines) controls. State
+        the numbers you assert.
+
+    (d) [C] Assert `_run_batch_worker` never calls `_switch_image`. Patch
+        `_switch_image` with a spy and assert its call count is 0 for a batch
+        run, while the current page's cached results ARE adopted.
+
+    (e) [D] With a known zoom and offset, pan by a known delta and assert the
+        displayed position of a highlight moved by exactly that delta - so the
+        layers really do stay aligned.
+
+    (f) [C] zoom_scale, offset_x and offset_y are unchanged after a batch.
+
+Threads in tests must be joined with a timeout and any exception they raised
+must be re-raised in the test body, otherwise a failing thread silently passes.
+This project has shipped six tests that could not detect the bug they were
+written for. Do not add a seventh.
+
+================================================================================
+6. REGRESSION SAFETY
+================================================================================
+    - Do NOT modify custom_gui/viewer.py. In particular original_to_display,
+      display_to_original, calculate_fit_scale, apply_pan,
+      calculate_label_position and class InteractionMode MUST NOT change.
+    - Do NOT modify custom_gui/ocr_cache.py, batch_ocr.py, pdf_loader.py,
+      ocr_scheduler.py, ocr_bridge.py, image_sequence.py, region_filter.py,
+      selection.py, text_assembler.py, exporter.py, rtl.py.
+    - Do NOT modify ANY existing file under tests/. tests/test_flet_constants.py
+      is a guard test: if it objects to your code, CHANGE YOUR CODE. NEVER add
+      an exemption. A local variable named `page` WILL collide with it.
+    - No new dependencies. flet stays pinned at 0.27.6. Do not try to make the
+      handlers async to dodge the thread pool - that changes the execution model
+      of every handler in the application and is out of scope.
+    - NEVER use `self.image` or `self.scale` as attribute names. Both are
+      reserved by flet and previously caused a fatal startup crash here.
+    - All verified working and must stay working: rectangle selection,
+      Select/Pan, panning, yellow highlights, the "Region N" label outside the
+      rectangle, the lazy OCR scheduler, cache-first reading, the Pre-OCR
+      button, CSV/TXT export for the current image and for all images, folder
+      loading, PDF loading by button and by folder including the lazily rendered
+      first page, Prev/Next/Ctrl+N, F2 correction with revert, the
+      right-to-left button, and the error display for a missing image WITHOUT
+      crashing.
+    - Do not run real OCR in your tests.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Note that running the suite currently
+      creates resource/.ndlocr_cache/ - that is a known separate issue, do not
+      fix it here, but do not commit it either.
+
+================================================================================
+7. ALLOWED SCOPE (WHITELIST)
+================================================================================
+    custom_gui/app.py
+    tests/test_concurrency.py        (new file)
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - The progress bar, the button label, the N/52 denominator and the remaining
+      time estimate. Those were Task 30b and will be re-issued later.
+    - PDF batching or PDF caching.
+    - Persisting rectangles or F2 edits.
+    - Rewriting the OCR scheduler or the cache.
+    - Making event handlers async.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [B] the lock first (it makes the crash
+      rare immediately), then [A], then [C], then [D].
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[6] to how you satisfied it.
+    2. Which option you took for [A] - moving the layers, or throttling - and
+       why.
+    3. The output of test (a) BEFORE your fix, showing it failing, and after,
+       showing it passing. Both in full. If it took several attempts to make it
+       fail reliably, say what you had to do.
+    4. Every call site of `_update_selections_ui`, and confirmation that each
+       one is covered by the lock without deadlocking.
+    5. What the batch worker does now instead of `_switch_image`.
+    6. The numbers asserted in test (c).
+    7. The list of changed and added files with the reason for each.
+    8. The output of `git status` showing no stray files.
+    9. The full output of `python -m pytest tests/ -v`.
+   10. Anything that cannot be verified without a GUI, stated explicitly. The
+       commander will drive the real widget tree with concurrent drags.
+   11. Open questions or compromises. Write "none" if there are none.
