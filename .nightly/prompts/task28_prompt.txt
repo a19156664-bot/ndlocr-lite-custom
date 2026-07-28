@@ -1,0 +1,264 @@
+Task 28: [FIX] The first PDF page crashes, and so does any missing image
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+The commander reproduced and diagnosed both problems. Do not re-investigate.
+They are the SAME underlying defect, reached by two different routes.
+
+================================================================================
+1. WHAT HAPPENS
+================================================================================
+1.1 ROUTE A - EVERY PDF, ON ITS FIRST PAGE
+
+Opening a folder that contains a PDF, or using the "Open PDF" button, crashes
+immediately:
+
+    _switch_image(doc_p0001.png)
+       PNG exists at this point : False
+       ocr_error : 'Error: Image not found at ...\\ndlocr_pdf_xxxx\\doc_p0001.png'
+       container.content type   : Text
+       image_control.page       : False
+       AssertionError: Image Control must be added to the page first
+
+PDF pages are rendered LAZILY: `plan_pdf_pages` only computes the PNG paths, and
+`ensure_page_rendered` writes the file just before it is shown. That is correct
+and must stay.
+
+The bug is the ORDER inside `_switch_image`:
+
+        if path not in self.image_states:
+            self.image_states[path] = {
+                ...
+                "ocr_state": OcrState.IDLE if os.path.exists(path) else OcrState.ERROR,
+                "ocr_error": None if os.path.exists(path) else f"Error: Image not found at {path}"
+            }
+        state = self.image_states[path]
+        ...
+        self.ocr_error = state["ocr_error"]          # already an error
+        ...
+        if path in self.pdf_page_map:
+            ensure_page_rendered(path, pdf_path, page_index)   # NOW the file exists
+
+The existence check runs BEFORE the page is rendered, so a perfectly good PDF
+page is recorded as "image not found". Rendering then succeeds, but `ocr_error`
+is never cleared.
+
+1.2 ROUTE B - ANY MISSING IMAGE, NOTHING TO DO WITH PDFs
+
+        _switch_image(<a path that does not exist>)
+        AssertionError: Image Control must be added to the page first
+
+So even the legitimate "this file is gone" case crashes instead of showing the
+error. This is the deeper defect and it must be fixed too.
+
+1.3 WHY IT CRASHES
+
+When `self.ocr_error` is truthy, `_switch_image` does
+
+        self.image_container.content = ft.Text(self.ocr_error, ...)
+
+which REMOVES `self.stack` - and therefore `self.image_control` - from the
+control tree. `image_control.page` becomes None. Immediately afterwards
+`_switch_image` calls `self.update_layout(...)`, which reaches
+`ImageViewer._update_viewer` in custom_gui/viewer.py:
+
+        if self.page:                     # the VIEWER has a page, so this passes
+            self.image_control.update()   # but image_control does NOT -> assert
+
+Guarding on the parent's `page` does not prove the CHILD is attached.
+
+1.4 THIS IS NOT NEW
+
+The commander confirmed the same crash on master before Task 27, so it came in
+with Task 26. It was missed at acceptance because the verification script had
+already called `ensure_page_rendered` for that page, so the PNG existed and the
+error branch was never taken. Assume nothing about existing behaviour being
+"verified"; make the tests below prove it.
+
+================================================================================
+2. DEFINITION OF DONE
+================================================================================
+[A] Render before deciding whether the file exists.
+    In `_switch_image`, a PDF-backed path must be rendered via
+    `ensure_page_rendered` BEFORE any `os.path.exists(path)` test and BEFORE the
+    entry in `self.image_states` is created. After a successful render the page
+    must be treated as a perfectly normal existing image: `ocr_state` IDLE,
+    `ocr_error` None, OCR started lazily as usual.
+
+[B] A genuine render failure is still an error.
+    If `ensure_page_rendered` raises, record the reason in `ocr_error`, show it,
+    and keep the application usable. Do not crash.
+
+[C] The error display must never crash. THIS IS THE PRIMARY DELIVERABLE.
+    Whatever path sets `ocr_error` - a missing file, a corrupt image, a failed
+    render - showing that error must not raise. Choose ONE of:
+      (i)  make the update guards check the control that is about to be updated
+           rather than the viewer, for example `if self.image_control.page:`
+           inside `ImageViewer._update_viewer` in custom_gui/viewer.py. Only
+           that guard may change in that file - the pure functions
+           original_to_display / display_to_original / calculate_fit_scale /
+           apply_pan / calculate_label_position and class InteractionMode MUST
+           NOT change; or
+      (ii) stop detaching the stack: keep `self.stack` as the container content
+           and surface the error somewhere that does not remove the image
+           control from the tree.
+    State which you chose and why.
+
+[D] Recovering from an error must work.
+    After landing on a broken image and seeing the error, moving to a GOOD image
+    must display it normally - the image control must be back on screen, zoom
+    reset to fit, rectangles and highlights working. Going back to the broken one
+    must show the error again, still without crashing. Repeat that cycle at least
+    twice in your test.
+
+[E] Tests - `tests/test_broken_image.py` (new file), no GUI window, no real OCR.
+    Monkeypatch `custom_gui.app.run_ocr_and_parse`. Build real images with
+    Pillow and a real PDF with reportlab under pytest's `tmp_path`.
+      (a) Constructing the viewer on a good image, then `_switch_image` to a path
+          that does NOT exist, does not raise, and `viewer.ocr_error` is set.
+      (b) Then `_switch_image` back to the good image does not raise and
+          `viewer.ocr_error` is None again.
+      (c) Repeat (a) and (b) once more in the same test - the cycle must be
+          stable.
+      (d) THE PDF COLD-START TEST: create a 2 page PDF, call
+          `build_source_list`, put the registry into `viewer.pdf_page_map`, and
+          `_switch_image` to the FIRST page WITHOUT having rendered it before.
+          It must not raise; `viewer.ocr_error` must be None; the PNG must now
+          exist on disk; and `viewer.img_w` / `viewer.img_h` must equal the real
+          rendered size, not the 800x600 fallback. Assert the exact numbers for
+          an A4 page at 300 DPI.
+      (e) Navigating to the SECOND PDF page also works.
+      (f) A render failure is reported, not raised: point the registry at a file
+          that is not a real PDF and assert `viewer.ocr_error` is set and no
+          exception escapes.
+
+    Every one of (a), (c), (d) MUST FAIL against the current code. In your report
+    show the test output BEFORE your fix (failing) and AFTER (passing), in full.
+    A test that cannot detect the bug it was written for is worthless; this
+    project has shipped three such tests already.
+
+[F] While you are in there - remove the leftover commentary.
+    `_on_ocr_complete` in custom_gui/app.py contains a block of stream-of-
+    consciousness notes ("But wait! If on_ocr_complete sets running_page ...").
+    Delete it. If a comment is genuinely needed, write one short factual line.
+    Do not change the behaviour.
+
+================================================================================
+3. CURRENT CODE CONTRACT (on master - use it)
+================================================================================
+custom_gui/app.py, class SelectableImageViewer(ImageViewer):
+    self.frame_w / self.frame_h    true window size
+    self.win_w / self.win_h        content area (frame minus 320 / minus 100)
+    self.image_control / self.image_container / self.stack
+    self.image_states              path -> selections / ocr_state / ocr_results /
+                                   ocr_error / edits
+    self.pdf_page_map              png_path -> (pdf_path, page_index)
+    self.pdf_cache_dir             tempfile.mkdtemp(prefix="ndlocr_pdf_")
+    self.ocr_scheduler             OcrScheduler
+    _switch_image(path) / update_layout(win_w, win_h) / start_ocr(page, target_path=None)
+    _on_ocr_complete(results, error, target_path=None)
+    class OcrState(Enum): IDLE / WAITING / RUNNING / DONE / ERROR
+
+custom_gui/pdf_loader.py  (DO NOT MODIFY):
+    RENDER_DPI = 300
+    plan_pdf_pages(pdf_path, cache_dir) -> [(png_path, pdf_path, page_index), ...]
+        # renders NOTHING; the PNG does not exist yet
+    ensure_page_rendered(png_path, pdf_path, page_index) -> png_path
+        # renders only if png_path is missing
+    build_source_list(folder, cache_dir) -> (paths, registry)
+
+custom_gui/viewer.py - class ImageViewer._update_viewer:
+        self.image_control.width = self.img_w * self.zoom_scale
+        ...
+        if self.page:
+            self.image_control.update()
+            self.image_container.update()
+
+NEVER use `self.image` or `self.scale` as attribute names. Both are reserved by
+flet and previously caused a fatal startup crash in this project.
+
+================================================================================
+4. REGRESSION SAFETY
+================================================================================
+    - `python -m pytest tests/ -v` must pass completely (98+ tests).
+    - Do NOT modify custom_gui/pdf_loader.py, custom_gui/image_sequence.py,
+      custom_gui/ocr_bridge.py, custom_gui/region_filter.py,
+      custom_gui/selection.py, custom_gui/text_assembler.py,
+      custom_gui/exporter.py, custom_gui/rtl.py, custom_gui/ocr_scheduler.py.
+    - custom_gui/viewer.py may ONLY receive the guard change described in [C](i),
+      and only if you choose that option.
+    - Do NOT modify ANY existing file under tests/. tests/test_flet_constants.py
+      is a guard test: if it objects to your code, CHANGE YOUR CODE. NEVER add an
+      exemption. A local variable named `page` WILL collide with it.
+    - These are all verified working and must stay working: rectangle selection,
+      Select/Pan, panning, yellow highlights, the "Region N" label outside the
+      rectangle, the OCR progress ring and the one-at-a-time OCR scheduler,
+      CSV/TXT export for the current image and for all images, folder loading,
+      Prev/Next/Ctrl+N, F2 / EDIT correction with revert, the right-to-left
+      button, and the stable zoom across page changes (zoom_scale must remain
+      0.2605 for a 2218x3071 image in a 1600x900 window, however many pages you
+      turn).
+    - Do not run real OCR in your tests.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Three previous tasks left probe files at
+      the repository root and the commander had to delete them.
+
+================================================================================
+5. ALLOWED SCOPE (WHITELIST)
+================================================================================
+    custom_gui/app.py
+    custom_gui/viewer.py             (ONLY the guard in [C](i), if chosen)
+    tests/test_broken_image.py       (new file)
+
+================================================================================
+6. PROHIBITED SCOPE (BLACKLIST)
+================================================================================
+    custom_gui/pdf_loader.py, custom_gui/ocr_scheduler.py,
+    custom_gui/image_sequence.py, custom_gui/ocr_bridge.py,
+    custom_gui/region_filter.py, custom_gui/selection.py,
+    custom_gui/text_assembler.py, custom_gui/exporter.py, custom_gui/rtl.py
+                                                              (DO NOT MODIFY)
+    all existing files under tests/                           (DO NOT MODIFY)
+    src/**, ndlocr-lite-gui/**, train/**, resource/**
+    LICENCE, LICENCE_DEPENDENCEIES, README.md
+    pyproject.toml, requirements.txt
+    .github/**, .nightly/**, .agents/**, scripts/**
+    AGENTS.md, CLAUDE.md, task_template.md
+
+================================================================================
+7. OUT OF SCOPE
+================================================================================
+    - Pre-rendering a whole PDF, or batch OCR.
+    - Persisting OCR results, rectangles or edits to disk.
+    - Changing RENDER_DPI or adding a DPI control.
+    - Cleaning up the temporary render cache on exit.
+    - Migrating off the deprecated pypdfium2 document-level render() API.
+    - Adding or upgrading dependencies. flet stays pinned at 0.27.6.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+8. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [C] first (the error path must never
+      crash), then [A], then [E], then [B] and [D], then [F].
+
+================================================================================
+9. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [A]-[F] to how you satisfied it.
+    2. Which option you chose for [C] and why.
+    3. The new order of operations at the top of `_switch_image`.
+    4. The pytest output BEFORE your fix, showing (a), (c) and (d) FAILING, and
+       AFTER, showing everything passing. Both, in full.
+    5. The measured img_w / img_h for the first PDF page in test (d).
+    6. The list of changed files and the reason for each change.
+    7. The output of `git status` showing no stray files.
+    8. The full output of `python -m pytest tests/ -v`.
+    9. Anything that cannot be verified without a GUI, stated explicitly.
+   10. Open questions or compromises. Write "none" if there are none.
