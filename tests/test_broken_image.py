@@ -13,17 +13,15 @@ class MockPage:
         fn(*args)
 
 def mock_all_updates(viewer):
+    # Only mock the things that are safe to mock (not inside the stack, and not under test)
     viewer.btn_prev.update = MagicMock()
     viewer.btn_next.update = MagicMock()
     viewer.status_row.update = MagicMock()
-    viewer.image_container.update = MagicMock()
     viewer.status_text = MagicMock()
-    viewer.highlight_layer = MagicMock()
-    viewer.rects_layer = MagicMock()
-    viewer.gesture_detector = MagicMock()
-    viewer.selections_list = MagicMock()
-    viewer.controls_row = MagicMock()
-    viewer.scrollable_image = MagicMock()
+    viewer.selections_list.update = MagicMock()
+    # image_container itself doesn't detach
+    viewer.image_container.update = MagicMock()
+    # page mock to pretend we are attached
     viewer.page = MockPage()
 
 @patch("custom_gui.app.run_ocr_and_parse")
@@ -147,3 +145,44 @@ def test_pdf_render_failure(mock_run_ocr, tmp_path):
     assert viewer.ocr_error is not None
     assert "Failed to render page" in viewer.ocr_error
     assert viewer.image_states[png_path]["ocr_state"] == OcrState.ERROR
+
+@patch("custom_gui.app.run_ocr_and_parse")
+def test_identity_preservation_after_recovery(mock_run_ocr, tmp_path):
+    mock_run_ocr.return_value = []
+    
+    good_img_path = str(tmp_path / "good.jpg")
+    img = Image.new('RGB', (800, 600), color='white')
+    img.save(good_img_path)
+    
+    missing_img_path = str(tmp_path / "missing.jpg")
+    
+    viewer = SelectableImageViewer(
+        image_src=good_img_path,
+        img_w=800,
+        img_h=600,
+        win_w=1000,
+        win_h=800,
+        expand=True
+    )
+    viewer.sequence = ImageSequence([good_img_path, missing_img_path])
+    mock_all_updates(viewer)
+    
+    # Store original object identities
+    orig_stack = viewer.stack
+    orig_highlight = viewer.highlight_layer
+    orig_rects = viewer.rects_layer
+    orig_image_control = viewer.image_control
+    
+    # Cycle 1: Go to missing image
+    viewer._switch_image(missing_img_path)
+    
+    # Cycle 1: Go back to good image
+    viewer._switch_image(good_img_path)
+    
+    # Verify identities
+    assert viewer.image_container.content is viewer.stack
+    assert viewer.stack is orig_stack
+    assert viewer.highlight_layer is orig_highlight
+    assert viewer.rects_layer is orig_rects
+    assert viewer.image_control is orig_image_control
+

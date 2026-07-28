@@ -865,9 +865,13 @@ class SelectableImageViewer(ImageViewer):
             
             self.selections_list.controls.append(item)
             
+        def _safe_update(control):
+            if control is not None and control.page:
+                control.update()
+
         if self.page:
-            self.highlight_layer.update()
-            self.rects_layer.update()
+            _safe_update(self.highlight_layer)
+            _safe_update(self.rects_layer)
             self.selections_list.update()
 
 
