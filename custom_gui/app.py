@@ -1072,12 +1072,15 @@ class SelectableImageViewer(ImageViewer):
                     tf = ft.TextField(
                         value=display_text,
                         multiline=True,
+                        shift_enter=True,
                         autofocus=True
                     )
+                    tf.on_submit = lambda e, rid=rect.rect_id, t=tf: commit_edit(e, rid, t)
+                    
                     content_area = ft.Column([
                         tf,
                         ft.Row([
-                            ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save (Commit)", on_click=lambda e, rid=rect.rect_id, tf=tf: commit_edit(e, rid, tf)),
+                            ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save (Enter)", on_click=lambda e, rid=rect.rect_id, t=tf: commit_edit(e, rid, t)),
                             ft.IconButton(icon=ft.Icons.CANCEL, tooltip="Cancel", on_click=cancel_edit)
                         ])
                     ])
