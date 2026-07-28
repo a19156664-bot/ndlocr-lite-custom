@@ -1,0 +1,162 @@
+Task 34: [CHANGE] The TXT export always carries the image name and a TAB
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+Very small. One branch is deleted from one function. Do NOT touch
+custom_gui/app.py - another task is editing it right now and you will collide.
+
+================================================================================
+1. WHAT CHANGES
+================================================================================
+Task 31 made the TXT export a flat line joined with U+FF5C (｜), and put the
+image name in front only when the export covered SEVERAL images. The user asked
+for that, then used it for real and changed their mind: they want the image name
+on EVERY line, including a single page export, so the file always pastes into a
+spreadsheet as two columns.
+
+    NOW, exporting one page:
+
+        人の時｜桂冠するか?押し切るか?｜靜かに「非常時」を眺める沈默の人牧野内大臣｜(T生)
+
+    WANTED:
+
+        A案）国際寫眞新聞_028号_000008.jpg<TAB>人の時｜桂冠するか?押し切るか?｜靜かに…
+
+The several-images form is ALREADY "<name><TAB><joined>" per line and does not
+change. So the change is simply: stop special casing the single image.
+
+================================================================================
+2. SPECIFICATION
+================================================================================
+In `rows_to_txt_text` in custom_gui/exporter.py, delete the branch that returns
+the bare joined string when `len(images_order) == 1`. Every image, always, emits
+
+    <image_name>\t<segment｜segment｜segment>
+
+one line per image, in the order the image names first appear in `rows`, with a
+single TAB (U+0009) between the name and the text, and a single trailing newline
+at the end of the file.
+
+Everything else that Task 31 established stays exactly as it is:
+
+    - the separator is U+FF5C (｜), not ASCII "|"
+    - empty and whitespace-only segments are dropped, so separators never double
+    - newlines inside a row's text ("\n" and "\r\n") become separators, so each
+      image is always exactly one line
+    - an image whose segments are all empty produces NO line at all - not a
+      blank one, and not a line with just the name and a tab
+    - `rows` empty, or every segment empty, returns "" - not a lone newline
+    - `image_name` in the rows is already a basename; use it as it is
+    - `rows_to_csv_text` does not change
+
+================================================================================
+3. DEFINITION OF DONE
+================================================================================
+[1] A single-image export is "<name>\t<joined>" plus one trailing newline.
+[2] A multi-image export is unchanged from today.
+[3] All the Task 31 rules above still hold.
+[4] `rows_to_csv_text` output is byte-identical to today.
+[5] `python -m pytest tests/ -v` passes completely (150+ tests).
+
+================================================================================
+4. TESTS
+================================================================================
+4.1 The ONE pre-existing assertion you are allowed to change
+
+    The commander has already located every pre-existing assertion that pins the
+    single-image TXT form. There is exactly one:
+
+        tests/test_exporter.py:84
+            expected_txt = "第一章 序説｜この書は｜明治三十年に至り｜カンマ,入りテキスト\n"
+
+    The rows in that test are built with
+    `build_export_rows("resource/digidepo_0024.jpg", ...)`, so the basename is
+    `digidepo_0024.jpg`. Update that one line to the new expected string, keeping
+    the `==` comparison. Change NOTHING else in that file.
+
+    `tests/test_export_multi.py:67` already expects the "<name>\tjoined" form and
+    must keep passing untouched - it is your proof that the multi-image path did
+    not move.
+
+    If your change breaks any assertion NOT named above, STOP and report which
+    one and what it expects. Do not edit it, do not weaken it, do not delete it.
+
+4.2 tests/test_export_txt_flat.py is yours - update it freely
+
+    It is the file Task 31 added. Bring every expectation in it up to the new
+    format. Do not delete any test; a test that no longer applies should be
+    updated, not removed.
+
+4.3 Add these cases
+
+    (a) The user's real example: one image named
+        "A案）国際寫眞新聞_028号_000008.jpg" with the eight regions
+        "人の時", "桂冠するか?押し切るか?",
+        "靜かに「非常時」を眺める沈默の人牧野内大臣", "(T生)",
+        "国際ヴアリエテ", "フランスの國營富■", "三十五年目に結婚",
+        "世界珍レコード" produces EXACTLY
+
+        A案）国際寫眞新聞_028号_000008.jpg\t人の時｜桂冠するか?押し切るか?｜靜かに「非常時」を眺める沈默の人牧野内大臣｜(T生)｜国際ヴアリエテ｜フランスの國營富■｜三十五年目に結婚｜世界珍レコード
+
+        plus one trailing newline. Assert the whole string with ==.
+    (b) The line contains exactly ONE tab character, and it sits immediately
+        after the image name. Assert `out.count("\t") == 1`.
+    (c) A single image whose regions are all empty produces "".
+    (d) The multi-image case still produces one line per image with the tab, and
+        still skips an image with no text.
+    (e) A row whose text contains "\n" still collapses into the same single
+        line - the tab count stays 1.
+
+================================================================================
+5. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/exporter.py
+          tests/test_export_txt_flat.py
+          tests/test_exporter.py            (ONLY line 84, per 4.1)
+    - Do NOT touch custom_gui/app.py. Another task is editing it concurrently.
+    - Do NOT change `build_export_rows`, `build_export_rows_multi` or
+      `rows_to_csv_text`. Only `rows_to_txt_text` changes.
+    - Do NOT change the signature of `rows_to_txt_text`.
+    - Do NOT modify any other file under tests/, including
+      tests/test_export_multi.py and tests/test_export_scope.py.
+    - Inside `build_export_rows_multi` the loop variable is named `page_data`,
+      NOT `page`. tests/test_flet_constants.py is a guard test that rejects a
+      variable named `page`. Do not introduce one.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. FOUR previous tasks left probe files at
+      the repository root and the commander had to delete them by hand.
+
+================================================================================
+6. OUT OF SCOPE
+================================================================================
+    - The CSV format, its columns, or its encoding.
+    - Any GUI change.
+    - Making the separator or the delimiter configurable.
+    - Escaping a tab or a U+FF5C that appears in the OCR text.
+    - Sorting or reordering regions or images.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+7. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+================================================================================
+8. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[5] to how you satisfied it.
+    2. The exact output string your code produces for test (a).
+    3. The diff of tests/test_exporter.py, so it can be seen that only line 84
+       changed.
+    4. Confirmation that tests/test_export_multi.py passes untouched.
+    5. The list of changed files and the reason for each.
+    6. The output of `git status` showing no stray files.
+    7. The full output of `python -m pytest tests/ -v`.
+    8. Open questions or compromises. Write "none" if there are none.
