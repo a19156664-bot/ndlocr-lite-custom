@@ -57,15 +57,51 @@ def rows_to_txt_text(rows: list) -> str:
     """
     Converts a list of dict rows to human readable TXT formatted string.
     """
-    blocks = []
-    for row in rows:
-        block = f"=== {row['image_name']} / Region {row['region_id']} ===\n{row['text']}"
-        blocks.append(block)
-    
-    if not blocks:
+    if not rows:
         return ""
         
-    return "\n\n".join(blocks) + "\n"
+    SEP = "｜"
+    
+    images_order = []
+    image_segments = {}
+    
+    for row in rows:
+        image_name = row['image_name']
+        if image_name not in image_segments:
+            image_segments[image_name] = []
+            images_order.append(image_name)
+            
+        text = row.get('text', '').strip()
+        if not text:
+            continue
+            
+        # replace \r\n and \n with SEP
+        text = text.replace('\r\n', SEP).replace('\n', SEP)
+        
+        # split by SEP, filter empty, and extend the segments list
+        segments = [seg.strip() for seg in text.split(SEP)]
+        segments = [seg for seg in segments if seg]
+        
+        image_segments[image_name].extend(segments)
+        
+    # Check if all segments are empty
+    if not any(image_segments.values()):
+        return ""
+
+    if len(images_order) == 1:
+        image_name = images_order[0]
+        segments = image_segments[image_name]
+        return SEP.join(segments) + "\n"
+        
+    lines = []
+    for image_name in images_order:
+        segments = image_segments[image_name]
+        if not segments:
+            continue
+        line = f"{image_name}\t{SEP.join(segments)}"
+        lines.append(line)
+        
+    return "\n".join(lines) + "\n"
 
 def build_export_rows_multi(pages: list) -> list:
     """
