@@ -1,0 +1,216 @@
+Task 31: [CHANGE] TXT export becomes one flat line per image, joined with U+FF5C
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+This is a small, self contained change to ONE function. Do not touch anything
+else. In particular do NOT touch custom_gui/app.py - another task is editing it
+right now and you will collide.
+
+================================================================================
+1. WHAT THE USER ASKED FOR
+================================================================================
+The TXT export currently writes a header block per region:
+
+    === A案）国際寫眞新聞_028号_000009.jpg / Region 1 ===
+    印棉不買からシムラ會商まで
+
+    === A案）国際寫眞新聞_028号_000009.jpg / Region 4 ===
+    南千壽
+
+    === A案）国際寫眞新聞_028号_000009.jpg / Region 5 ===
+    ―寫眞はカルナジタ・ハリソン街の綿糸布市場―
+
+The user wants one flat line instead, with the regions joined by the FULLWIDTH
+VERTICAL LINE character U+FF5C (｜), no headers and no image name:
+
+    印棉不買からシムラ會商まで｜南千壽｜―寫眞はカルナジタ・ハリソン街の綿糸布市場―
+
+No separator at the start, none at the end.
+
+The CSV export does NOT change. It is the structured format and stays exactly
+as it is, columns and all.
+
+================================================================================
+2. EXACT SPECIFICATION
+================================================================================
+Rewrite `rows_to_txt_text(rows)` in custom_gui/exporter.py. Its signature does
+not change, so no caller needs editing.
+
+SEP = "｜"   # ｜ FULLWIDTH VERTICAL LINE. Not "|" (U+007C).
+
+2.1 Segments
+
+    Each row contributes its `text`. Before use:
+      - strip leading and trailing whitespace
+      - replace every newline inside the text with SEP, so one row whose OCR
+        found three lines contributes three segments and the result is
+        guaranteed to be a single line. `assemble_text` joins OCR lines with
+        "\n", and a user's F2 edit may contain newlines too, so this case is
+        real and must be handled. Handle "\r\n" as well as "\n".
+      - after that, drop any segment that is empty or whitespace only, so a
+        rectangle that found no text produces nothing and the separators never
+        double up.
+
+    Do not escape or alter a SEP character that already appears in the text.
+    TXT is not a structured format and the user did not ask for escaping.
+
+2.2 One image - the common case
+
+    When every row shares the same `image_name`, the output is exactly the
+    joined segments plus a single trailing newline:
+
+        seg1｜seg2｜seg3\n
+
+    No image name, no header, no blank lines.
+
+2.3 Several images - the "All images" export
+
+    When the rows cover more than one distinct `image_name`, emit ONE LINE PER
+    IMAGE, in the order the image names first appear in `rows`:
+
+        <image_name>\t<seg1｜seg2｜seg3>
+        <image_name>\t<seg1｜seg2>
+
+    A single TAB (U+0009) between the name and the text. The user's stated
+    reason: the name and the text land in separate columns when the file is
+    pasted into a spreadsheet.
+
+    `image_name` is already a basename in the rows - use it as it is.
+
+    An image whose segments are all empty contributes NO line at all - not a
+    blank one, and not a line with just the name and a tab.
+
+    End the file with a single trailing newline.
+
+2.4 Nothing to export
+
+    If `rows` is empty, or every segment is empty, return "" - an empty string,
+    not a lone newline. That matches today's behaviour for empty input.
+
+================================================================================
+3. DEFINITION OF DONE
+================================================================================
+[1] A single-image export is one line of segments joined by U+FF5C, with no
+    image name, no header, no leading or trailing separator.
+[2] A multi-image export is one line per image, "<name>\t<joined>", in first
+    appearance order, skipping images with no text.
+[3] Rows with empty or whitespace-only text are skipped and never produce
+    doubled separators.
+[4] Newlines inside a row's text become separators, so the output for one image
+    is always exactly one line.
+[5] `rows_to_csv_text` is untouched and its output is byte-identical to today.
+[6] `python -m pytest tests/ -v` passes completely.
+
+================================================================================
+4. TESTS
+================================================================================
+Put the new tests in tests/test_export_txt_flat.py (new file).
+
+4.1 The four assertions you ARE allowed to change, and nothing else
+
+    The commander has already located every pre-existing assertion that pins the
+    OLD TXT format. This is a deliberate specification change requested by the
+    user, so these four lines must be updated - that is not weakening a test,
+    it is changing what "correct" means:
+
+        tests/test_exporter.py:84   assert "=== digidepo_0024.jpg / Region 1 ===" in txt_text
+        tests/test_exporter.py:87   assert "=== digidepo_0024.jpg / Region 2 ===" in txt_text
+        tests/test_export_multi.py:67   assert "=== a.jpg / Region 1 ===" in txt_text
+        tests/test_export_multi.py:68   assert "=== c.jpg / Region 1 ===" in txt_text
+
+    Replace each with an assertion on the NEW format that is at least as strict
+    as the one it replaces. Prefer asserting the WHOLE returned string with `==`
+    rather than a substring with `in` - the new format is short enough that an
+    exact assertion is easy and much harder to fool.
+
+    Every OTHER line in those files stays exactly as it is. In particular
+    `tests/test_exporter.py` line 85 (`"第一章 序説\nこの書は" in txt_text`) now
+    describes text that will contain a separator instead of a newline - update
+    it to match the new output, again exactly.
+
+    If your change breaks any assertion NOT in the list above, STOP and report
+    which one and what it expects. Do not edit it, do not weaken it, do not
+    delete it. The commander will decide.
+
+    Do not touch any other file under tests/.
+
+New tests must cover:
+    (a) The user's real example, verbatim. Six regions with the texts
+        "印棉不買からシムラ會商まで", "南千壽",
+        "―寫眞はカルナジタ・ハリソン街の綿糸布市場―", "土人娘も流行を■ふ",
+        "デブの遺産四千圓", "獨木船で世界一周" all on one image produce EXACTLY
+
+        印棉不買からシムラ會商まで｜南千壽｜―寫眞はカルナジタ・ハリソン街の綿糸布市場―｜土人娘も流行を■ふ｜デブの遺産四千圓｜獨木船で世界一周
+
+        plus one trailing newline. Assert the whole string, not a substring.
+    (b) The separator is U+FF5C. Assert `"｜" in out` and
+        `"|" not in out` for texts that contain no ASCII pipe.
+    (c) No leading or trailing separator: `not out.startswith(SEP)` and
+        `not out.rstrip("\n").endswith(SEP)`.
+    (d) An empty region in the middle is skipped: three rows with texts
+        "A", "", "B" give "A｜B\n" - assert the exact string, so a doubled
+        separator would fail.
+    (e) A whitespace-only region ("   ") is also skipped.
+    (f) A row whose text contains "\n" becomes two segments; verify the result
+        has exactly one line. Cover "\r\n" too.
+    (g) Two images produce two lines, each "<name>\tjoined", in first
+        appearance order. Assert the exact string including the tab.
+    (h) With several images, an image whose rows are all empty produces no line
+        at all - assert the line count.
+    (i) Empty `rows` returns "".
+    (j) CSV is unaffected: build the same rows, call `rows_to_csv_text`, and
+        assert the header and a data row are exactly as before.
+
+================================================================================
+5. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/exporter.py
+          tests/test_export_txt_flat.py     (new file)
+          tests/test_exporter.py            (ONLY the lines named in 4.1)
+          tests/test_export_multi.py        (ONLY the lines named in 4.1)
+    - Do NOT touch custom_gui/app.py. Another task is editing it concurrently.
+    - Do NOT change `build_export_rows`, `build_export_rows_multi` or
+      `rows_to_csv_text`. Only `rows_to_txt_text` changes.
+    - Do NOT change the signature of `rows_to_txt_text`.
+    - Do NOT modify any other file under tests/, including
+      tests/test_export_scope.py.
+    - Inside build_export_rows_multi there is a loop variable named `page_data`,
+      NOT `page`. tests/test_flet_constants.py is a guard test that rejects a
+      variable named `page`. Do not introduce one.
+    - No new dependencies.
+    - The file is written by the caller as UTF-8 with BOM (utf-8-sig) for CSV.
+      You are not changing any file writing - only the string this function
+      returns.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish.
+
+================================================================================
+6. OUT OF SCOPE
+================================================================================
+    - The CSV format, its columns, or its encoding.
+    - Any GUI change: buttons, menus, dialogs, status text.
+    - Making the separator configurable.
+    - Escaping a U+FF5C that appears in the OCR text.
+    - Sorting or reordering regions. Existing order is preserved.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+7. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a pre-existing
+      test asserts the old TXT format, STOP and report which one; do not edit it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+================================================================================
+8. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[6] to how you satisfied it.
+    2. The exact output string your code produces for test (a).
+    3. Whether any pre-existing test asserted the old TXT format, and which.
+    4. The list of changed and added files with the reason for each.
+    5. The output of `git status` showing no stray files.
+    6. The full output of `python -m pytest tests/ -v`.
+    7. Open questions or compromises. Write "none" if there are none.
