@@ -1,0 +1,312 @@
+Task 30: [FEATURE] Wire the OCR cache into the GUI - "Pre-OCR all pages"
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+custom_gui/ocr_cache.py and custom_gui/batch_ocr.py are merged, tested and
+verified against the real OCR model. They are NOT called from the GUI yet.
+This task connects them. Do not modify either module.
+
+================================================================================
+1. WHY
+================================================================================
+Measured by the commander on this machine with the real model:
+
+    model load ......... ~25 s   (paid every time src/ocr.py starts)
+    OCR per page ....... ~13 s
+    -> opening a page today costs ~38 s, every page, every session
+
+    batch of 3 pages ... 63.8 s total  (one model load)
+    second run ......... 0.002 s       (served from cache)
+
+The cached output was verified byte-for-byte identical to per-page OCR: text,
+bounding boxes, is_vertical and confidence all match. Batching costs nothing in
+quality.
+
+So: let the user press a button to OCR every page once, then serve every page
+from cache instantly.
+
+================================================================================
+2. SCOPE - READ THIS TWICE
+================================================================================
+IN scope : ordinary image files (.jpg .jpeg .png .tif .tiff)
+OUT of scope: PDF pages. Deliberately deferred to Task 31.
+
+PDF pages are rendered into `self.pdf_cache_dir`, which is
+`tempfile.mkdtemp(prefix="ndlocr_pdf_")` - a directory that is DELETED when the
+process ends and has a DIFFERENT path every run. Caching against those paths
+would write cache files that can never be found again.
+
+Therefore, everywhere you touch the cache:
+
+    if path in self.pdf_page_map:   -> do NOT read the cache, do NOT write it
+
+PDF pages keep working exactly as they do today, through the existing lazy OCR.
+They are slower; that is expected and accepted for now.
+
+================================================================================
+3. DELIVERABLES
+================================================================================
+3.1 [A] Cache-first reading in `_switch_image`
+
+    Today `_switch_image` ends with:
+
+        if self.ocr_state in (OcrState.IDLE, OcrState.WAITING) and self.page:
+            self.start_ocr(self.page)
+
+    Before that, when the page state is IDLE and the path is NOT in
+    self.pdf_page_map, try `ocr_cache.load_cache(path)`. On a hit:
+
+        state["ocr_results"] = <the cached list>
+        state["ocr_state"]   = OcrState.DONE
+        self.ocr_results     = <the cached list>
+        self.ocr_state       = OcrState.DONE
+
+    and do NOT call start_ocr. The status line then shows the existing
+    "Lines: N" wording with no new vocabulary. Highlights, region filtering and
+    export must work exactly as if the OCR had just run - they read
+    self.ocr_results, so nothing else should need changing.
+
+    On a miss, behave exactly as today.
+
+    A cache hit must be FAST. Do not call load_cache more than once per switch.
+
+3.2 [B] The "Pre-OCR all pages" button
+
+    Add ONE ft.IconButton to the toolbar, positioned immediately after
+    self.btn_open_pdf in the visual order:
+
+        self.btn_batch_ocr = ft.IconButton(
+            icon=ft.Icons.DOCUMENT_SCANNER,
+            tooltip="Pre-OCR all pages (images only; PDF pages are skipped)",
+            on_click=self._on_batch_ocr_click,
+        )
+
+    Note the capitalised ft.Icons - flet 0.27.6 requires it.
+
+    Clicking it when idle starts the batch. Clicking it WHILE RUNNING cancels
+    (see [D]). Change the icon to ft.Icons.CANCEL and the tooltip to
+    "Cancel pre-OCR" while running, and restore both when it finishes.
+
+3.3 [C] Running the batch
+
+    Collect the candidate pages from the CURRENT sequence, excluding anything in
+    self.pdf_page_map. If there are none, set self.latest_region_info to say so
+    and stop - do not start a subprocess.
+
+    Run `batch_ocr.run_batch` on a worker thread via `page.run_thread`, exactly
+    the pattern `start_ocr` already uses. Never block the UI thread.
+
+    Pass:
+        progress      -> updates the status line (see [E])
+        should_cancel -> returns self._batch_cancel_requested
+
+    While the batch runs, LAZY OCR MUST NOT START. Two OCR processes would each
+    load the model and fight for the CPU on this 4-core machine. Add a flag,
+    for example self.batch_running, and make `start_ocr` return immediately
+    when it is set. Turning pages during a batch must stay possible and must
+    not crash; those pages simply show "OCR waiting" or their cached result.
+
+    When run_batch returns:
+      - clear the flag and restore the button
+      - report the outcome in self.latest_region_info, including the number of
+        PDF pages that were excluded, for example:
+            "Pre-OCR complete: 152 cached, 12 PDF pages skipped"
+        and on failures include the count:
+            "Pre-OCR finished: 150 cached, 2 failed"
+      - refresh the CURRENT page from the cache so the user immediately sees
+        the result of the page they are looking at, without a manual page turn.
+
+3.4 [D] Cancelling must not throw away completed work
+
+    run_batch already harvests everything that finished before the cancel and
+    caches it - that behaviour is tested and verified. Your job is only to set
+    the flag and report honestly, for example:
+            "Pre-OCR cancelled: 47 cached, 117 remaining"
+    Pressing the button again must resume, and resuming must NOT redo the 47
+    pages already cached - plan_batch handles that for you.
+
+3.5 [E] Progress in the status line
+
+    Store the progress on the viewer, for example
+    self.batch_progress = (done, total) or None, and have `_get_status_message`
+    append a segment when it is not None:
+
+            ... | Pre-OCR: 37/164
+
+    Do NOT change or reorder any of the existing segments of that string.
+    tests/test_async_ocr.py and other existing tests assert on the current
+    wording. Append only.
+
+    IMPORTANT - the last update. batch_ocr polls the output directory about once
+    a second, so the final page can complete inside the last sleep and never be
+    reported. After run_batch returns, set the progress explicitly to the final
+    counts before clearing it, so the user never sees the bar stop at 163/164.
+
+3.6 [F] Persist lazy OCR results too (lowest priority - do this last)
+
+    In `_on_ocr_complete`, when OCR succeeded and the path is NOT in
+    self.pdf_page_map, call `ocr_cache.save_cache(path, results)`. Then a user
+    who simply browses pages builds the cache as a side effect, and a later
+    batch skips them.
+
+    Never cache a failed or empty-because-of-error result. If save_cache raises,
+    swallow it and carry on - a cache write failure must never break OCR.
+
+================================================================================
+4. DEFINITION OF DONE
+================================================================================
+[1] Cache hit path: switching to a page with a valid cache sets DONE and does
+    NOT call run_ocr_and_parse.
+[2] Cache miss path: unchanged behaviour, lazy OCR still runs.
+[3] PDF-backed pages never read or write the cache, and still work.
+[4] The button starts the batch on a worker thread and the UI stays responsive.
+[5] Lazy OCR cannot start while a batch is running.
+[6] Cancel works, keeps completed work, and resuming skips what is already done.
+[7] The status line shows progress, appended - existing segments unchanged.
+[8] The final progress value is correct, not one short.
+[9] `python -m pytest tests/ -v` passes completely (111+ tests).
+
+================================================================================
+5. TESTS - tests/test_batch_gui.py (NEW FILE)
+================================================================================
+No GUI window, no real OCR, no model. Monkeypatch
+`custom_gui.app.run_ocr_and_parse` and `custom_gui.app.run_batch`. Build real
+images with Pillow under pytest's tmp_path.
+
+    (a) CACHE HIT: save_cache a known result for an image, construct the viewer,
+        _switch_image to it, and assert ocr_state is DONE, ocr_results equals
+        what was cached, and that run_ocr_and_parse was NEVER called. Assert the
+        call count is 0 - not just that the state is DONE.
+    (b) CACHE MISS: no cache file -> run_ocr_and_parse IS called exactly once.
+    (c) PDF PAGE: a path present in viewer.pdf_page_map must not be served from
+        cache even if a cache file happens to exist for it, and no cache file
+        must be written for it. Assert both directions.
+    (d) The button calls run_batch with the image paths and NOT with the
+        PDF-backed paths. Assert the exact list passed.
+    (e) While batch_running is set, start_ocr does not call run_ocr_and_parse.
+        Assert the call count is 0.
+    (f) The progress callback updates the status string, and
+        `_get_status_message()` still contains every existing segment -
+        assert on "File:", "Size:", "Scale:", "Mode:" and "Last:" being present.
+    (g) After run_batch returns, batch_progress is cleared and the button is
+        back to its idle icon and tooltip.
+    (h) CANCEL: clicking while running sets the cancel flag that should_cancel
+        reports. Drive it through the real handler, not by setting the attribute
+        directly.
+    (i) [F] a successful lazy OCR writes a cache file; a failed one does not.
+
+WARNING - this project has shipped SIX ineffective tests. Two of them mocked
+away the very control under test. Do not mock `run_batch` in a way that makes
+(d) vacuous, and do not assert only on state flags where a call count is the
+real evidence. For (a), (b) and (e) the call-count assertion IS the test.
+
+For (a) and (e), state in your report what you changed in the code to prove
+each test FAILS, and paste that failing output.
+
+================================================================================
+6. CURRENT CODE CONTRACT (use it, do not rediscover it)
+================================================================================
+custom_gui/app.py, class SelectableImageViewer(ImageViewer):
+    self.controls_row               toolbar; btn_open_folder, btn_open_pdf,
+                                    btn_prev, btn_next are inserted at index 0
+                                    in reverse order
+    self.export_button              ft.PopupMenuButton
+    self.status_row                 ft.Row([progress_ring, status_text])
+    self.progress_ring              ft.ProgressRing(visible=False)
+    self.image_states               path -> selections / ocr_state /
+                                    ocr_results / ocr_error / edits
+    self.pdf_page_map               png_path -> (pdf_path, page_index)
+    self.pdf_cache_dir              tempfile.mkdtemp(prefix="ndlocr_pdf_")
+    self.ocr_scheduler              OcrScheduler, one lazy OCR at a time
+    self.sequence                   ImageSequence
+    start_ocr(page, target_path=None)
+    _on_ocr_complete(results, error, target_path=None)
+    _switch_image(path)
+    _get_status_message()
+    _update_selections_ui()         uses _safe_update - keep that intact
+    class OcrState(Enum): IDLE / WAITING / RUNNING / DONE / ERROR
+
+custom_gui/ocr_cache.py (DO NOT MODIFY):
+    load_cache(source_path, page_index=None) -> Optional[list]
+    save_cache(source_path, results, page_index=None) -> str
+    is_cached(source_path, page_index=None) -> bool
+
+custom_gui/batch_ocr.py (DO NOT MODIFY):
+    plan_batch(image_paths) -> (to_ocr, already_cached)
+    run_batch(image_paths, progress=None, should_cancel=None, python_exe=None)
+        -> BatchResult(ok, skipped, failed, cancelled)
+
+================================================================================
+7. REGRESSION SAFETY
+================================================================================
+    - Do NOT modify custom_gui/ocr_cache.py, batch_ocr.py, pdf_loader.py,
+      ocr_scheduler.py, ocr_bridge.py, image_sequence.py, region_filter.py,
+      selection.py, text_assembler.py, exporter.py, rtl.py.
+    - Do NOT modify custom_gui/viewer.py.
+    - Do NOT modify ANY existing file under tests/. tests/test_flet_constants.py
+      is a guard test: if it objects to your code, CHANGE YOUR CODE. NEVER add
+      an exemption. A local variable named `page` WILL collide with it.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - NEVER use `self.image` or `self.scale` as attribute names. Both are
+      reserved by flet and previously caused a fatal startup crash here.
+    - These are all verified working on the real GUI and must stay working:
+      rectangle selection, Select/Pan, panning, yellow highlights, the
+      "Region N" label outside the rectangle, the OCR progress ring and the
+      one-at-a-time lazy OCR scheduler, CSV/TXT export for the current image and
+      for all images, folder loading, PDF loading by button and by folder
+      (including the first page, which renders lazily), Prev/Next/Ctrl+N,
+      F2 correction with revert, the right-to-left button, error display for a
+      missing image WITHOUT crashing, and stable zoom across page changes
+      (zoom_scale stays 0.2605 for a 2218x3071 image in a 1600x900 window).
+    - Do not run real OCR in your tests.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish.
+
+================================================================================
+8. ALLOWED SCOPE (WHITELIST)
+================================================================================
+    custom_gui/app.py
+    tests/test_batch_gui.py          (new file)
+
+================================================================================
+9. OUT OF SCOPE
+================================================================================
+    - PDF batching or PDF caching of any kind. That is Task 31.
+    - Persisting rectangles or F2 edits. This cache holds OCR output only.
+    - A "clear cache" command, cache eviction or size limits.
+    - Running the batch automatically on folder open. It is button-triggered on
+      purpose: 164 pages take about 35 minutes and must never start unasked.
+    - Parallelism, GPU, --device cuda, or tuning any OCR threshold.
+    - Changing RENDER_DPI or how region filtering and text assembly work.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+10. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard test
+      objects, change your code. If you believe a guard test is genuinely wrong,
+      STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+    - Priority if you run out of time: [A] cache-first reading first, then [B]
+      and [C] the button and the run, then [E] progress, then [D] cancel, and
+      [F] last.
+
+================================================================================
+11. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[9] to how you satisfied it.
+    2. The new order of operations at the end of `_switch_image`.
+    3. How you prevented lazy OCR from starting during a batch.
+    4. The failing output for tests (a) and (e) against defective code, and the
+       passing output afterwards.
+    5. The exact status string produced with a batch in progress, showing that
+       every pre-existing segment is unchanged.
+    6. How the final progress value is guaranteed not to be one short.
+    7. The list of changed and added files with the reason for each.
+    8. The output of `git status` showing no stray files.
+    9. The full output of `python -m pytest tests/ -v`.
+   10. Anything that cannot be verified without a GUI or the real model, stated
+       explicitly. The commander will run the real batch on real images.
+   11. Open questions or compromises. Write "none" if there are none.
