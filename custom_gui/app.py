@@ -306,13 +306,7 @@ class SelectableImageViewer(ImageViewer):
         
         next_page = self.ocr_scheduler.on_ocr_complete(target_path, current_page, needs_ocr)
         
-        # When scheduler says current_page should start, it just returns it and sets it as running.
-        # But we need to call start_ocr so that the actual processing begins. 
-        # But wait! If on_ocr_complete sets running_page to current_page, then start_ocr -> request_ocr 
-        # will return False because it's ALREADY running in the scheduler. 
-        # We need to temporarily unset it from scheduler or just bypass request_ocr, OR better:
-        # let request_ocr handle all logic. We shouldn't set running_page inside on_ocr_complete if we 
-        # rely on start_ocr to call request_ocr. 
+        # Ensure the next scheduled page is triggered.
         
         if next_page and self.page:
             # Check again if it wasn't already processed
@@ -359,12 +353,28 @@ class SelectableImageViewer(ImageViewer):
         if not path:
             return
             
+        # [A] Render before deciding whether the file exists.
+        render_error = None
+        if path in self.pdf_page_map:
+            try:
+                pdf_path, page_index = self.pdf_page_map[path]
+                ensure_page_rendered(path, pdf_path, page_index)
+            except Exception as e:
+                render_error = f"Failed to render page: {str(e)}"
+                
         if path not in self.image_states:
+            if render_error:
+                ocr_state = OcrState.ERROR
+                ocr_error = render_error
+            else:
+                ocr_state = OcrState.IDLE if os.path.exists(path) else OcrState.ERROR
+                ocr_error = None if os.path.exists(path) else f"Error: Image not found at {path}"
+                
             self.image_states[path] = {
                 "selections": SelectionContainer(),
-                "ocr_state": OcrState.IDLE if os.path.exists(path) else OcrState.ERROR,
+                "ocr_state": ocr_state,
                 "ocr_results": [],
-                "ocr_error": None if os.path.exists(path) else f"Error: Image not found at {path}",
+                "ocr_error": ocr_error,
                 "edits": {}
             }
             
@@ -379,14 +389,11 @@ class SelectableImageViewer(ImageViewer):
         self.active_region_id = None
         self.editing_region_id = None
         
-        if path in self.pdf_page_map:
-            try:
-                pdf_path, page_index = self.pdf_page_map[path]
-                ensure_page_rendered(path, pdf_path, page_index)
-            except Exception as e:
-                self.ocr_error = f"Failed to render page: {str(e)}"
-                state["ocr_state"] = OcrState.ERROR
-                state["ocr_error"] = self.ocr_error
+        # If the render error happened on a subsequent visit, update it
+        if render_error and not self.ocr_error:
+            self.ocr_error = render_error
+            state["ocr_state"] = OcrState.ERROR
+            state["ocr_error"] = self.ocr_error
                 
         try:
             from PIL import Image

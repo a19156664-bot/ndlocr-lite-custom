@@ -119,7 +119,7 @@ class ImageViewer(ft.Container):
         self.image_control.height = self.img_h * self.zoom_scale
         self.image_container.width = self.img_w * self.zoom_scale
         self.image_container.height = self.img_h * self.zoom_scale
-        if self.page:
+        if self.image_control.page:
             self.image_control.update()
             self.image_container.update()
 
