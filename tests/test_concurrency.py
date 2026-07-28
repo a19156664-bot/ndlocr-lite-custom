@@ -123,6 +123,9 @@ def test_batch_worker_no_switch_image(mock_run_batch, mock_switch_image):
     v.btn_batch_ocr = MagicMock()
     v.status_row = MagicMock()
     
+    v.batch_progress_bar = MagicMock()
+    v.progress_ring = MagicMock()
+    
     class DummyResult:
         skipped = []
         ok = ["dummy.jpg"]
@@ -191,6 +194,8 @@ def test_batch_worker_zoom_offset():
     v.zoom_scale = 0.2605
     v.offset_x = 10.0
     v.offset_y = 20.0
+    v.batch_progress_bar = MagicMock()
+    v.progress_ring = MagicMock()
     
     with patch('custom_gui.batch_ocr.run_batch') as mock_run_batch:
         class DummyResult:

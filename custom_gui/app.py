@@ -103,7 +103,8 @@ class SelectableImageViewer(ImageViewer):
             on_click=self._on_open_pdf_click
         )
         
-        self.btn_batch_ocr = ft.IconButton(
+        self.btn_batch_ocr = ft.TextButton(
+            text="Pre-OCR All",
             icon=ft.Icons.DOCUMENT_SCANNER,
             tooltip="Pre-OCR all pages (images only; PDF pages are skipped)",
             on_click=self._on_batch_ocr_click,
@@ -200,6 +201,8 @@ class SelectableImageViewer(ImageViewer):
         self.progress_ring = ft.ProgressRing(width=16, height=16, visible=False)
         self.status_row = ft.Row([self.progress_ring, self.status_text], spacing=5)
         
+        self.batch_progress_bar = ft.ProgressBar(value=0.0, visible=False)
+
         if self.ocr_error:
             self.image_container.content = ft.Text(self.ocr_error, color=ft.Colors.RED, weight=ft.FontWeight.BOLD)
         else:
@@ -222,6 +225,7 @@ class SelectableImageViewer(ImageViewer):
             ft.Row([
                 ft.Column([
                     self.controls_row,
+                    self.batch_progress_bar,
                     self.scrollable_image
                 ], expand=True),
                 ft.Column([
@@ -353,12 +357,53 @@ class SelectableImageViewer(ImageViewer):
 
 
     def _run_batch_worker(self, candidate_paths):
+        # Count total items and initially cached items across the folder
+        total_in_folder = len(candidate_paths)
+        initially_cached = sum(1 for p in candidate_paths if ocr_cache.is_cached(p))
+
+        # Start progress at (already cached, total)
+        self.batch_progress = (initially_cached, total_in_folder)
+        self.batch_progress_bar.value = initially_cached / max(1, total_in_folder)
+        self.batch_progress_bar.visible = True
+        self.progress_ring.visible = True
+        
+        import time
+        batch_start = time.time()
+        self.batch_eta = None
+        
+        if hasattr(self, 'status_text'):
+            self.status_text.value = self._get_status_message()
+        if getattr(self, 'page', None):
+            self.status_row.update()
+            self.batch_progress_bar.update()
+
         def _progress_cb(done, total):
-            self.batch_progress = (done, total)
+            # done is the number of pages finished *this run*
+            # total is the number of pages to do this run (total_in_folder - initially_cached)
+            
+            if done > 0:
+                elapsed = time.time() - batch_start
+                per_page = elapsed / done
+                remaining_pages = total - done
+                remaining_secs = remaining_pages * per_page
+                
+                if remaining_secs > 60:
+                    mins = round(remaining_secs / 60)
+                    self.batch_eta = f"about {mins} min"
+                else:
+                    secs = round(remaining_secs)
+                    self.batch_eta = f"about {secs} sec"
+            
+            # Update batch_progress using the folder total
+            new_done = initially_cached + done
+            self.batch_progress = (new_done, total_in_folder)
+            self.batch_progress_bar.value = new_done / max(1, total_in_folder)
+            
             if hasattr(self, 'status_text'):
                 self.status_text.value = self._get_status_message()
-            if self.page:
+            if getattr(self, 'page', None):
                 self.status_row.update()
+                self.batch_progress_bar.update()
                 
         def _should_cancel_cb():
             return self._batch_cancel_requested
@@ -370,24 +415,31 @@ class SelectableImageViewer(ImageViewer):
         )
         
         # Explicitly set to final progress values before clearing
-        total_planned = len(candidate_paths) - len(result.skipped)
-        if total_planned > 0:
-            final_done = len(result.ok) + len(result.failed)
-            self.batch_progress = (final_done, total_planned)
-            if hasattr(self, 'status_text'):
-                self.status_text.value = self._get_status_message()
-            if self.page:
-                self.status_row.update()
+        final_done = initially_cached + len(result.ok) + len(result.failed)
+        self.batch_progress = (final_done, total_in_folder)
+        self.batch_progress_bar.value = final_done / max(1, total_in_folder)
+        self.batch_eta = None
+        if hasattr(self, 'status_text'):
+            self.status_text.value = self._get_status_message()
+        if getattr(self, 'page', None):
+            self.status_row.update()
+            self.batch_progress_bar.update()
                 
         # Clear batch running flag and batch progress
         self.batch_running = False
         self.batch_progress = None
+        self.batch_progress_bar.visible = False
+        
+        # We need to correctly manage progress_ring visibility, checking if a single image OCR is running
+        self.progress_ring.visible = (self.ocr_state in (OcrState.RUNNING, OcrState.WAITING))
         
         # Restore button
+        self.btn_batch_ocr.text = "Pre-OCR All"
         self.btn_batch_ocr.icon = ft.Icons.DOCUMENT_SCANNER
         self.btn_batch_ocr.tooltip = "Pre-OCR all pages (images only; PDF pages are skipped)"
-        if self.page:
+        if getattr(self, 'page', None):
             self.btn_batch_ocr.update()
+            self.batch_progress_bar.update()
             
         pdf_skipped = 0
         if hasattr(self.sequence, '_paths'):
@@ -448,12 +500,44 @@ class SelectableImageViewer(ImageViewer):
         self.batch_running = True
         self._batch_cancel_requested = False
         
+        self.btn_batch_ocr.text = "Cancel"
         self.btn_batch_ocr.icon = ft.Icons.CANCEL
         self.btn_batch_ocr.tooltip = "Cancel pre-OCR"
         if self.page:
             self.btn_batch_ocr.update()
             
-        self.page.run_thread(self._run_batch_worker, candidate_paths)
+        def _wait_and_run_batch():
+            import time
+            while True:
+                if self._batch_cancel_requested:
+                    self.batch_running = False
+                    self.btn_batch_ocr.text = "Pre-OCR All"
+                    self.btn_batch_ocr.icon = ft.Icons.DOCUMENT_SCANNER
+                    if getattr(self, 'page', None):
+                        self.btn_batch_ocr.update()
+                    return
+                    
+                any_running = False
+                for p in candidate_paths:
+                    state = self.image_states.get(p)
+                    if state and state["ocr_state"] == OcrState.RUNNING:
+                        any_running = True
+                        break
+                        
+                if not any_running:
+                    break
+                    
+                self.latest_region_info = "Pre-OCR: waiting for the current page..."
+                if hasattr(self, 'status_text'):
+                    self.status_text.value = self._get_status_message()
+                if getattr(self, 'page', None):
+                    self.status_row.update()
+                    
+                time.sleep(0.5)
+                
+            self._run_batch_worker(candidate_paths)
+            
+        self.page.run_thread(_wait_and_run_batch)
 
     def _on_open_pdf_click(self, e):
         self._file_picker_mode = "pdf"
@@ -752,7 +836,8 @@ class SelectableImageViewer(ImageViewer):
                 f"{ocr_status} | Last: {self.latest_region_info}")
         if self.batch_progress:
             done, total = self.batch_progress
-            return f"{base_str} | Pre-OCR: {done}/{total}"
+            eta_str = f" ({getattr(self, 'batch_eta', None)})" if getattr(self, 'batch_eta', None) else ""
+            return f"{base_str} | Pre-OCR: {done}/{total}{eta_str}"
         return base_str
 
     def update_layout(self, win_w: float, win_h: float):
@@ -782,8 +867,8 @@ class SelectableImageViewer(ImageViewer):
             self.active_rect = ft.Container(
                 border=ft.border.all(2, ft.Colors.RED),
                 bgcolor=ft.Colors.with_opacity(0.2, ft.Colors.RED),
-                left=e.local_x,
-                top=e.local_y,
+                left=e.local_x - self.offset_x,
+                top=e.local_y - self.offset_y,
                 width=0,
                 height=0
             )
@@ -807,14 +892,14 @@ class SelectableImageViewer(ImageViewer):
             w = abs(start_x - end_x)
             h = abs(start_y - end_y)
             
-            self.active_rect.left = x
-            self.active_rect.top = y
+            self.active_rect.left = x - self.offset_x
+            self.active_rect.top = y - self.offset_y
             self.active_rect.width = w
             self.active_rect.height = h
             
             self.drag_current_point = (e.local_x, e.local_y)
             
-            if self.page:
+            if self.page and getattr(self.active_rect, 'page', None):
                 self.active_rect.update()
                 
         elif self.mode_state.current == "PAN":

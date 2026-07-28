@@ -38,6 +38,7 @@ def bypass_ui_updates(viewer):
     viewer.status_text.update = MagicMock()
     viewer.selections_list.update = MagicMock()
     viewer.rects_layer.update = MagicMock()
+    viewer.batch_progress_bar.update = MagicMock()
 
 def test_cache_hit_skips_ocr(temp_images, monkeypatch):
     path = temp_images[0]
@@ -235,3 +236,348 @@ def test_failed_lazy_ocr_does_not_write_cache(temp_images, monkeypatch):
     viewer._on_ocr_complete(None, "error", target_path=path)
     
     assert not os.path.exists(cache_path)
+
+def test_regression_a_preview_offset(temp_images):
+    viewer = SelectableImageViewer(temp_images[0], 1000, 1000, 800, 800)
+    bypass_ui_updates(viewer)
+    page_mock = create_mock_page()
+    viewer.page = page_mock
+
+    viewer.offset_x = 120.0
+    viewer.offset_y = 80.0
+    viewer.rects_layer.left = 120.0
+    viewer.rects_layer.top = 80.0
+    viewer.zoom_scale = 1.0
+    viewer.mode_state.current = "SELECT"
+
+    class DummyDragStart:
+        local_x = 300
+        local_y = 300
+        
+    viewer._on_pan_start(DummyDragStart())
+    
+    screen_left = viewer.active_rect.left + viewer.rects_layer.left
+    screen_top = viewer.active_rect.top + viewer.rects_layer.top
+    
+    # Assert preview offset regression is fixed
+    assert screen_left == 300.0
+    assert screen_top == 300.0
+
+def test_regression_a_committed_bbox_unchanged(temp_images):
+    viewer = SelectableImageViewer(temp_images[0], 1000, 1000, 800, 800)
+    bypass_ui_updates(viewer)
+    page_mock = create_mock_page()
+    viewer.page = page_mock
+
+    viewer.offset_x = 120.0
+    viewer.offset_y = 80.0
+    viewer.rects_layer.left = 120.0
+    viewer.rects_layer.top = 80.0
+    viewer.zoom_scale = 1.0
+    viewer.mode_state.current = "SELECT"
+
+    class DummyDragStart:
+        local_x = 300
+        local_y = 300
+        
+    viewer._on_pan_start(DummyDragStart())
+    viewer.active_rect.update = MagicMock()
+    
+    class DummyDragUpdate:
+        local_x = 700
+        local_y = 650
+        
+    viewer._on_pan_update(DummyDragUpdate())
+    
+    class DummyDragEnd:
+        pass
+        
+    viewer._on_pan_end(DummyDragEnd())
+    
+    rects = viewer.selection_container.get_all()
+    assert len(rects) == 1
+    # Check exact committed bbox matches prior behaviour
+    assert rects[0].bbox == (180.0, 220.0, 580.0, 570.0)
+
+
+def test_batch_progress_counts_whole_folder(temp_images, monkeypatch):
+    import custom_gui.ocr_cache as ocr_cache
+    
+    # 5 images, 2 cached
+    paths = [f"tmp_{i}.jpg" for i in range(5)]
+    
+    def mock_is_cached(path):
+        return path in (paths[0], paths[1])
+        
+    monkeypatch.setattr(ocr_cache, "is_cached", mock_is_cached)
+    
+    viewer = SelectableImageViewer(paths[0], 100, 100, 800, 600)
+    bypass_ui_updates(viewer)
+    viewer.page = create_mock_page()
+    
+    # mock run_batch to capture progress updates
+    progress_calls = []
+    def mock_run_batch(candidate_paths, progress=None, should_cancel=None):
+        # 2 were cached, 3 left to do
+        progress(1, 3) # 1 finished this run
+        progress(2, 3) # 2 finished this run
+        progress(3, 3) # 3 finished this run
+        return BatchResult(ok=paths[2:], skipped=paths[:2], failed=[], cancelled=False)
+        
+    monkeypatch.setattr(batch_ocr, "run_batch", mock_run_batch)
+    
+    # Capture the values assigned to batch_progress
+    recorded_progress = []
+    original_setattr = viewer.__class__.__setattr__
+    def tracking_setattr(self, name, value):
+        if name == "batch_progress" and value is not None:
+            recorded_progress.append(value)
+        original_setattr(self, name, value)
+    
+    # Replace setattr for viewer class
+    SelectableImageViewer.__setattr__ = tracking_setattr
+    
+    try:
+        viewer.batch_running = True
+        viewer._run_batch_worker(paths)
+    finally:
+        SelectableImageViewer.__setattr__ = original_setattr
+    
+    print("Recorded progress:", recorded_progress)
+    
+    # Starts at 2/5 (initially_cached, total)
+    assert recorded_progress[0] == (2, 5)
+    
+    # Ends at 5/5
+    assert recorded_progress[-1] == (5, 5)
+
+
+def test_progress_bar_visibility_and_zoom(temp_images, monkeypatch):
+    import custom_gui.ocr_cache as ocr_cache
+    
+    paths = [f"tmp_{i}.jpg" for i in range(5)]
+    def mock_is_cached(path):
+        return False
+    monkeypatch.setattr(ocr_cache, "is_cached", mock_is_cached)
+    
+    viewer = SelectableImageViewer(paths[0], 2218, 3071, 1600, 900)
+    bypass_ui_updates(viewer)
+    viewer.batch_progress_bar.update = MagicMock()
+    viewer.page = create_mock_page()
+    
+    # Store initial zoom scale
+    initial_zoom = viewer.zoom_scale
+    
+    # Assert invisible before
+    assert viewer.batch_progress_bar.visible is False
+    
+    def mock_run_batch(candidate_paths, progress=None, should_cancel=None):
+        # Assert visible during
+        assert viewer.batch_progress_bar.visible is True
+        progress(1, 5)
+        # Assert value updates
+        assert viewer.batch_progress_bar.value == 1 / 5
+        return BatchResult(ok=paths[:5], skipped=[], failed=[], cancelled=False)
+        
+    monkeypatch.setattr(batch_ocr, "run_batch", mock_run_batch)
+    
+    viewer.batch_running = True
+    viewer._run_batch_worker(paths)
+    
+    # Assert invisible after
+    assert viewer.batch_progress_bar.visible is False
+    
+    # Assert zoom scale is unchanged
+    assert viewer.zoom_scale == initial_zoom
+
+
+def test_eta_and_progress_ring_during_batch(temp_images, monkeypatch):
+    import custom_gui.ocr_cache as ocr_cache
+    import time
+    
+    paths = [f"tmp_{i}.jpg" for i in range(5)]
+    def mock_is_cached(path):
+        return False
+    monkeypatch.setattr(ocr_cache, "is_cached", mock_is_cached)
+    
+    viewer = SelectableImageViewer(paths[0], 2218, 3071, 1600, 900)
+    bypass_ui_updates(viewer)
+    viewer.batch_progress_bar.update = MagicMock()
+    viewer.page = create_mock_page()
+    
+    original_time = time.time
+    
+    # Store initial progress ring state
+    assert viewer.progress_ring.visible is False
+    
+    time_calls = [1000.0, 1010.0]
+    time_idx = 0
+    def mock_time():
+        nonlocal time_idx
+        if time_idx < len(time_calls):
+            t = time_calls[time_idx]
+            time_idx += 1
+            return t
+        return time_calls[-1]
+    
+    monkeypatch.setattr(time, "time", mock_time)
+    
+    def mock_run_batch(candidate_paths, progress=None, should_cancel=None):
+        # Assert visible during
+        assert viewer.progress_ring.visible is True
+        
+        # At this point, time=1000.0 was called at batch_start.
+        # Now progress(1, 5) is called, which calls time.time() -> 1010.0
+        # Elapsed = 10s. done = 1. per_page = 10s. remaining = 4. remaining_secs = 40.
+        progress(1, 5)
+        
+        # Assert ETA string
+        status_msg = viewer._get_status_message()
+        assert "about 40 sec" in status_msg
+        
+        return BatchResult(ok=paths[:5], skipped=[], failed=[], cancelled=False)
+        
+    monkeypatch.setattr(batch_ocr, "run_batch", mock_run_batch)
+    
+    viewer.batch_running = True
+    viewer._run_batch_worker(paths)
+    
+    # Assert invisible after
+    assert viewer.progress_ring.visible is False
+
+
+def test_batch_button_label_and_tooltip(temp_images):
+    viewer = SelectableImageViewer(temp_images[0], 100, 100, 800, 600)
+    bypass_ui_updates(viewer)
+    
+    assert viewer.btn_batch_ocr.text == "Pre-OCR All"
+    assert viewer.btn_batch_ocr.icon == ft.Icons.DOCUMENT_SCANNER
+    
+    viewer.page = create_mock_page()
+    viewer.sequence._paths = temp_images
+    
+    # Mock run_thread to execute synchronously
+    def sync_run_thread(target, *args):
+        target(*args)
+        
+    viewer.page.run_thread = sync_run_thread
+    
+    import custom_gui.batch_ocr as batch_ocr
+    import custom_gui.ocr_cache as ocr_cache
+    
+    original_run_batch = batch_ocr.run_batch
+    
+    try:
+        def intercept_run_batch(*args, **kwargs):
+            # Assert text is Cancel during execution
+            assert viewer.btn_batch_ocr.text == "Cancel"
+            assert viewer.btn_batch_ocr.icon == ft.Icons.CANCEL
+            return BatchResult(ok=[], skipped=[], failed=[], cancelled=False)
+            
+        batch_ocr.run_batch = intercept_run_batch
+        
+        viewer._on_batch_ocr_click(MagicMock())
+        
+        # Assert restored to Pre-OCR All
+        assert viewer.btn_batch_ocr.text == "Pre-OCR All"
+        assert viewer.btn_batch_ocr.icon == ft.Icons.DOCUMENT_SCANNER
+        
+    finally:
+        batch_ocr.run_batch = original_run_batch
+
+
+def test_wait_for_lazy_ocr(temp_images):
+    viewer = SelectableImageViewer(temp_images[0], 100, 100, 800, 600)
+    bypass_ui_updates(viewer)
+    viewer.page = create_mock_page()
+    viewer.sequence._paths = temp_images
+    
+    # Mark temp_images[0] as RUNNING lazy OCR
+    viewer.image_states[temp_images[0]] = {"ocr_state": OcrState.RUNNING}
+    
+    # We will simulate time.sleep to break the loop or advance state
+    import time
+    original_sleep = time.sleep
+    
+    call_counts = {"run_batch_worker": 0}
+    
+    def mock_run_batch_worker(candidate_paths):
+        call_counts["run_batch_worker"] += 1
+        
+    viewer._run_batch_worker = mock_run_batch_worker
+    
+    sleep_cycles = 0
+    def mock_sleep(secs):
+        nonlocal sleep_cycles
+        sleep_cycles += 1
+        if sleep_cycles == 1:
+            # First cycle: test cancellation
+            pass
+        elif sleep_cycles == 2:
+            # Second cycle: state becomes DONE
+            viewer.image_states[temp_images[0]]["ocr_state"] = OcrState.DONE
+            
+    try:
+        time.sleep = mock_sleep
+        
+        # Scenario 1: Cancellation during wait
+        viewer._batch_cancel_requested = False
+        viewer._on_batch_ocr_click(MagicMock())
+        # Simulate click again to cancel
+        viewer._on_batch_ocr_click(MagicMock())
+        
+        # Assert never called _run_batch_worker because it was cancelled
+        # Wait, the thread loop runs synchronously in test since run_thread is mocked to run sync
+        # So we need the mock sleep to trigger the cancel!
+    finally:
+        time.sleep = original_sleep
+
+
+def test_wait_for_lazy_ocr(temp_images, monkeypatch):
+    import time
+    viewer = SelectableImageViewer(temp_images[0], 100, 100, 800, 600)
+    bypass_ui_updates(viewer)
+    viewer.page = create_mock_page()
+    viewer.sequence._paths = temp_images
+    
+    viewer.image_states[temp_images[0]] = {"ocr_state": OcrState.RUNNING}
+    
+    calls = {"worker": 0}
+    def mock_worker(paths):
+        calls["worker"] += 1
+    viewer._run_batch_worker = mock_worker
+    
+    sleep_count = 0
+    def mock_sleep(secs):
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count == 2:
+            viewer._batch_cancel_requested = True
+    
+    monkeypatch.setattr(time, "sleep", mock_sleep)
+    
+    # 1. Click should block in while loop, then cancel
+    viewer._on_batch_ocr_click(MagicMock())
+    
+    # Should not reach worker
+    assert calls["worker"] == 0
+    assert viewer.batch_running is False
+
+    # 2. Reset and wait for completion
+    sleep_count = 0
+    viewer._batch_cancel_requested = False
+    
+    def mock_sleep_complete(secs):
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count == 2:
+            viewer.image_states[temp_images[0]]["ocr_state"] = OcrState.DONE
+            
+    monkeypatch.setattr(time, "sleep", mock_sleep_complete)
+    
+    viewer._on_batch_ocr_click(MagicMock())
+    
+    # Should reach worker this time
+    assert calls["worker"] == 1
+    assert "waiting for the current page" in viewer.latest_region_info
+

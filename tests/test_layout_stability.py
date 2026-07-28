@@ -2,8 +2,11 @@ import pytest
 from custom_gui.app import SelectableImageViewer
 import os
 
-def test_layout_stability(monkeypatch):
-    image_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+def test_layout_stability(monkeypatch, tmp_path):
+    import shutil
+    src_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+    image_path = str(tmp_path / "digidepo_2531162_0024.jpg")
+    shutil.copy2(src_path, image_path)
     
     # ensure it doesn't crash on OCR
     monkeypatch.setattr("custom_gui.app.run_ocr_and_parse", lambda *args, **kwargs: [])
