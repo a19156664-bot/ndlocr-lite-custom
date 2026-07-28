@@ -43,7 +43,7 @@ if __name__ == '__main__':
     test_flet_constants_exist()
     print("Test passed!")
 
-def test_no_reserved_property_shadowing():
+def test_no_reserved_property_shadowing(tmp_path):
     """
     Checks that no custom classes that inherit from a Flet Control
     assign an instance attribute with the same name as a Flet property,
@@ -52,6 +52,11 @@ def test_no_reserved_property_shadowing():
     import inspect
     from unittest.mock import patch
     import sys
+    import shutil
+    
+    src_img = "resource/digidepo_2531162_0024.jpg"
+    test_img = str(tmp_path / "digidepo_2531162_0024.jpg")
+    shutil.copy2(src_img, test_img)
     
     # We must patch OCR to prevent it from running when instantiating viewers
     with patch("custom_gui.app.run_ocr_and_parse") as mock_ocr:
@@ -61,8 +66,8 @@ def test_no_reserved_property_shadowing():
         from custom_gui.app import SelectableImageViewer
         
         # Instantiate to get the runtime instance attributes populated
-        viewer1 = ImageViewer("resource/digidepo_2531162_0024.jpg", 100, 100, 100, 100)
-        viewer2 = SelectableImageViewer("resource/digidepo_2531162_0024.jpg", 100, 100, 100, 100)
+        viewer1 = ImageViewer(test_img, 100, 100, 100, 100)
+        viewer2 = SelectableImageViewer(test_img, 100, 100, 100, 100)
         
         errors = []
         

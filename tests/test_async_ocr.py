@@ -9,8 +9,11 @@ def test_ocr_status_text_generation():
     assert get_ocr_status_text(OcrState.ERROR) == "OCR failed"
     assert get_ocr_status_text(OcrState.DONE, 26) == "Lines: 26"
 
-def test_viewer_init_does_not_run_ocr(monkeypatch):
-    image_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+def test_viewer_init_does_not_run_ocr(monkeypatch, tmp_path):
+    import shutil
+    src_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+    image_path = str(tmp_path / "digidepo_2531162_0024.jpg")
+    shutil.copy2(src_path, image_path)
     assert os.path.exists(image_path), f"Test image not found at {image_path}"
 
     def fake_run_ocr(*args, **kwargs):
@@ -28,8 +31,11 @@ def test_viewer_init_does_not_run_ocr(monkeypatch):
     # Assert state is IDLE since the image exists
     assert viewer.ocr_state == OcrState.IDLE
 
-def test_update_selections_ui_no_crash_with_empty_ocr(monkeypatch):
-    image_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+def test_update_selections_ui_no_crash_with_empty_ocr(monkeypatch, tmp_path):
+    import shutil
+    src_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+    image_path = str(tmp_path / "digidepo_2531162_0024.jpg")
+    shutil.copy2(src_path, image_path)
     assert os.path.exists(image_path), f"Test image not found at {image_path}"
 
     monkeypatch.setattr("custom_gui.app.run_ocr_and_parse", lambda *args: [])
@@ -50,8 +56,11 @@ def test_update_selections_ui_no_crash_with_empty_ocr(monkeypatch):
     assert len(viewer.highlight_layer.controls) == 0
     assert viewer.ocr_state == OcrState.IDLE
 
-def test_on_ocr_complete_success(monkeypatch):
-    image_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+def test_on_ocr_complete_success(monkeypatch, tmp_path):
+    import shutil
+    src_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+    image_path = str(tmp_path / "digidepo_2531162_0024.jpg")
+    shutil.copy2(src_path, image_path)
     assert os.path.exists(image_path), f"Test image not found at {image_path}"
 
     monkeypatch.setattr("custom_gui.app.run_ocr_and_parse", lambda *args: [])
@@ -79,8 +88,11 @@ def test_on_ocr_complete_success(monkeypatch):
     status_msg = viewer._get_status_message()
     assert "Lines: 2" in status_msg
 
-def test_on_ocr_complete_error(monkeypatch):
-    image_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+def test_on_ocr_complete_error(monkeypatch, tmp_path):
+    import shutil
+    src_path = os.path.join("resource", "digidepo_2531162_0024.jpg")
+    image_path = str(tmp_path / "digidepo_2531162_0024.jpg")
+    shutil.copy2(src_path, image_path)
     assert os.path.exists(image_path), f"Test image not found at {image_path}"
 
     monkeypatch.setattr("custom_gui.app.run_ocr_and_parse", lambda *args: [])
