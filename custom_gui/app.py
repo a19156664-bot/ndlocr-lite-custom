@@ -45,6 +45,8 @@ class SelectableImageViewer(ImageViewer):
         super().__init__(image_src, img_w, img_h, available_w, available_h, **kwargs)
         
         self.ocr_scheduler = OcrScheduler()
+        import threading
+        self.selections_lock = threading.RLock()
         
         # New state variables for per-image state
         self.image_states = {}
@@ -406,10 +408,25 @@ class SelectableImageViewer(ImageViewer):
         if self.page:
             self.status_row.update()
             
-        # Refresh current image
+        # Refresh current image state safely
         if self.image_src and self.image_src not in self.pdf_page_map:
-            # Re-run the switch logic for the current image
-            self._switch_image(self.image_src)
+            state = self.image_states.get(self.image_src)
+            if state and state["ocr_state"] in (OcrState.IDLE, OcrState.WAITING):
+                try:
+                    cached_results = ocr_cache.load_cache(self.image_src)
+                    if cached_results is not None:
+                        state["ocr_results"] = cached_results
+                        state["ocr_state"] = OcrState.DONE
+                        self.ocr_results = cached_results
+                        self.ocr_state = OcrState.DONE
+                        self.progress_ring.visible = False
+                        if hasattr(self, 'status_text'):
+                            self.status_text.value = self._get_status_message()
+                        if getattr(self, 'page', None) and getattr(self.status_text, 'page', None):
+                            self.status_row.update()
+                        self._update_selections_ui()
+                except Exception:
+                    pass
 
     def _on_batch_ocr_click(self, e):
         if self.batch_running:
@@ -810,8 +827,12 @@ class SelectableImageViewer(ImageViewer):
             self.image_control.top = self.offset_y
             self.drag_current_point = (end_x, end_y)
             
+            self.highlight_layer.left = self.offset_x
+            self.highlight_layer.top = self.offset_y
+            self.rects_layer.left = self.offset_x
+            self.rects_layer.top = self.offset_y
+            
             self._update_viewer()
-            self._update_selections_ui()
 
     def _on_pan_end(self, e: ft.DragEndEvent):
         if not self.drag_start_point:
@@ -841,173 +862,179 @@ class SelectableImageViewer(ImageViewer):
         self.drag_current_point = None
 
     def _update_selections_ui(self):
-        # Update drawn rectangles
-        self.rects_layer.controls.clear()
-        self.highlight_layer.controls.clear()
-        self.selections_list.controls.clear()
+        with self.selections_lock:
+            self.highlight_layer.left = self.offset_x
+            self.highlight_layer.top = self.offset_y
+            self.rects_layer.left = self.offset_x
+            self.rects_layer.top = self.offset_y
+            
+            # Update drawn rectangles
+            self.rects_layer.controls.clear()
+            self.highlight_layer.controls.clear()
+            self.selections_list.controls.clear()
         
-        all_rects = self.selection_container.get_all()
+            all_rects = self.selection_container.get_all()
         
-        # Ensure active_region_id actually exists, if not reset it to the latest
-        if self.active_region_id not in [r.rect_id for r in all_rects]:
-            self.active_region_id = all_rects[-1].rect_id if all_rects else None
+            # Ensure active_region_id actually exists, if not reset it to the latest
+            if self.active_region_id not in [r.rect_id for r in all_rects]:
+                self.active_region_id = all_rects[-1].rect_id if all_rects else None
             
-        for rect in all_rects:
-            x1, y1, x2, y2 = rect.bbox
-            dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, self.offset_x, self.offset_y)
-            dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, self.offset_x, self.offset_y)
+            for rect in all_rects:
+                x1, y1, x2, y2 = rect.bbox
+                dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, 0.0, 0.0)
+                dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, 0.0, 0.0)
             
-            w = dx2 - dx1
-            h = dy2 - dy1
+                w = dx2 - dx1
+                h = dy2 - dy1
             
-            drawn_rect = ft.Container(
-                border=ft.border.all(2, ft.Colors.BLUE),
-                bgcolor=ft.Colors.TRANSPARENT,
-                left=dx1,
-                top=dy1,
-                width=w,
-                height=h
-            )
-            self.rects_layer.controls.append(drawn_rect)
-            
-            label_height = 20.0  # Estimated height of the label
-            label_left, label_top = calculate_label_position(dx1, dy1, label_height)
-            
-            label_container = ft.Container(
-                content=ft.Text(rect.label, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, size=14),
-                bgcolor=ft.Colors.with_opacity(0.7, ft.Colors.BLUE),
-                padding=ft.padding.symmetric(horizontal=4, vertical=2),
-                border_radius=2,
-                left=label_left,
-                top=label_top,
-            )
-            self.rects_layer.controls.append(label_container)
-            
-            # 抽出対象の行をフィルタリングしてハイライト & テキスト生成
-            filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
-            extracted_text = assemble_text(filtered_lines)
-            
-            # ハイライト層に抽出行の矩形を描画
-            for line in filtered_lines:
-                lx1, ly1, lx2, ly2 = line["bbox"]
-                ldx1, ldy1 = original_to_display(lx1, ly1, self.zoom_scale, self.offset_x, self.offset_y)
-                ldx2, ldy2 = original_to_display(lx2, ly2, self.zoom_scale, self.offset_x, self.offset_y)
-                
-                # Selection Rectと区別するため黄色系の半透明塗りつぶし (borderなし)
-                highlight = ft.Container(
-                    bgcolor=ft.Colors.with_opacity(0.4, ft.Colors.YELLOW),
-                    left=ldx1,
-                    top=ldy1,
-                    width=ldx2 - ldx1,
-                    height=ldy2 - ldy1
+                drawn_rect = ft.Container(
+                    border=ft.border.all(2, ft.Colors.BLUE),
+                    bgcolor=ft.Colors.TRANSPARENT,
+                    left=dx1,
+                    top=dy1,
+                    width=w,
+                    height=h
                 )
-                self.highlight_layer.controls.append(highlight)
+                self.rects_layer.controls.append(drawn_rect)
             
-            # Update list (結果パネル)
-            def delete_rect(e, rid=rect.rect_id):
-                self.selection_container.delete_by_id(rid)
-                if rid in self.edits:
-                    del self.edits[rid]
-                if self.active_region_id == rid:
-                    self.active_region_id = None
-                if self.editing_region_id == rid:
-                    self.editing_region_id = None
-                self._update_selections_ui()
+                label_height = 20.0  # Estimated height of the label
+                label_left, label_top = calculate_label_position(dx1, dy1, label_height)
+            
+                label_container = ft.Container(
+                    content=ft.Text(rect.label, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, size=14),
+                    bgcolor=ft.Colors.with_opacity(0.7, ft.Colors.BLUE),
+                    padding=ft.padding.symmetric(horizontal=4, vertical=2),
+                    border_radius=2,
+                    left=label_left,
+                    top=label_top,
+                )
+                self.rects_layer.controls.append(label_container)
+            
+                # 抽出対象の行をフィルタリングしてハイライト & テキスト生成
+                filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
+                extracted_text = assemble_text(filtered_lines)
+            
+                # ハイライト層に抽出行の矩形を描画
+                for line in filtered_lines:
+                    lx1, ly1, lx2, ly2 = line["bbox"]
+                    ldx1, ldy1 = original_to_display(lx1, ly1, self.zoom_scale, 0.0, 0.0)
+                    ldx2, ldy2 = original_to_display(lx2, ly2, self.zoom_scale, 0.0, 0.0)
                 
-            def edit_rect(e, rid=rect.rect_id):
-                self.active_region_id = rid
-                self.editing_region_id = rid
-                self._update_selections_ui()
-                
-            def commit_edit(e, rid=rect.rect_id, text_field=None):
-                self.edits[rid] = text_field.value
-                self.editing_region_id = None
-                self._update_selections_ui()
-                
-            def cancel_edit(e, rid=rect.rect_id):
-                self.editing_region_id = None
-                self._update_selections_ui()
-                
-            def restore_rect(e, rid=rect.rect_id):
-                if rid in self.edits:
-                    del self.edits[rid]
-                self._update_selections_ui()
-                
-            def make_active(e, rid=rect.rect_id):
-                if self.active_region_id != rid:
-                    self.active_region_id = rid
-                    self._update_selections_ui()
-
-            has_edit = rect.rect_id in self.edits
-            display_text = self.edits[rect.rect_id] if has_edit else extracted_text
-            label_suffix = " (edited)" if has_edit else ""
-
-            def rtl_rect(e, rid=rect.rect_id, current_text=display_text, orig_text=extracted_text):
-                if not current_text:
-                    return
-                converted = convert_right_to_left(current_text)
-                if converted == orig_text:
+                    # Selection Rectと区別するため黄色系の半透明塗りつぶし (borderなし)
+                    highlight = ft.Container(
+                        bgcolor=ft.Colors.with_opacity(0.4, ft.Colors.YELLOW),
+                        left=ldx1,
+                        top=ldy1,
+                        width=ldx2 - ldx1,
+                        height=ldy2 - ldy1
+                    )
+                    self.highlight_layer.controls.append(highlight)
+            
+                # Update list (結果パネル)
+                def delete_rect(e, rid=rect.rect_id):
+                    self.selection_container.delete_by_id(rid)
                     if rid in self.edits:
                         del self.edits[rid]
-                else:
-                    self.edits[rid] = converted
-                self._update_selections_ui()
-
-            is_active = (self.active_region_id == rect.rect_id)
-            is_editing = (self.editing_region_id == rect.rect_id)
-
-            if is_editing:
-                tf = ft.TextField(
-                    value=display_text,
-                    multiline=True,
-                    autofocus=True
-                )
-                content_area = ft.Column([
-                    tf,
-                    ft.Row([
-                        ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save (Commit)", on_click=lambda e, rid=rect.rect_id, tf=tf: commit_edit(e, rid, tf)),
-                        ft.IconButton(icon=ft.Icons.CANCEL, tooltip="Cancel", on_click=cancel_edit)
-                    ])
-                ])
-            else:
-                content_area = ft.Text(display_text, selectable=True)
+                    if self.active_region_id == rid:
+                        self.active_region_id = None
+                    if self.editing_region_id == rid:
+                        self.editing_region_id = None
+                    self._update_selections_ui()
                 
-            buttons = [
-                ft.IconButton(icon=ft.Icons.EDIT, tooltip="Edit", on_click=edit_rect),
-                ft.IconButton(icon=ft.Icons.SWAP_HORIZ, tooltip="右から変換", on_click=rtl_rect)
-            ]
-            if has_edit:
-                buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
-            buttons.append(ft.IconButton(icon=ft.Icons.DELETE, tooltip="Delete", on_click=delete_rect))
+                def edit_rect(e, rid=rect.rect_id):
+                    self.active_region_id = rid
+                    self.editing_region_id = rid
+                    self._update_selections_ui()
+                
+                def commit_edit(e, rid=rect.rect_id, text_field=None):
+                    self.edits[rid] = text_field.value
+                    self.editing_region_id = None
+                    self._update_selections_ui()
+                
+                def cancel_edit(e, rid=rect.rect_id):
+                    self.editing_region_id = None
+                    self._update_selections_ui()
+                
+                def restore_rect(e, rid=rect.rect_id):
+                    if rid in self.edits:
+                        del self.edits[rid]
+                    self._update_selections_ui()
+                
+                def make_active(e, rid=rect.rect_id):
+                    if self.active_region_id != rid:
+                        self.active_region_id = rid
+                        self._update_selections_ui()
 
-            item_content = ft.Column([
-                ft.Row([
-                    ft.Text(f"{rect.label}{label_suffix}:", weight=ft.FontWeight.BOLD),
-                    ft.Row(buttons, spacing=0)
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                content_area
-            ])
-            
-            border_color = ft.Colors.GREEN if is_active else ft.Colors.OUTLINE
-            border_width = 2 if is_active else 1
-            item = ft.Container(
-                content=item_content,
-                padding=10,
-                border=ft.border.all(border_width, border_color),
-                border_radius=5,
-                on_click=make_active
-            )
-            
-            self.selections_list.controls.append(item)
-            
-        def _safe_update(control):
-            if control is not None and control.page:
-                control.update()
+                has_edit = rect.rect_id in self.edits
+                display_text = self.edits[rect.rect_id] if has_edit else extracted_text
+                label_suffix = " (edited)" if has_edit else ""
 
-        if self.page:
-            _safe_update(self.highlight_layer)
-            _safe_update(self.rects_layer)
-            self.selections_list.update()
+                def rtl_rect(e, rid=rect.rect_id, current_text=display_text, orig_text=extracted_text):
+                    if not current_text:
+                        return
+                    converted = convert_right_to_left(current_text)
+                    if converted == orig_text:
+                        if rid in self.edits:
+                            del self.edits[rid]
+                    else:
+                        self.edits[rid] = converted
+                    self._update_selections_ui()
+
+                is_active = (self.active_region_id == rect.rect_id)
+                is_editing = (self.editing_region_id == rect.rect_id)
+
+                if is_editing:
+                    tf = ft.TextField(
+                        value=display_text,
+                        multiline=True,
+                        autofocus=True
+                    )
+                    content_area = ft.Column([
+                        tf,
+                        ft.Row([
+                            ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save (Commit)", on_click=lambda e, rid=rect.rect_id, tf=tf: commit_edit(e, rid, tf)),
+                            ft.IconButton(icon=ft.Icons.CANCEL, tooltip="Cancel", on_click=cancel_edit)
+                        ])
+                    ])
+                else:
+                    content_area = ft.Text(display_text, selectable=True)
+                
+                buttons = [
+                    ft.IconButton(icon=ft.Icons.EDIT, tooltip="Edit", on_click=edit_rect),
+                    ft.IconButton(icon=ft.Icons.SWAP_HORIZ, tooltip="右から変換", on_click=rtl_rect)
+                ]
+                if has_edit:
+                    buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
+                buttons.append(ft.IconButton(icon=ft.Icons.DELETE, tooltip="Delete", on_click=delete_rect))
+
+                item_content = ft.Column([
+                    ft.Row([
+                        ft.Text(f"{rect.label}{label_suffix}:", weight=ft.FontWeight.BOLD),
+                        ft.Row(buttons, spacing=0)
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    content_area
+                ])
+            
+                border_color = ft.Colors.GREEN if is_active else ft.Colors.OUTLINE
+                border_width = 2 if is_active else 1
+                item = ft.Container(
+                    content=item_content,
+                    padding=10,
+                    border=ft.border.all(border_width, border_color),
+                    border_radius=5,
+                    on_click=make_active
+                )
+            
+                self.selections_list.controls.append(item)
+            
+            def _safe_update(control):
+                if control is not None and control.page:
+                    control.update()
+
+            if self.page:
+                _safe_update(self.highlight_layer)
+                _safe_update(self.rects_layer)
+                self.selections_list.update()
 
 
     def _update_viewer(self):
@@ -1023,9 +1050,14 @@ class SelectableImageViewer(ImageViewer):
             self.stack.height = self.img_h * self.zoom_scale
         if hasattr(self, 'status_text'):
             self.status_text.value = self._get_status_message()
-            if self.page:
+            if getattr(self, 'page', None) and getattr(self.status_text, 'page', None):
                 self.status_text.update()
-        self._update_selections_ui()
+        
+        if getattr(self, 'page', None):
+            if getattr(self.highlight_layer, 'page', None):
+                self.highlight_layer.update()
+            if getattr(self.rects_layer, 'page', None):
+                self.rects_layer.update()
 
 def main(page: ft.Page):
     from PIL import Image
