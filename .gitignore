@@ -11,3 +11,7 @@
 /4ab7ecc3-53fb-b3e7-64e8-a809b5a483d2/
 **/.venv/**
 .ndlocr_cache/
+
+# 動作確認で resource/ に出力される CSV / TXT（NDL 由来のファイルは .jpg .png .xml .gif のみ）
+resource/*.csv
+resource/*.txt
