@@ -1,0 +1,298 @@
+Task 36: [FEATURE] 広告 and 表紙 buttons - stamp a page as an advertisement or a cover
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+This task builds DIRECTLY on Task 35. Task 35 introduced custom_gui/save_paths.py
+and removed the save dialog. Do not start until Task 35 is on master; if
+`custom_gui/save_paths.py` does not exist in your checkout, STOP and report it.
+
+================================================================================
+1. WHAT THE USER ASKED FOR
+================================================================================
+    "③ 広告ボタンを作成してください。
+        広告ボタン機能：画像名（TAB）【広告】を出力。【広告】は固定文字です。
+     ④ 表紙ボタンを作成してください。
+        表紙ボタン機能：画像名（TAB）【表紙】を出力。【表紙】は固定文字です。"
+
+The user proof-reads a scanned magazine page by page. Most pages get regions
+drawn and OCR text corrected. But an advertisement page or a cover page has
+nothing worth extracting - the user only wants ONE line recorded for it so the
+final list has no gaps.
+
+The user chose "the button writes to the file the moment it is pressed".
+
+The commander added one thing on top, because writing only to the file loses
+the information:
+
+    An advertisement page has NO rectangles, so `_collect_all_export_pages`
+    skips it, so it would never appear in the all-pages export. The stamp must
+    therefore ALSO be remembered in the page's state, and the all-pages export
+    must include stamped pages.
+
+================================================================================
+2. THE FIXED STRINGS
+================================================================================
+    広告 button  ->  "【広告】"
+    表紙 button  ->  "【表紙】"
+
+Those are the exact characters, including the black lenticular brackets
+U+3010 and U+3011. They are FIXED - never derived from OCR, never edited by
+the user, never translated, never configurable.
+
+A stamped line is exactly:
+
+    <image basename>\t【広告】
+
+one TAB (U+0009), no spaces around it, terminated by a single "\n". The image
+name is the basename with its extension, the same string
+`build_export_rows` puts in "image_name" - for a PDF page it is the rendered
+page's PNG basename, exactly as the CSV already records it.
+
+================================================================================
+3. DELIVERABLES
+================================================================================
+[A] A new pure module: custom_gui/page_marks.py
+
+    No flet, no GUI. Small enough to test exhaustively.
+
+        MARK_AD    = "【広告】"
+        MARK_COVER = "【表紙】"
+
+        def mark_line(image_name, mark) -> str
+            Returns "<basename>\t<mark>" with NO trailing newline.
+            image_name may be a full path; take the basename, and handle a
+            Windows path with backslashes the way exporter.build_export_rows
+            already does (`image_name.replace('\\', '/')`).
+
+        def append_mark_line(txt_path, line) -> bool
+            Appends line + "\n" to txt_path as utf-8, creating the file if it
+            does not exist. Returns True if it wrote, and False if the exact
+            same line is ALREADY present in the file - in which case it must
+            NOT write anything. This is the double-press guard: the user will
+            press the button twice by accident and must not get two identical
+            lines.
+            Comparison is against the file's lines with their trailing
+            newlines stripped, exact match, no normalisation.
+            The parent directory is assumed to exist; let an OSError
+            propagate.
+
+[B] Two toolbar buttons
+
+        ft.TextButton("広告")  tooltip "このページを【広告】として記録"
+        ft.TextButton("表紙")  tooltip "このページを【表紙】として記録"
+
+    Place them immediately after the two save icons Task 35 added. Keep them
+    as attributes `self.btn_mark_ad` and `self.btn_mark_cover` so tests can
+    find them.
+
+[C] Pressing a button does THREE things, in this order
+
+        1. Remember the stamp:
+               self.mark = "【広告】"
+           and store it in the current image's entry of `self.image_states`
+           under the key "mark", so it survives switching pages and coming
+           back. `_switch_image` must save and restore it exactly the way it
+           already saves and restores "selections", "ocr_results" and "edits".
+           A page that was never stamped has mark None.
+
+        2. Append to the file, immediately, with no dialog:
+               csv_path, txt_path = export_targets(self.image_src, "current",
+                                                   pdf_source)
+               wrote = append_mark_line(txt_path, mark_line(self.image_src, mark))
+           `pdf_source` is resolved exactly as Task 35 resolves it: the first
+           element of `self.pdf_page_map[self.image_src]` when the current
+           image is a PDF page, otherwise None. So a PDF page's line lands
+           next to the SOURCE PDF, never in the temp folder.
+
+        3. Report in the status line - NOT in a dialog:
+               wrote is True   -> "【広告】を <txt file name> に記録しました"
+               wrote is False  -> "【広告】は既に記録済みです"
+               OSError         -> "記録できませんでした: <the error>"
+           A modal every time would be unbearable when stamping a run of
+           advertisement pages. Do not open an ft.AlertDialog here.
+
+    Pressing 広告 on a page already stamped 表紙 replaces the stamp with
+    【広告】 and appends the 【広告】 line; it does NOT remove the 【表紙】 line
+    already written to the file. Removing a line from a file is out of scope.
+
+[D] The stamp is visible
+
+    While the current page is stamped, show the stamp text at the top of the
+    right hand panel, above the region list, as
+    ft.Text("【広告】", weight=ft.FontWeight.BOLD). When the page has no
+    stamp, show nothing there. Keep it as `self.mark_label` so a test can read
+    it. It must update when the page is stamped and when the user switches to
+    another page.
+
+[E] The all-pages export includes stamped pages
+
+    `_collect_all_export_pages` today skips any image with no rectangles.
+    Change it so that an image with NO rectangles but WITH a mark is included,
+    contributing exactly one row:
+
+        {"image_name": <path>, "region_id": "mark", "x1": 0, "y1": 0,
+         "x2": 0, "y2": 0, "line_count": 0, "text": "【広告】"}
+
+    so the TXT line is "<name>\t【広告】" and the CSV gets one row with the
+    fixed string in its text column. An image with rectangles AND a mark
+    keeps its rectangles and gets the mark row FIRST, before its regions - the
+    stamp describes the whole page.
+
+    A stamped page with no rectangles must NOT be counted as "skipped: OCR not
+    finished", and must NOT require OCR to have run. Stamping is independent
+    of OCR - the user stamps advertisement pages precisely so they never have
+    to OCR them.
+
+    Do this by building the rows in app.py. Do NOT change
+    custom_gui/exporter.py, and do NOT change the signature or behaviour of
+    build_export_rows or build_export_rows_multi.
+
+[F] The per-page save is consistent with the stamp
+
+    When the current page is stamped and the user presses "このページを保存",
+    the written TXT must contain the "<name>\t【広告】" line too - reuse the
+    same row-building rule as [E]. Otherwise saving the page would overwrite
+    the file and silently delete the line the button had appended. This is the
+    single most important regression in this task: WRITE A TEST FOR IT.
+
+================================================================================
+4. DEFINITION OF DONE
+================================================================================
+[1] Two buttons labelled 広告 and 表紙 in the toolbar.
+[2] Pressing one appends "<image name>\t【広告】" (or 【表紙】) to the page's
+    TXT target immediately, with no dialog.
+[3] Pressing the same button twice appends only ONE line.
+[4] For a PDF page the line lands beside the source PDF.
+[5] The stamp survives switching pages and coming back.
+[6] The all-pages export contains a line for a stamped page that has no
+    rectangles and no OCR.
+[7] Saving a stamped page does not lose the stamp line.
+[8] `python -m pytest tests/ -v` passes completely (Task 35's count or more).
+
+================================================================================
+5. TESTS
+================================================================================
+Create TWO new files. Do not edit any existing test file.
+
+5.1 tests/test_page_marks.py - pure, fast
+    mark_line for "a/b/foo.jpg", for "C:\\scan\\foo.jpg", and for a bare
+    "foo.jpg"; exactly one TAB in the result; no trailing newline.
+    append_mark_line against a missing file, an existing file with other
+    content, the same line already present (returns False and the file is
+    byte-identical afterwards), and a file whose last line has no trailing
+    newline.
+
+5.2 tests/test_mark_buttons.py - drives the REAL viewer
+    Real image built with Pillow under tmp_path. Monkeypatch
+    `custom_gui.app.run_ocr_and_parse`. No real OCR. Find controls by walking
+    the real control tree.
+
+    Do NOT replace `self.selections_list`, `self.rects_layer`,
+    `self.highlight_layer`, `self.selection_container` or the toolbar row with
+    MagicMock. Six tests in this project's history could not detect the bug
+    they were written for, every one of them because the thing under test was
+    a mock. A test that cannot fail is worthless.
+
+    (a) The toolbar contains a TextButton with text "広告" and one with "表紙".
+    (b) Firing the 広告 button's on_click writes <stem>.txt containing exactly
+        one line, "<image>.jpg\t【広告】". No dialog was opened
+        (`viewer._save_dialog` is still None).
+    (c) Firing it a second time leaves the file byte-identical, and the status
+        message says 既に記録済み.
+    (d) Firing 表紙 after 広告: the file has TWO lines, the second is 【表紙】,
+        and `viewer.mark` is now "【表紙】".
+    (e) The stamp survives: stamp page 1, switch to page 2, switch back, and
+        `viewer.mark` is "【広告】" again while page 2's mark is None.
+        `viewer.mark_label.value` follows.
+    (f) A PDF page: put the image under a fake temp dir, register
+        `viewer.pdf_page_map[img] = ("<tmp>/src/book.pdf", 0)`, fire 広告, and
+        assert the line landed in "<tmp>/src/", NOT next to the PNG.
+    (g) All-pages export with TWO images: image 1 has a region with OCR done,
+        image 2 has NO region and NO OCR but is stamped 広告. The exported TXT
+        has TWO lines and image 2's line is "<image2>.jpg\t【広告】". Nothing
+        reports image 2 as skipped.
+    (h) [F], the regression that matters: stamp the current page, then run the
+        per-page save, then read the TXT back - the 【広告】 line is still
+        there.
+
+    For (b), (c), (g) and (h) you MUST prove the test can fail: break the code
+    deliberately, paste the FAILING pytest output, restore the code, and paste
+    the passing output. State exactly what you broke.
+
+================================================================================
+6. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/app.py
+          custom_gui/page_marks.py        (new)
+          tests/test_page_marks.py        (new)
+          tests/test_mark_buttons.py      (new)
+    - Do NOT modify ANY existing file under tests/. If an existing test fails,
+      STOP and report which one and what it expects. Do not edit it, do not
+      weaken it, do not delete it.
+    - Do NOT change custom_gui/exporter.py or custom_gui/save_paths.py.
+    - tests/test_flet_constants.py is a guard test: if it objects to your
+      code, CHANGE YOUR CODE. NEVER add an exemption. A local variable named
+      `page` WILL collide with it.
+    - NEVER name an attribute `self.image` or `self.scale`. Both are reserved
+      by flet and previously caused a fatal startup crash here. `self.mark` is
+      safe - the commander checked that ft.Control has no `mark`. If your
+      chosen name collides with a flet property, rename YOUR attribute.
+    - Do NOT undo Task 30c, 30d, 32, 33b or 35: the RLock around
+      _update_selections_ui, the layers carrying the pan offset, the offset
+      subtraction in _on_pan_start/_on_pan_update, the batch worker not
+      calling _switch_image, Pre-OCR All with its progress bar, Enter
+      committing the right hand panel edit, the inline editor layer sitting
+      ABOVE self.gesture_detector in every stack construction, the two save
+      icons, the dialog-free save and the "[改行 N]" header must all stay
+      exactly as they are.
+    - Do not make event handlers async. flet dispatches every non-async
+      handler on a thread pool without serialising them; changing that model
+      is out of scope and dangerous.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. FIVE previous tasks left probe files at
+      the repository root - one left TWENTY - and the commander had to delete
+      them by hand.
+
+================================================================================
+7. OUT OF SCOPE
+================================================================================
+    - Removing a stamp, or removing a line already written to a file.
+    - Any stamp other than 【広告】 and 【表紙】, or a way to define new ones.
+    - Persisting the stamp to disk so it survives an app restart. The stamp
+      lives in memory for this session; the FILE is what persists. A later
+      task will persist rectangles, corrections and stamps together.
+    - A keyboard shortcut for stamping.
+    - Auto-detecting advertisement pages.
+    - Changing the CSV columns, the TXT separator, or the encodings.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+8. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard
+      test objects, change your code. If you believe a guard test is genuinely
+      wrong, STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+================================================================================
+9. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[8] to how you satisfied it.
+    2. The failing output for tests (b), (c), (g) and (h) against deliberately
+       broken code, what you broke in each case, and the passing output after
+       restoring it.
+    3. The exact bytes of the line your code appends, shown with the TAB
+       visible.
+    4. Where in `_switch_image` you save and restore the mark.
+    5. How the all-pages export builds the mark row without touching
+       exporter.py.
+    6. The list of changed and added files with the reason for each.
+    7. The output of `git status` showing no stray files.
+    8. The full output of `python -m pytest tests/ -v`.
+    9. State explicitly that the real button clicks cannot be verified without
+       a GUI - the commander will confirm them on the real application.
+   10. Open questions or compromises. Write "none" if there are none.
