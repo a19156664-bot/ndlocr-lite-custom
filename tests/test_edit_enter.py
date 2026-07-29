@@ -132,7 +132,7 @@ def test_e_revert_button_and_suffix(dummy_app):
         return None, None
         
     title_text, btn_row = find_item_controls(dummy_app)
-    assert title_text.endswith("(edited):")
+    assert title_text == "Region 1 (edited) [改行 0]:"
     has_restore = False
     if btn_row:
         for b in btn_row.controls:

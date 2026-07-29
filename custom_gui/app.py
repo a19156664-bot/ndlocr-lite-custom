@@ -15,6 +15,8 @@ import custom_gui.batch_ocr as batch_ocr
 from enum import Enum, auto
 
 from custom_gui.ocr_scheduler import OcrScheduler
+from custom_gui.save_paths import export_targets
+from custom_gui.region_stats import count_line_breaks
 
 class OcrState(Enum):
     IDLE = auto()
@@ -130,18 +132,23 @@ class SelectableImageViewer(ImageViewer):
         self.controls_row.controls.insert(0, self.btn_open_pdf)
         self.controls_row.controls.insert(0, self.btn_open_folder)
 
-        self.export_button = ft.PopupMenuButton(
+        self.save_page_button = ft.IconButton(
             icon=ft.Icons.SAVE,
-            tooltip="Export Results",
-            items=[
-                ft.PopupMenuItem(text="Current image only", on_click=lambda e: self._start_export("current")),
-                ft.PopupMenuItem(text="All images", on_click=lambda e: self._start_export("all")),
-            ]
+            tooltip="このページを保存 (Save this page)",
+            on_click=lambda e: self._start_export("current")
         )
-        self.controls_row.controls.append(self.export_button)
+        self.save_all_button = ft.IconButton(
+            icon=ft.Icons.SAVE_ALT,
+            tooltip="全ページを保存 (Save all pages)",
+            on_click=lambda e: self._start_export("all")
+        )
+        self.controls_row.controls.append(self.save_page_button)
+        self.controls_row.controls.append(self.save_all_button)
         
         self._export_scope = "current"
-        self._file_picker_mode = "save"
+        self._save_dialog = None
+        
+        self._file_picker_mode = "folder"
         self.file_picker = ft.FilePicker(on_result=self._on_file_picker_result)
         # The file_picker will be added to page.overlay when start_ocr or main runs,
         # but to be safe, we'll try to add it when the component is mounted (using did_mount) 
@@ -736,15 +743,119 @@ class SelectableImageViewer(ImageViewer):
                 self._update_status()
                 return
             
-        default_filename = f"{os.path.splitext(os.path.basename(self.image_src))[0]}.csv"
+        pdf_source = None
+        if self.image_src in self.pdf_page_map:
+            pdf_source = self.pdf_page_map[self.image_src][0]
+            
+        csv_path, txt_path = export_targets(self.image_src, scope, pdf_source)
         
-        self._file_picker_mode = "save"
+        if os.path.exists(csv_path) or os.path.exists(txt_path):
+            self._show_overwrite_dialog(scope, csv_path, txt_path)
+        else:
+            self._do_write_and_show_done(scope, csv_path, txt_path)
+
+    def _show_overwrite_dialog(self, scope, csv_path, txt_path):
+        def on_cancel(e):
+            if self.page:
+                self.page.close(self._save_dialog)
+            self._save_dialog = None
+            self.latest_region_info = "Export cancelled"
+            self._update_status()
+            
+        def on_overwrite(e):
+            if self.page:
+                self.page.close(self._save_dialog)
+            self._save_dialog = None
+            self._do_write_and_show_done(scope, csv_path, txt_path)
+            
+        exists_paths = []
+        if os.path.exists(csv_path):
+            exists_paths.append(csv_path)
+        if os.path.exists(txt_path):
+            exists_paths.append(txt_path)
+            
+        content_text = "\n".join(exists_paths)
+            
+        self._save_dialog = ft.AlertDialog(
+            title=ft.Text("上書き確認"),
+            content=ft.Text(content_text),
+            actions=[
+                ft.TextButton("キャンセル", on_click=on_cancel),
+                ft.TextButton("上書き保存", on_click=on_overwrite),
+            ],
+        )
         if self.page:
-            self.file_picker.save_file(
-                dialog_title="Export OCR Results",
-                file_name=default_filename,
-                allowed_extensions=["csv", "txt"]
+            self.page.open(self._save_dialog)
+
+    def _do_write_and_show_done(self, scope, csv_path, txt_path):
+        try:
+            success_msg = self._write_export(scope, csv_path, txt_path)
+            self.latest_region_info = success_msg
+            self._update_status()
+            
+            def close_dialog(e):
+                if self.page:
+                    self.page.close(self._save_dialog)
+                self._save_dialog = None
+                
+            self._save_dialog = ft.AlertDialog(
+                title=ft.Text("保存しました"),
+                content=ft.Text(f"{csv_path}\n{txt_path}"),
+                actions=[
+                    ft.TextButton("OK", on_click=close_dialog),
+                ],
+                modal=True
             )
+            if self.page:
+                self.page.open(self._save_dialog)
+                
+        except Exception as ex:
+            self.latest_region_info = f"Export failed: {str(ex)}"
+            self._update_status()
+            
+            def close_err_dialog(e):
+                if self.page:
+                    self.page.close(self._save_dialog)
+                self._save_dialog = None
+                
+            self._save_dialog = ft.AlertDialog(
+                title=ft.Text("保存できませんでした"),
+                content=ft.Text(str(ex)),
+                actions=[
+                    ft.TextButton("OK", on_click=close_err_dialog),
+                ],
+                modal=True
+            )
+            if self.page:
+                self.page.open(self._save_dialog)
+
+    def _write_export(self, scope, path_csv, path_txt) -> str:
+        if scope == "current":
+            rects = self.selection_container.get_all()
+            rows = build_export_rows(self.image_src, rects, self.ocr_results, edited_texts=self.edits)
+            num_regions = len(rects)
+            success_msg = f"Exported {num_regions} regions to {os.path.basename(path_csv)} / {os.path.basename(path_txt)}"
+        else:
+            pages, skipped, regions_count = self._collect_all_export_pages()
+            rows = build_export_rows_multi(pages)
+            num_images = len(pages)
+            if skipped > 0:
+                success_msg = f"Exported {regions_count} regions from {num_images} images ({skipped} skipped: OCR not finished)"
+            else:
+                success_msg = f"Exported {regions_count} regions from {num_images} images"
+        
+        csv_text = rows_to_csv_text(rows)
+        txt_text = rows_to_txt_text(rows)
+        
+        # Write CSV with BOM
+        with open(path_csv, "w", encoding="utf-8-sig", newline="") as f:
+            f.write(csv_text)
+            
+        # Write TXT
+        with open(path_txt, "w", encoding="utf-8") as f:
+            f.write(txt_text)
+            
+        return success_msg
 
     def _on_file_picker_result(self, e: ft.FilePickerResultEvent):
         if not e.path and not e.files:
@@ -782,51 +893,6 @@ class SelectableImageViewer(ImageViewer):
                 self.latest_region_info = f"Opened PDF(s) ({len(paths)} pages)"
                 self._switch_image(self.sequence.current())
             return
-
-        try:
-            path_csv = e.path
-            if not path_csv.lower().endswith(".csv"):
-                # If they didn't add extension or added .txt, base it correctly
-                base, ext = os.path.splitext(path_csv)
-                if ext.lower() == ".txt":
-                    path_csv = f"{base}.csv"
-                    path_txt = e.path
-                else:
-                    path_csv = f"{path_csv}.csv"
-                    path_txt = f"{base}.txt"
-            else:
-                path_txt = f"{os.path.splitext(path_csv)[0]}.txt"
-
-            if self._export_scope == "current":
-                rects = self.selection_container.get_all()
-                rows = build_export_rows(self.image_src, rects, self.ocr_results, edited_texts=self.edits)
-                num_regions = len(rects)
-                success_msg = f"Exported {num_regions} regions to {os.path.basename(path_csv)} / {os.path.basename(path_txt)}"
-            else:
-                pages, skipped, regions_count = self._collect_all_export_pages()
-                rows = build_export_rows_multi(pages)
-                num_images = len(pages)
-                if skipped > 0:
-                    success_msg = f"Exported {regions_count} regions from {num_images} images ({skipped} skipped: OCR not finished)"
-                else:
-                    success_msg = f"Exported {regions_count} regions from {num_images} images"
-            
-            csv_text = rows_to_csv_text(rows)
-            txt_text = rows_to_txt_text(rows)
-            
-            # Write CSV with BOM
-            with open(path_csv, "w", encoding="utf-8-sig", newline="") as f:
-                f.write(csv_text)
-                
-            # Write TXT
-            with open(path_txt, "w", encoding="utf-8") as f:
-                f.write(txt_text)
-                
-            self.latest_region_info = success_msg
-        except Exception as ex:
-            self.latest_region_info = f"Export failed: {str(ex)}"
-            
-        self._update_status()
 
     def _update_status(self):
         if hasattr(self, 'status_text'):
@@ -1108,9 +1174,10 @@ class SelectableImageViewer(ImageViewer):
                     buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
                 buttons.append(ft.IconButton(icon=ft.Icons.DELETE, tooltip="Delete", on_click=delete_rect))
 
+                n_breaks = count_line_breaks(display_text)
                 item_content = ft.Column([
                     ft.Row([
-                        ft.Text(f"{rect.label}{label_suffix}:", weight=ft.FontWeight.BOLD),
+                        ft.Text(f"{rect.label}{label_suffix} [改行 {n_breaks}]:", weight=ft.FontWeight.BOLD),
                         ft.Row(buttons, spacing=0)
                     ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                     content_area
