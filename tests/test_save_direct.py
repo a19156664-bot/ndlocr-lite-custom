@@ -104,13 +104,13 @@ def test_d_overwrite_dialog(tmp_path, dummy_viewer, monkeypatch):
     csv_path = os.path.join(tmp_path, f"{stem}.csv")
     txt_path = os.path.join(tmp_path, f"{stem}.txt")
     
-    with open(csv_path, "w") as f:
+    with open(csv_path, "w", encoding="utf-8") as f:
         f.write("SENTINEL")
         
     viewer.selection_container.add((10, 10, 50, 50), "Region 1")
     viewer._start_export("current")
     
-    with open(csv_path, "r") as f:
+    with open(csv_path, "r", encoding="utf-8") as f:
         assert f.read() == "SENTINEL"
         
     assert viewer._save_dialog is not None
@@ -126,11 +126,11 @@ def test_d_overwrite_dialog(tmp_path, dummy_viewer, monkeypatch):
     assert overwrite_action is not None
     overwrite_action.on_click(None)
     
-    with open(csv_path, "r") as f:
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
         assert f.read() != "SENTINEL"
         
     # Cancel case
-    with open(csv_path, "w") as f:
+    with open(csv_path, "w", encoding="utf-8") as f:
         f.write("SENTINEL")
         
     viewer._start_export("current")
@@ -144,7 +144,7 @@ def test_d_overwrite_dialog(tmp_path, dummy_viewer, monkeypatch):
     assert cancel_action is not None
     cancel_action.on_click(None)
     
-    with open(csv_path, "r") as f:
+    with open(csv_path, "r", encoding="utf-8") as f:
         assert f.read() == "SENTINEL"
 
 def test_e_save_all(tmp_path, monkeypatch):
