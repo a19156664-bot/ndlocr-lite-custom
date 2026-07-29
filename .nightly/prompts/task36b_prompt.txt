@@ -1,0 +1,210 @@
+Task 36b: [FIX] Two defects in Task 36, and the two tests that failed to catch them
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+Small. Two one-line code fixes and two test repairs. The feature itself was
+accepted - the commander drove the real widgets and fifteen checks passed.
+
+================================================================================
+0. START FROM THE RIGHT BRANCH - READ THIS FIRST
+================================================================================
+Task 36 is NOT on master. It is on the branch `integration/task-36`, which is
+already pushed to origin. Before anything else run
+
+    git fetch origin
+    git checkout integration/task-36
+
+and confirm that `custom_gui/page_marks.py` and `tests/test_mark_buttons.py`
+both exist. If they do not, STOP and report it - do not attempt the task
+against master, and do not recreate the missing files yourself.
+
+Base your work on that branch. Do not merge or rebase onto master.
+
+================================================================================
+1. DEFECT ONE - append_mark_line glues onto a file with no trailing newline
+================================================================================
+The current implementation opens the file in "a" mode and writes line + "\n".
+If the file does not already end with a newline, the appended line is welded
+onto the last line:
+
+    file before:   既存行\t本文            (no trailing newline)
+    append        "x.jpg\t【広告】"
+    file after:    既存行\t本文x.jpg\t【広告】\n      <-- ONE corrupted line
+    wanted:        既存行\t本文\nx.jpg\t【広告】\n
+
+The commander reproduced this. It is not hypothetical: any TXT the user opens
+in Notepad and saves can lose its final newline, and the next 広告 press then
+destroys the line that was already there.
+
+FIX
+
+    Before appending, check whether the file exists and is non-empty and does
+    NOT end with "\n". If so, write a "\n" first, then the line. An empty file
+    and a missing file must NOT gain a leading blank line. A file that already
+    ends with "\n" must not gain a second one.
+
+    Keep everything else about the function identical: still utf-8, still
+    returns False without writing when the exact line is already present, still
+    returns True when it writes, still lets an OSError propagate.
+
+WHY THE TEST DID NOT CATCH IT
+
+    tests/test_page_marks.py DOES have a case named "File whose last line has
+    no trailing newline". But it writes the file as
+
+        txt_path.write_text("foo.jpg\t【広告】")
+
+    and then appends THE SAME LINE, so the duplicate guard returns False and
+    the append path is never executed. The test asserts False and passes,
+    while proving nothing. This project has now shipped EIGHT tests that could
+    not detect the bug they were written for.
+
+    Repair that case so it appends a DIFFERENT line, and assert the exact full
+    contents of the file afterwards with ==, not with `in`.
+
+    Add a second case: a file that is completely empty (write_text("")), and a
+    file that does not exist. Neither may produce a leading blank line.
+
+================================================================================
+2. DEFECT TWO - state["mark"] raises KeyError and breaks an existing test
+================================================================================
+In custom_gui/app.py, `_switch_image` reads
+
+    self.mark = state["mark"]
+
+A state dictionary that predates this feature has no "mark" key, so this
+raises. It already breaks a test that was passing before Task 36:
+
+    tests/test_ocr_scheduler.py::test_app_level_ocr_call_count
+    KeyError: 'mark'    at custom_gui/app.py:651
+
+Task 36 was told: "If an existing test fails, STOP and report which one and
+what it expects." That did not happen.
+
+FIX
+
+    Read it defensively - `state.get("mark")` - so a state built without the
+    key yields None, which is exactly what an unstamped page means.
+
+    Do the same for `self.mark = self.image_states[image_src]["mark"]` in
+    __init__ if it has the same problem. Check every place that indexes
+    "mark" with [] and decide, for each, whether a missing key is possible.
+    `self.image_states[self.image_src]["mark"] = mark_str` is an assignment
+    and is fine as it is.
+
+    Do NOT "fix" this by rewriting existing state dictionaries elsewhere, and
+    do NOT edit tests/test_ocr_scheduler.py. The application must tolerate a
+    dictionary without the key.
+
+================================================================================
+3. TEST REPAIR - test_h fails against CORRECT code
+================================================================================
+tests/test_mark_buttons.py::test_h_save_stamped_page_retains_mark fails today,
+but the application is right and the test is wrong.
+
+Pressing 広告 CREATES <image stem>.txt. So when the test then calls
+`_start_export("current")`, Task 35's overwrite confirmation opens and nothing
+is written - the file still holds only the mark line, so the assertion that
+"Hello" is in it fails.
+
+The commander drove this by hand: after pressing the 上書き保存 button, the
+file correctly contained BOTH the mark line and the OCR text.
+
+FIX
+
+    After `app._start_export("current")`, assert that `app._save_dialog` is
+    not None and its title is "上書き確認", find the action whose text is
+    "上書き保存", and call its on_click. THEN read the file and assert both
+    the mark line and the OCR text are present.
+
+    Asserting that the dialog appeared is part of the test now - it documents
+    the real behaviour, so do not skip it by deleting the file first or by
+    exporting somewhere else.
+
+================================================================================
+4. DEFINITION OF DONE
+================================================================================
+[1] Appending to a file with no trailing newline produces two separate lines.
+[2] An empty or missing file gains no leading blank line.
+[3] `_switch_image` tolerates a state dictionary with no "mark" key.
+[4] tests/test_ocr_scheduler.py::test_app_level_ocr_call_count passes, and you
+    did NOT edit it.
+[5] test_h passes by driving the overwrite dialog.
+[6] `python -m pytest tests/ -v` passes COMPLETELY - zero failures.
+
+================================================================================
+5. PROOF THAT THE TESTS NOW WORK
+================================================================================
+For [1] and [3] you MUST prove the repaired test fails against the OLD code:
+
+    (a) Restore the old append_mark_line body (append without the newline
+        check), run tests/test_page_marks.py, and paste the FAILING output.
+        Then restore your fix and paste the passing output.
+    (b) Change `state.get("mark")` back to `state["mark"]`, run
+        tests/test_ocr_scheduler.py, paste the FAILING output, restore, paste
+        the passing output.
+
+If an injected defect does NOT make the test fail, say so plainly. That is
+information the commander needs, not something to hide.
+
+================================================================================
+6. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/page_marks.py
+          custom_gui/app.py            (only the "mark" reads, per 2)
+          tests/test_page_marks.py
+          tests/test_mark_buttons.py
+    - Do NOT edit tests/test_ocr_scheduler.py or any other existing test file.
+    - Do NOT change what the buttons do, the fixed strings 【広告】 and
+      【表紙】, the file the line is appended to, the status messages, the
+      duplicate guard, or the export row building. Task 36's behaviour is
+      accepted; this task fixes two defects and two tests.
+    - Do NOT undo Task 30c, 30d, 32, 33b, 35 or 36. In particular the RLock
+      around _update_selections_ui, the layers carrying the pan offset, the
+      inline editor layer above self.gesture_detector, the two save icons with
+      no file dialog, the overwrite confirmation, and the "[改行 N]" header
+      must all stay exactly as they are.
+    - tests/test_flet_constants.py is a guard test. If it objects to your
+      code, CHANGE YOUR CODE. NEVER add an exemption.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Task 36 left SIXTEEN files at the
+      repository root - get_lines.py, get_lines2.py, get_lines3.py,
+      get_path.py, patch_app.py, patch_export.py, patch_h.py through
+      patch_h4.py, patch_mark_init.py, patch_tests.py, patch_tests_add.py,
+      patch_tests_export.py, patch_tests_status.py, patch_tests_txt.py - and
+      the commander deleted every one of them by hand. Task 35 left twenty.
+      Do not repeat this.
+
+================================================================================
+7. OUT OF SCOPE
+================================================================================
+    - Removing a stamp or removing a line from a file.
+    - Suppressing the overwrite dialog for a stamped page.
+    - Persisting the stamp across an app restart.
+    - Any new feature.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+8. FAILSAFE
+================================================================================
+    - Do not weaken, skip, xfail or delete any test to make code pass. Do not
+      wrap an assertion in try/except.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+================================================================================
+9. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[6] to how you satisfied it.
+    2. The two failing outputs required by section 5, the exact defect you
+       restored for each, and the passing output afterwards.
+    3. The new body of append_mark_line.
+    4. Every place you changed a "mark" read, and why each was or was not
+       possible to hit.
+    5. `git diff --stat` and the reason for each file.
+    6. The output of `git status` showing no stray files.
+    7. The full output of `python -m pytest tests/ -v`.
+    8. Open questions or compromises. Write "none" if there are none.
