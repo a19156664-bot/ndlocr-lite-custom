@@ -17,6 +17,7 @@ from enum import Enum, auto
 from custom_gui.ocr_scheduler import OcrScheduler
 from custom_gui.save_paths import export_targets
 from custom_gui.region_stats import count_line_breaks
+from custom_gui.page_marks import MARK_AD, MARK_COVER, mark_line, append_mark_line
 
 class OcrState(Enum):
     IDLE = auto()
@@ -57,7 +58,8 @@ class SelectableImageViewer(ImageViewer):
             "ocr_state": OcrState.IDLE if os.path.exists(image_src) else OcrState.ERROR,
             "ocr_results": [],
             "ocr_error": None if os.path.exists(image_src) else f"Error: Image not found at {image_src}",
-            "edits": {}
+            "edits": {},
+            "mark": None
         }
         
         self.selection_container = self.image_states[image_src]["selections"]
@@ -65,6 +67,7 @@ class SelectableImageViewer(ImageViewer):
         self.ocr_state = self.image_states[image_src]["ocr_state"]
         self.ocr_results = self.image_states[image_src]["ocr_results"]
         self.ocr_error = self.image_states[image_src]["ocr_error"]
+        self.mark = self.image_states[image_src].get("mark")
         
         self.sequence = ImageSequence([image_src])
         
@@ -142,8 +145,14 @@ class SelectableImageViewer(ImageViewer):
             tooltip="全ページを保存 (Save all pages)",
             on_click=lambda e: self._start_export("all")
         )
+        
+        self.btn_mark_ad = ft.TextButton("広告", tooltip="このページを【広告】として記録", on_click=lambda e: self._on_mark_click(MARK_AD))
+        self.btn_mark_cover = ft.TextButton("表紙", tooltip="このページを【表紙】として記録", on_click=lambda e: self._on_mark_click(MARK_COVER))
+        
         self.controls_row.controls.append(self.save_page_button)
         self.controls_row.controls.append(self.save_all_button)
+        self.controls_row.controls.append(self.btn_mark_ad)
+        self.controls_row.controls.append(self.btn_mark_cover)
         
         self._export_scope = "current"
         self._save_dialog = None
@@ -181,6 +190,9 @@ class SelectableImageViewer(ImageViewer):
             height=self.win_h,
             drag_interval=10,
         )
+        
+        # Label for page mark
+        self.mark_label = ft.Text("", weight=ft.FontWeight.BOLD)
         
         # List view for showing selections
         self.selections_list = ft.ListView(
@@ -243,6 +255,7 @@ class SelectableImageViewer(ImageViewer):
                     self.scrollable_image
                 ], expand=True),
                 ft.Column([
+                    self.mark_label,
                     ft.Text("Selections:", weight=ft.FontWeight.BOLD),
                     self.selections_list
                 ], expand=False)
@@ -562,6 +575,28 @@ class SelectableImageViewer(ImageViewer):
                 allow_multiple=True
             )
             
+    def _on_mark_click(self, mark_str):
+        self.mark = mark_str
+        self.image_states[self.image_src]["mark"] = mark_str
+        
+        pdf_source = None
+        if self.image_src in self.pdf_page_map:
+            pdf_source = self.pdf_page_map[self.image_src][0]
+            
+        csv_path, txt_path = export_targets(self.image_src, "current", pdf_source)
+        
+        try:
+            wrote = append_mark_line(txt_path, mark_line(self.image_src, mark_str))
+            if wrote:
+                self.latest_region_info = f"{mark_str}を {os.path.basename(txt_path)} に記録しました"
+            else:
+                self.latest_region_info = f"{mark_str}は既に記録済みです"
+        except OSError as e:
+            self.latest_region_info = f"記録できませんでした: {str(e)}"
+            
+        self._update_status()
+        self._update_selections_ui()
+
     def _on_open_folder_click(self, e):
         self._file_picker_mode = "folder"
         if self.page:
@@ -601,7 +636,8 @@ class SelectableImageViewer(ImageViewer):
                 "ocr_state": ocr_state,
                 "ocr_results": [],
                 "ocr_error": ocr_error,
-                "edits": {}
+                "edits": {},
+                "mark": None
             }
             
         state = self.image_states[path]
@@ -612,6 +648,7 @@ class SelectableImageViewer(ImageViewer):
         self.ocr_results = state["ocr_results"]
         self.ocr_error = state["ocr_error"]
         self.edits = state["edits"]
+        self.mark = state.get("mark")
         self.active_region_id = None
         self.editing_region_id = None
         
@@ -703,10 +740,14 @@ class SelectableImageViewer(ImageViewer):
             state = self.image_states.get(img_path)
             if not state:
                 continue
+                
             rects = state.get("selections").get_all()
-            if not rects:
+            mark = state.get("mark")
+            
+            if not rects and not mark:
                 continue
-            if state.get("ocr_state") != OcrState.DONE:
+                
+            if rects and state.get("ocr_state") != OcrState.DONE:
                 skipped += 1
                 continue
             
@@ -714,7 +755,8 @@ class SelectableImageViewer(ImageViewer):
                 "image_name": img_path,
                 "rects": rects,
                 "ocr_results": state.get("ocr_results", []),
-                "edited_texts": state.get("edits", {})
+                "edited_texts": state.get("edits", {}),
+                "mark": mark
             })
             regions_count += len(rects)
             
@@ -724,11 +766,11 @@ class SelectableImageViewer(ImageViewer):
         self._export_scope = scope
         if scope == "current":
             rects = self.selection_container.get_all()
-            if not rects:
+            if not rects and not self.mark:
                 self.latest_region_info = "Nothing to export"
                 self._update_status()
                 return
-            if self.ocr_state != OcrState.DONE:
+            if rects and self.ocr_state != OcrState.DONE:
                 self.latest_region_info = "OCR not finished - cannot export yet"
                 self._update_status()
                 return
@@ -832,12 +874,32 @@ class SelectableImageViewer(ImageViewer):
     def _write_export(self, scope, path_csv, path_txt) -> str:
         if scope == "current":
             rects = self.selection_container.get_all()
-            rows = build_export_rows(self.image_src, rects, self.ocr_results, edited_texts=self.edits)
+            rows = []
+            if self.mark:
+                rows.append({
+                    "image_name": os.path.basename(self.image_src.replace('\\', '/')),
+                    "region_id": "mark",
+                    "x1": 0, "y1": 0, "x2": 0, "y2": 0,
+                    "line_count": 0,
+                    "text": self.mark
+                })
+            rows.extend(build_export_rows(self.image_src, rects, self.ocr_results, edited_texts=self.edits))
             num_regions = len(rects)
             success_msg = f"Exported {num_regions} regions to {os.path.basename(path_csv)} / {os.path.basename(path_txt)}"
         else:
             pages, skipped, regions_count = self._collect_all_export_pages()
-            rows = build_export_rows_multi(pages)
+            rows = []
+            for p in pages:
+                if p.get("mark"):
+                    rows.append({
+                        "image_name": os.path.basename(p["image_name"].replace('\\', '/')),
+                        "region_id": "mark",
+                        "x1": 0, "y1": 0, "x2": 0, "y2": 0,
+                        "line_count": 0,
+                        "text": p["mark"]
+                    })
+                if p.get("rects"):
+                    rows.extend(build_export_rows_multi([p]))
             num_images = len(pages)
             if skipped > 0:
                 success_msg = f"Exported {regions_count} regions from {num_images} images ({skipped} skipped: OCR not finished)"
@@ -1027,6 +1089,14 @@ class SelectableImageViewer(ImageViewer):
 
     def _update_selections_ui(self):
         with self.selections_lock:
+            if hasattr(self, 'mark_label'):
+                if self.mark:
+                    self.mark_label.value = self.mark
+                    self.mark_label.visible = True
+                else:
+                    self.mark_label.value = ""
+                    self.mark_label.visible = False
+                    
             self.highlight_layer.left = self.offset_x
             self.highlight_layer.top = self.offset_y
             self.rects_layer.left = self.offset_x
@@ -1200,6 +1270,8 @@ class SelectableImageViewer(ImageViewer):
                     control.update()
 
             if self.page:
+                if hasattr(self, 'mark_label'):
+                    _safe_update(self.mark_label)
                 _safe_update(self.highlight_layer)
                 _safe_update(self.rects_layer)
                 self.selections_list.update()
