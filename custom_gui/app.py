@@ -67,7 +67,7 @@ class SelectableImageViewer(ImageViewer):
         self.ocr_state = self.image_states[image_src]["ocr_state"]
         self.ocr_results = self.image_states[image_src]["ocr_results"]
         self.ocr_error = self.image_states[image_src]["ocr_error"]
-        self.mark = self.image_states[image_src]["mark"]
+        self.mark = self.image_states[image_src].get("mark")
         
         self.sequence = ImageSequence([image_src])
         
@@ -648,7 +648,7 @@ class SelectableImageViewer(ImageViewer):
         self.ocr_results = state["ocr_results"]
         self.ocr_error = state["ocr_error"]
         self.edits = state["edits"]
-        self.mark = state["mark"]
+        self.mark = state.get("mark")
         self.active_region_id = None
         self.editing_region_id = None
         

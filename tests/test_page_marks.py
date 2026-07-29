@@ -26,5 +26,11 @@ def test_append_mark_line(tmp_path):
     assert txt_path.read_text(encoding='utf-8') == "other\nfoo.jpg\t【広告】\n"
     
     # File whose last line has no trailing newline
-    txt_path.write_text("foo.jpg\t【広告】", encoding='utf-8')
-    assert append_mark_line(str(txt_path), line) is False
+    txt_path.write_text("既存行\t本文", encoding='utf-8')
+    assert append_mark_line(str(txt_path), line) is True
+    assert txt_path.read_text(encoding='utf-8') == "既存行\t本文\nfoo.jpg\t【広告】\n"
+    
+    # Empty file
+    txt_path.write_text("", encoding='utf-8')
+    assert append_mark_line(str(txt_path), line) is True
+    assert txt_path.read_text(encoding='utf-8') == "foo.jpg\t【広告】\n"
