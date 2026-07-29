@@ -1,0 +1,368 @@
+Task 39: [永続化] 矩形・修正文字・マークをディスクに保存し、再起動後に復元する
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+================================================================================
+1. WHY
+================================================================================
+Today every rectangle the user draws, every text they fix with F2 or the
+inline editor, and every 広告 / 表紙 stamp lives ONLY in
+`SelectableImageViewer.image_states`, which is a plain dict in memory. Close
+the application and all of it is gone.
+
+The user proof-reads books of dozens of pages. They cannot finish in one
+sitting, and today they cannot stop half way. This is the single highest
+value missing feature in the application.
+
+The OCR results already survive a restart - `custom_gui/ocr_cache.py` writes
+them to `.ndlocr_cache/` next to the image. The manual work does not. This
+task closes that gap using the same mechanism.
+
+================================================================================
+2. DECISIONS THE USER HAS ALREADY MADE - DO NOT REOPEN THEM
+================================================================================
+[i]   Save on EVERY mutation, automatically. Not on a save button, not only
+      on page switch. The user chose this so that a crash or a forced quit
+      loses nothing.
+[ii]  If the source image file has changed since the state was written,
+      DISCARD the state. Do not restore it, do not ask, do not try to
+      migrate coordinates. A rectangle whose image was swapped underneath it
+      points at the wrong place, and a wrong rectangle is worse than none.
+      This matches what `ocr_cache.load_cache` already does.
+[iii] Restore rectangles, edited texts AND the 広告 / 表紙 mark.
+
+================================================================================
+3. THE CODE AS IT IS TODAY
+================================================================================
+custom_gui/app.py, `SelectableImageViewer.__init__` and `_switch_image` both
+build the per image state:
+
+    self.image_states[path] = {
+        "selections": SelectionContainer(),
+        "ocr_state": ...,
+        "ocr_results": [],
+        "ocr_error": ...,
+        "edits": {},
+        "mark": None
+    }
+
+and then rebind `self.selection_container`, `self.edits`, `self.mark` and the
+rest to that dict's entries.
+
+The things that MUTATE this state, and therefore the points that must persist:
+
+    _on_pan_end            -> self.selection_container.add(bbox)     (line ~1129)
+    delete_rect            -> delete_by_id + del self.edits[rid]     (line ~1222)
+    commit_edit            -> self.edits[rid] = new_text             (line ~1401)
+    restore_rect           -> del self.edits[rid]                    (line ~1244)
+    rtl_rect               -> sets or deletes self.edits[rid]        (line ~1258)
+    _on_mark_click         -> self.mark / image_states[...]["mark"]  (line ~606)
+
+`custom_gui/selection.py` holds:
+
+    @dataclass
+    class SelectionRect:  rect_id: str, bbox: Tuple[float,float,float,float], label: str
+
+    class SelectionContainer:
+        _rects: List[SelectionRect]
+        _next_id: int = 1
+        add(bbox, label=None) -> SelectionRect     # rect_id = str(self._next_id)
+        get_all() -> List[SelectionRect]
+        delete_by_id(rect_id) -> bool
+
+`custom_gui/ocr_cache.py` is the model to copy: `.ndlocr_cache` beside the
+source, `os.replace` from a tempfile so a crash mid write cannot corrupt the
+file, a `schema` integer, and staleness detected by comparing the source
+file's size and mtime.
+
+PDF PAGES ARE DIFFERENT. `self.pdf_page_map[png_path] = (pdf_path, page_index)`
+maps a rendered page to its PDF. The rendered PNG lives in
+`tempfile.mkdtemp(prefix="ndlocr_pdf_")`, which is DELETED when the process
+exits, so state keyed on the PNG would be unreachable on the next run. State
+for a PDF page must be keyed on the PDF file plus the page index, and stored
+in the PDF's own `.ndlocr_cache`. `ocr_cache` already reserves a `page_index`
+parameter for exactly this; this task is the first real user of it.
+
+================================================================================
+4. DELIVERABLES
+================================================================================
+[A] NEW FILE custom_gui/work_state.py - pure, no flet import, no GUI
+
+    WORK_SCHEMA_VERSION = 1
+
+    def work_path_for(source_path, page_index=None) -> str
+        `.ndlocr_cache/<stem>.work.json`, or
+        `.ndlocr_cache/<stem>_p0001.work.json` when page_index is not None
+        (same 0-padded-to-4, 1-based numbering as `ocr_cache.cache_path_for`).
+        Does NOT create the directory. Must NEVER collide with the OCR cache
+        file name for the same source - that is why the `.work` infix exists.
+
+    def save_work_state(source_path, rects, edits, mark, page_index=None) -> str
+        `rects`  an iterable of SelectionRect (or anything with rect_id, bbox,
+                 label). Serialise as a list of
+                 {"rect_id": str, "bbox": [x1,y1,x2,y2], "label": str},
+                 IN ORDER.
+        `edits`  dict of rect_id -> text.
+        `mark`   the string ("【広告】" / "【表紙】") or None.
+        Creates the directory, records schema / source_size / source_mtime /
+        page_index exactly like `ocr_cache.save_cache`, and writes atomically
+        through tempfile + os.replace. Returns the path written.
+
+    def load_work_state(source_path, page_index=None) -> Optional[dict]
+        Returns {"rects": [...], "edits": {...}, "mark": ...} or None.
+        Return None - never raise - for every one of these:
+            the file does not exist
+            the source file does not exist
+            the JSON is corrupt or is not a dict
+            schema != WORK_SCHEMA_VERSION
+            source_size differs
+            source_mtime differs by more than 1e-6
+            "rects" is not a list, or any entry is not a dict, or any entry
+                is missing rect_id / bbox / label, or a bbox is not four
+                numbers
+            "edits" is not a dict
+        Convert every bbox from list to tuple, the same way `load_cache` does.
+
+    def clear_work_state(source_path, page_index=None) -> bool
+        Deletes the file if present. Returns whether it deleted anything.
+        Never raises on a missing file.
+
+[B] custom_gui/selection.py - a restore entry point
+
+    def restore(self, rects) -> None      # on SelectionContainer
+        Replaces the contents with the given rects, PRESERVING each rect_id
+        exactly as given, and then sets `_next_id` to (largest numeric
+        rect_id seen) + 1, or 1 when there is nothing numeric.
+
+    This last part is the dangerous one. `edits` is keyed by rect_id. If
+    `_next_id` restarts at 1, the next rectangle the user draws is handed an
+    id that an existing rectangle already owns, and the two silently share a
+    text. There MUST be a test for this specific case.
+
+    Non numeric rect_ids must not crash `restore`; skip them when computing
+    the maximum.
+
+    Do not change `add`, `get_all` or `delete_by_id`.
+
+[C] custom_gui/app.py - persist
+
+    Add ONE private method and call it from the six mutation points listed in
+    section 3:
+
+        def _persist_work_state(self):
+            resolves the source and page index for self.image_src
+              (PDF page  -> self.pdf_page_map[self.image_src] -> pdf_path, idx
+               otherwise -> self.image_src, None)
+            calls work_state.save_work_state(...) with the CURRENT
+              self.selection_container.get_all(), self.edits and self.mark
+            swallows OSError and any serialisation failure - a failure to
+              write must NEVER break the user's editing session. Put the
+              reason in self.latest_region_info if you like, but do not raise
+              and do not open a dialog.
+
+    Call it AFTER the state has changed, not before.
+
+    Do NOT call it from `_update_selections_ui`. That method also runs from
+    background OCR threads and from pure redraws, and hanging a disk write
+    off it would write state that no user action produced.
+
+[D] custom_gui/app.py - restore
+
+    In `_switch_image`, in the branch that creates a fresh entry for a path
+    not yet in `self.image_states`, attempt `load_work_state` FIRST and seed
+    the new entry from it when it returns something:
+
+        selections -> a SelectionContainer whose `restore` was fed the saved
+                      rects
+        edits      -> the saved dict
+        mark       -> the saved mark
+
+    `ocr_state`, `ocr_results` and `ocr_error` are NOT part of this task -
+    they keep coming from `ocr_cache` and the existing logic, untouched.
+
+    Do the same for the very first image in `__init__`.
+
+    Restoring must NOT trigger a save. Guard against the case where the
+    restore path itself calls something that persists, or you will rewrite
+    the file you just read on every page turn.
+
+    A restored page whose OCR has not run yet shows its rectangles with the
+    text the OCR will later supply - that is the existing behaviour for
+    rectangles drawn before OCR finishes and it needs no special handling.
+    Restored EDITED texts must still win over OCR text, exactly as
+    `self.edits` already does today.
+
+[E] Nothing else changes
+
+    No new toolbar button, no menu item, no dialog, no status bar redesign,
+    no change to any export file, no change to the OCR cache format.
+
+================================================================================
+5. DEFINITION OF DONE
+================================================================================
+[1]  Drawing a rectangle writes a `.work.json` under `.ndlocr_cache/`.
+[2]  Deleting a rectangle, committing an edit, restoring an edit, the RTL
+     conversion, and pressing 広告 / 表紙 each rewrite that file.
+[3]  A fresh SelectableImageViewer on the same folder restores the
+     rectangles, their labels, their rect_ids, the edited texts and the mark.
+[4]  After restoring N rectangles, the next rectangle drawn gets an id that
+     collides with NO existing rectangle, and editing it does not change the
+     text of any restored rectangle.
+[5]  When the image file's size or mtime has changed, nothing is restored and
+     the page opens empty. No exception, no dialog.
+[6]  A corrupt or truncated `.work.json` is ignored. The application starts
+     normally and the page opens empty.
+[7]  A page of a PDF stores its state beside the PDF, keyed by page index,
+     NOT in the temporary render directory.
+[8]  A `save_work_state` that fails (read-only directory) does not break
+     editing - the rectangle is still added and no exception escapes.
+[9]  `python -m pytest tests/ -v` passes completely (191 on master, or more).
+
+================================================================================
+6. TESTS
+================================================================================
+NEW tests/test_work_state.py - the pure module
+    (a) round trip: save then load returns the same rects (order, rect_id,
+        label), the same edits and the same mark; every bbox is a TUPLE.
+    (b) mark None round trips as None.
+    (c) touching the source image so its size changes -> load returns None.
+    (d) changing only the mtime -> load returns None.
+    (e) writing garbage bytes into the file -> load returns None, no
+        exception.
+    (f) a file whose "schema" is 999 -> load returns None.
+    (g) a rects entry missing "label" -> load returns None.
+    (h) `work_path_for(img)` and `ocr_cache.cache_path_for(img)` are
+        DIFFERENT paths, and `work_path_for(pdf, 0)` ends with
+        `_p0001.work.json`.
+    (i) `clear_work_state` deletes, returns True, and returns False the
+        second time.
+
+NEW tests/test_selection_restore.py - the id collision guard
+    (j) restore three rects with ids "1","2","3", then `add` -> the new
+        rect_id is "4" and is not equal to any existing id.
+    (k) restore rects with ids "5","9" -> the next add is "10".
+    (l) restore an empty list -> the next add is "1".
+    (m) a non numeric rect_id in the restored list does not raise.
+
+NEW tests/test_persistence.py - the real viewer
+    Real images built with Pillow under tmp_path - at least TWO. Monkeypatch
+    `custom_gui.app.run_ocr_and_parse`. No real OCR, no GUI.
+
+    Do NOT replace `self.selections_list`, `self.rects_layer`,
+    `self.highlight_layer`, `self.selection_container`, `self.image_states`
+    or `self.btn_next` with MagicMock. This project has shipped EIGHT tests
+    that could not detect the bug they were written for, every one of them
+    because the thing under test was a mock. A test that cannot fail is
+    worthless.
+
+    (n) build a viewer, add a rectangle through the real container, assert
+        the `.work.json` exists and contains that rectangle.
+    (o) commit an edit, then build a SECOND viewer on the same image and
+        assert the rectangle AND the edited text came back.
+    (p) press 広告, build a second viewer, assert `viewer.mark` is 【広告】.
+    (q) delete the only rectangle, build a second viewer, assert it has no
+        rectangles - deletion must persist too, not just addition.
+    (r) restore a page with rectangles, draw a NEW rectangle, edit it, and
+        assert the restored rectangle's text is UNCHANGED. This is condition
+        [4] and it is the failure mode that would silently corrupt a user's
+        work.
+    (s) rewrite the image file so its size changes, build a second viewer,
+        assert no rectangles are restored.
+    (t) monkeypatch `custom_gui.app.work_state.save_work_state` to raise
+        OSError, add a rectangle, and assert the rectangle IS in the
+        container and no exception escaped.
+
+    For (o), (q) and (r) you MUST prove the test can fail: break the code
+    deliberately, paste the FAILING pytest output, restore the code, and
+    paste the passing output. State exactly what you broke. For (r), the
+    natural break is to make `restore` leave `_next_id` at 1.
+
+================================================================================
+7. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/work_state.py            (new)
+          custom_gui/selection.py             (restore only)
+          custom_gui/app.py
+          tests/test_work_state.py            (new)
+          tests/test_selection_restore.py     (new)
+          tests/test_persistence.py           (new)
+    - Do NOT modify ANY existing file under tests/. If an existing test
+      fails, STOP and report which one and what it expects. Do not edit it,
+      do not weaken it, do not delete it. tests/test_selection.py and
+      tests/test_ocr_scheduler.py both touch the areas you are changing - if
+      one of them breaks, that is a finding to REPORT.
+    - Do NOT change `custom_gui/ocr_cache.py`. The OCR cache and the work
+      state share a directory and a convention, nothing else.
+    - Do NOT add a key to the `image_states` dict beyond what already exists.
+      `_switch_image`, `_update_selections_ui`, `_write_export` and
+      `tests/test_ocr_scheduler.py` all read that dict; Task 36 shipped a
+      `KeyError: 'mark'` by adding a key in one place and not the other.
+      Every place that builds an `image_states` entry must build the same
+      shape.
+    - tests/test_flet_constants.py is a guard test. If it objects to your
+      code, CHANGE YOUR CODE. NEVER add an exemption. A local variable named
+      `page` WILL collide with it.
+    - NEVER name an attribute `self.image` or `self.scale`. Both are reserved
+      by flet and previously caused a fatal startup crash here.
+    - Do NOT undo Task 30c, 30d, 32, 33b, 35, 36, 37 or 38: the RLock around
+      _update_selections_ui, the layers carrying the pan offset, the offset
+      subtraction in _on_pan_start/_on_pan_update, the batch worker not
+      calling _switch_image, Pre-OCR All with its progress bar, Enter
+      committing the right hand panel edit, the inline editor layer ABOVE
+      self.gesture_detector in every stack construction, the two save icons
+      with no file dialog, the "[改行 N]" header, the 広告 / 表紙 buttons, the
+      right-click Pan toggle with its cursor, and Ctrl+S with the next-page
+      dialog must all stay exactly as they are.
+    - Do not make event handlers async. flet dispatches every non-async
+      handler on a thread pool without serialising them; changing that model
+      is out of scope and dangerous.
+    - No new dependencies. flet stays pinned at 0.27.6. Use `json` and
+      `tempfile` from the standard library, as ocr_cache does.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Task 35 left TWENTY files at the
+      repository root and Task 36 left SIXTEEN; the commander deleted every
+      one of them by hand.
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - Persisting OCR results, zoom, pan offset, the current page, the window
+      size, or which folder was last open.
+    - A "recent files" list.
+    - Any UI for clearing the saved state.
+    - Asking the user whether to restore.
+    - Moving or resizing an existing rectangle.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+    - Touching anything under src/, config/, model/ or resource/. The OCR
+      engine must stay byte identical to upstream.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard
+      test objects, change your code. If you believe a guard test is
+      genuinely wrong, STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and
+      report exactly what blocked you.
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[9] to how you satisfied it.
+    2. The failing output for tests (o), (q) and (r) against deliberately
+       broken code, what you broke in each case, and the passing output after
+       restoring it.
+    3. The exact list of call sites from which `_persist_work_state` is
+       invoked, and why you are confident there is no seventh mutation point
+       you missed.
+    4. How you decided the source path and page index for a PDF page, and
+       what happens on the very first run when the PDF has never been opened.
+    5. What guarantees that restoring does not immediately rewrite the file.
+    6. Whether every existing test still passes untouched, and if not,
+       exactly which assertion objects and what it expects.
+    7. The list of changed and added files with the reason for each.
+    8. The output of `git status` showing no stray files.
+    9. The full output of `python -m pytest tests/ -v`.
+   10. Open questions or compromises. Write "none" if there are none.
