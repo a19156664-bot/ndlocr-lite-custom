@@ -1,0 +1,261 @@
+Task 37: [UX] Right-click toggles Pan, and the cursor shows which mode you are in
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+Small and self contained. One new event handler and one property, wired to the
+mode that already exists.
+
+================================================================================
+1. WHAT THE USER ASKED FOR
+================================================================================
+    "右クリックで画像を掴んで画像を動かせる機能を追加したいです。
+     理由：業務効率化
+     また、右クリック時やPanボタン実行時はカーソルを"手"のマークに変更する
+     ことは可能でしょうか。理由：状態を可視化できるため。"
+
+The user proof-reads page after page. Today, moving the image means travelling
+to the Select/Pan toggle in the toolbar, clicking it, dragging, then travelling
+back. They want to stay on the image.
+
+================================================================================
+2. WHAT IS AND IS NOT POSSIBLE - THE COMMANDER MEASURED THIS
+================================================================================
+Dragging with the RIGHT button held down is IMPOSSIBLE in flet 0.27.6. Do not
+attempt it and do not report that you have achieved it.
+
+ft.GestureDetector's only right-button events are
+
+    on_secondary_tap, on_secondary_tap_down, on_secondary_tap_up,
+    on_secondary_long_press_start, on_secondary_long_press_end
+
+`on_pan_start` / `on_pan_update` / `on_pan_end` fire for the PRIMARY button
+only. There is no secondary equivalent, so no movement events arrive while the
+right button is held. The long-press pair does not help either - it reports the
+press and the release, never the motion in between.
+
+So the user chose this instead: a right click TOGGLES the mode, and the normal
+left drag does the moving.
+
+What IS available, verified in this project's own venv:
+
+    ft.GestureDetector(mouse_cursor=...)        exists
+    ft.MouseCursor.PRECISE / GRAB / GRABBING    all exist
+    assigning gd.mouse_cursor at runtime works
+
+ft.MouseRegion does NOT exist in 0.27.6. Do not import it.
+
+================================================================================
+3. THE CODE AS IT IS TODAY
+================================================================================
+custom_gui/viewer.py holds the mode - do NOT modify this file:
+
+    class InteractionMode:
+        def __init__(self):
+            self.current = "SELECT"
+        def set_mode(self, mode):
+            if mode in ["SELECT", "PAN"]:
+                self.current = mode
+
+custom_gui/app.py, in SelectableImageViewer.__init__:
+
+    self.mode_state = InteractionMode()
+    self.mode_toggle = ft.SegmentedButton(
+        segments=[
+            ft.Segment(value="SELECT", icon=ft.Icon(ft.Icons.HIGHLIGHT_ALT), label=ft.Text("Select")),
+            ft.Segment(value="PAN", icon=ft.Icon(ft.Icons.PAN_TOOL), label=ft.Text("Pan"))
+        ],
+        selected={self.mode_state.current},
+        on_change=self._on_mode_change
+    )
+
+    self.gesture_detector = ft.GestureDetector(
+        on_pan_start=self._on_pan_start,
+        on_pan_update=self._on_pan_update,
+        on_pan_end=self._on_pan_end,
+        width=self.win_w,
+        height=self.win_h,
+        drag_interval=10,
+    )
+
+and `_on_mode_change` reads `e.control.selected`, calls
+`self.mode_state.set_mode(...)`, refreshes the status text and updates.
+
+`_on_pan_start`, `_on_pan_update` and `_on_pan_end` already branch on
+`self.mode_state.current` being "SELECT" or "PAN". Do not restructure them.
+
+================================================================================
+4. DELIVERABLES
+================================================================================
+[A] Right click on the image toggles the mode
+
+    Add `on_secondary_tap` to `self.gesture_detector`, pointing at a new
+    method `self._toggle_mode`. It must:
+
+        - flip "SELECT" <-> "PAN" through `self.mode_state.set_mode`,
+        - keep the toolbar SegmentedButton in step:
+              self.mode_toggle.selected = {self.mode_state.current}
+        - refresh the cursor per [B],
+        - refresh the status line, which already prints "Mode: SELECT" /
+          "Mode: PAN", so the user sees the change in two places,
+        - update only what is needed, guarded the way the rest of the file
+          guards it (`if self.page:`).
+
+    Do NOT add on_secondary_tap_down or on_secondary_tap_up. One handler.
+
+    Toggling must not disturb anything else: it must not clear selections,
+    must not cancel an OCR, must not close the inline editor, must not change
+    the zoom, and must not move the image.
+
+[B] The cursor shows the mode
+
+    A single method, `self._refresh_cursor()`, sets
+    `self.gesture_detector.mouse_cursor`:
+
+        mode is "SELECT"                 -> ft.MouseCursor.PRECISE
+        mode is "PAN", not dragging      -> ft.MouseCursor.GRAB
+        mode is "PAN", dragging right now-> ft.MouseCursor.GRABBING
+
+    Call it from `__init__` (so the very first cursor is right), from
+    `_toggle_mode`, from `_on_mode_change` (so the toolbar button changes the
+    cursor too), and from `_on_pan_start` / `_on_pan_end` for the GRABBING
+    state.
+
+    Track the drag with a plain boolean, e.g. `self._is_dragging`, set True in
+    `_on_pan_start` and False in `_on_pan_end`, initialised False in
+    `__init__`. Do NOT name it `self.dragging` if that collides with anything
+    in flet - check before you choose.
+
+    `_on_pan_start` and `_on_pan_end` fire in SELECT mode as well, when the
+    user is drawing a rectangle. In SELECT mode the cursor must stay PRECISE
+    throughout - do not let a rectangle drag turn the cursor into GRABBING.
+
+[C] Nothing else about panning changes
+
+    The offset arithmetic, the layers carrying the offset, the offset
+    subtraction in `_on_pan_start`/`_on_pan_update`, and the rectangle drawing
+    all stay byte-for-byte as they are. This task adds a trigger and a cursor;
+    it does not touch how panning works.
+
+================================================================================
+5. DEFINITION OF DONE
+================================================================================
+[1] `self.gesture_detector.on_secondary_tap` is not None.
+[2] Firing it flips mode_state.current, and firing it again flips it back.
+[3] After firing it, `self.mode_toggle.selected` equals the new mode.
+[4] mouse_cursor is PRECISE in SELECT, GRAB in PAN, GRABBING while panning,
+    and back to GRAB when the pan ends.
+[5] Drawing a rectangle in SELECT mode never sets GRABBING.
+[6] The toolbar Select/Pan button still works and now also updates the cursor.
+[7] `python -m pytest tests/ -v` passes completely (the count on master or
+    more).
+
+================================================================================
+6. TESTS - create tests/test_right_click_pan.py
+================================================================================
+Real image built with Pillow under tmp_path. Monkeypatch
+`custom_gui.app.run_ocr_and_parse`. No real OCR, no GUI window. Reach the
+handlers through `viewer.gesture_detector`, not by calling private methods you
+looked up - the point is to prove the widget is WIRED.
+
+Do NOT replace `self.gesture_detector`, `self.mode_toggle`,
+`self.selection_container`, `self.rects_layer` or `self.highlight_layer` with
+MagicMock. This project has shipped SEVEN tests that could not detect the bug
+they were written for, every one of them because the thing under test was a
+mock. A test that cannot fail is worthless.
+
+    (a) `viewer.gesture_detector.on_secondary_tap` is not None, and
+        `on_secondary_tap_down` and `on_secondary_tap_up` are both None.
+    (b) Start in SELECT. Fire on_secondary_tap: mode is "PAN" and
+        `viewer.mode_toggle.selected == {"PAN"}`. Fire it again: back to
+        "SELECT" and the toggle follows.
+    (c) Cursor after construction is PRECISE. After one right click it is
+        GRAB. After another it is PRECISE again.
+    (d) In PAN mode, fire on_pan_start then on_pan_update then on_pan_end with
+        realistic event objects. During the drag the cursor is GRABBING; after
+        on_pan_end it is GRAB again. Assert the image actually moved - the
+        offsets changed - so the test proves panning still works.
+    (e) In SELECT mode, run the same start/update/end sequence to draw a
+        rectangle. The cursor is PRECISE at every step, and a rectangle was
+        added to `viewer.selection_container`.
+    (f) Right clicking does not destroy state: add a rectangle, put an edit in
+        `viewer.edits`, fire on_secondary_tap, and assert the rectangle and
+        the edit are both still there and the zoom is unchanged.
+    (g) The toolbar toggle also refreshes the cursor: call
+        `viewer._on_mode_change` with an event whose control.selected is
+        {"PAN"} and assert the cursor became GRAB.
+
+    For (b), (d) and (f) you MUST prove the test can fail: break the code
+    deliberately, paste the FAILING pytest output, restore the code, and paste
+    the passing output. State exactly what you broke.
+
+================================================================================
+7. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/app.py
+          tests/test_right_click_pan.py    (new)
+    - Do NOT modify custom_gui/viewer.py. InteractionMode stays as it is; if
+      you want a toggle helper, write it in app.py.
+    - Do NOT modify ANY existing file under tests/. If an existing test fails,
+      STOP and report which one and what it expects. Do not edit it, do not
+      weaken it, do not delete it.
+    - tests/test_flet_constants.py is a guard test that walks the source and
+      rejects any ft.Icons.X or ft.Colors.X that does not exist, and any local
+      variable named `page`. If it objects to your code, CHANGE YOUR CODE.
+      NEVER add an exemption.
+    - NEVER name an attribute `self.image` or `self.scale`. Both are reserved
+      by flet and previously caused a fatal startup crash here.
+    - Do NOT undo Task 30c, 30d, 32, 33b, 35 or 36: the RLock around
+      _update_selections_ui, the layers carrying the pan offset, the offset
+      subtraction in _on_pan_start/_on_pan_update, the batch worker not
+      calling _switch_image, Pre-OCR All with its progress bar, Enter
+      committing the right hand panel edit, the inline editor layer sitting
+      ABOVE self.gesture_detector in every stack construction, the two save
+      icons with no file dialog, the "[改行 N]" header, and the 広告 / 表紙
+      buttons must all stay exactly as they are.
+    - Do not make event handlers async. flet dispatches every non-async
+      handler on a thread pool without serialising them; changing that model
+      is out of scope and dangerous.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Task 35 left TWENTY files at the
+      repository root and the commander deleted every one of them by hand.
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - Dragging with the right button held. It is impossible here - see 2.
+    - A right-click context menu.
+    - Holding a keyboard key to pan temporarily.
+    - Ctrl+wheel zoom. Already investigated; not available in flet 0.27.6.
+    - Changing the Select/Pan toolbar control into something else.
+    - Moving or resizing an existing rectangle.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard
+      test objects, change your code. If you believe a guard test is genuinely
+      wrong, STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[7] to how you satisfied it.
+    2. The failing output for tests (b), (d) and (f) against deliberately
+       broken code, what you broke in each case, and the passing output after
+       restoring it.
+    3. The name you chose for the dragging flag and the evidence that it does
+       not collide with a flet property.
+    4. Every place you call _refresh_cursor from, and why each is needed.
+    5. The list of changed and added files with the reason for each.
+    6. The output of `git status` showing no stray files.
+    7. The full output of `python -m pytest tests/ -v`.
+    8. State explicitly that the real right click and the real cursor shape
+       cannot be verified without a GUI - the commander will confirm them on
+       the real application.
+    9. Open questions or compromises. Write "none" if there are none.
