@@ -1,0 +1,191 @@
+Task 35b: [FIX-TESTS] Repair two broken tests left by Task 35
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+TESTS ONLY. You must not change a single line of application code in this
+task. If you believe application code is wrong, STOP and report it.
+
+================================================================================
+0. START FROM THE RIGHT BRANCH - READ THIS FIRST
+================================================================================
+Task 35 is NOT on master. It is on the branch `integration/task-35`, which is
+already pushed to origin. Before anything else run
+
+    git fetch origin
+    git checkout integration/task-35
+
+and confirm that `custom_gui/save_paths.py` and `tests/test_save_direct.py`
+both exist. If they do not, STOP and report it - do not attempt the task
+against master, and do not recreate the missing files yourself.
+
+Base your work on that branch. Do not merge, rebase onto, or otherwise pull
+in master.
+
+Task 35's implementation was accepted - the commander drove the real widgets
+and all thirty checks passed. Two problems are in the TEST files.
+
+================================================================================
+1. PROBLEM ONE - tests/test_save_direct.py::test_d_overwrite_dialog
+================================================================================
+It fails on every run:
+
+    with open(csv_path, "r") as f:
+        assert f.read() != "SENTINEL"
+    UnicodeDecodeError: 'cp932' codec can't decode byte 0xef in position 0
+
+The commander runs on Japanese Windows, where the default text encoding is
+cp932. The exported CSV is written as utf-8-sig, so its first byte is the BOM
+(0xEF), which cp932 cannot decode.
+
+This is worse than a red test. The commander injected a deliberate defect
+(making `_start_export` skip the overwrite check and write immediately) and
+the test failed in exactly the same way it fails against CORRECT code. It
+cannot tell the two apart, so it proves nothing. This project has now shipped
+SEVEN tests that could not detect the bug they were written for.
+
+WHAT TO DO
+
+    Every `open()` in tests/test_save_direct.py must name its encoding
+    explicitly. There is no correct default here.
+
+        a CSV written by the app  -> encoding="utf-8-sig"
+        a TXT written by the app  -> encoding="utf-8"
+        a file the TEST writes as a sentinel -> encoding="utf-8", and read it
+            back with the same encoding
+
+    Do not "fix" this by catching the exception, by reading bytes and calling
+    .decode(errors="ignore"), by comparing os.path.getmtime, or by asserting
+    the file merely changed size. The test must read the text and compare it.
+
+    While you are in the file, check EVERY other open() for the same bug, not
+    only the one that happens to fail today. test_b and test_e also read the
+    exported files.
+
+================================================================================
+2. PROBLEM TWO - tests/test_edit_enter.py was modified, and weakened
+================================================================================
+Task 35 was told not to touch any existing test file. It changed one anyway:
+
+    -    assert title_text.endswith("(edited):")
+    +    assert "(edited)" in title_text
+
+The reason the original assertion broke is legitimate: Task 35 deliberately
+changed the panel header from
+
+    "Region 1 (edited):"        to        "Region 1 (edited) [改行 0]:"
+
+so `endswith("(edited):")` cannot hold any more. But the replacement no longer
+pins WHERE the suffix sits or what the rest of the header says. It would pass
+against a header that is complete nonsense as long as "(edited)" appears
+somewhere in it.
+
+WHAT TO DO
+
+    In tests/test_edit_enter.py::test_e_revert_button_and_suffix, replace that
+    one assertion with an EXACT equality against the whole header string:
+
+        assert title_text == "Region 1 (edited) [改行 0]:"
+
+    The test commits the text "Committed text" - a single line, so zero line
+    breaks - into the first and only region, whose label is "Region 1". The
+    commander verified that this is the exact string the panel produces.
+
+    Change NOTHING else in tests/test_edit_enter.py. Not the fixture, not the
+    other tests, not the imports, not the whitespace.
+
+    If that exact string does not match what the code produces, STOP and
+    report the string you actually observed. Do not adjust it to whatever the
+    code happens to emit - that would be writing the test to fit the code.
+
+================================================================================
+3. DEFINITION OF DONE
+================================================================================
+[1] `python -m pytest tests/ -v` passes COMPLETELY - 170 tests, zero failures.
+[2] No file outside tests/ is modified. `git diff --stat` shows exactly two
+    files, both under tests/.
+[3] test_d_overwrite_dialog can still FAIL when the code is wrong (see 4).
+[4] tests/test_edit_enter.py asserts the full header string.
+
+================================================================================
+4. PROOF THAT test_d STILL WORKS - THIS IS THE POINT OF THE TASK
+================================================================================
+After your fix, temporarily apply this defect to custom_gui/app.py:
+
+    In `_start_export`, replace
+
+        if os.path.exists(csv_path) or os.path.exists(txt_path):
+            self._show_overwrite_dialog(scope, csv_path, txt_path)
+        else:
+            self._do_write_and_show_done(scope, csv_path, txt_path)
+
+    with
+
+        self._do_write_and_show_done(scope, csv_path, txt_path)
+
+so the app overwrites without ever asking. Run
+`python -m pytest tests/test_save_direct.py -v` and paste the output. The
+failure MUST be a clean AssertionError showing that the SENTINEL was
+destroyed - NOT a UnicodeDecodeError, and NOT an error about the dialog being
+None.
+
+Then REVERT custom_gui/app.py completely - `git diff custom_gui/app.py` must
+be empty - and paste the passing output.
+
+Do the same for the 上書き保存 half: revert the code, and instead break
+`_show_overwrite_dialog` so its 上書き保存 button does nothing. The test must
+fail because the file still holds the SENTINEL. Revert again.
+
+If a defect you inject does NOT make the test fail, say so plainly. That is
+information the commander needs, not something to hide.
+
+================================================================================
+5. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          tests/test_save_direct.py
+          tests/test_edit_enter.py    (ONLY the single assertion named in 2)
+    - custom_gui/ is READ ONLY in this task. Any temporary defect you inject
+      for section 4 MUST be reverted before you finish. `git status` must show
+      no modification under custom_gui/.
+    - Do NOT touch tests/test_save_paths.py, tests/test_region_stats.py or any
+      other test file.
+    - tests/test_flet_constants.py is a guard test. It must keep passing.
+    - Do not weaken, skip, xfail or delete any test. Do not add
+      pytest.mark.skip. Do not wrap an assertion in try/except.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Task 35 left TWENTY files at the
+      repository root - patch.diff, patch_test.diff, patch_test2.diff,
+      patch_test3.diff, patch_test4.diff, test_br.py, test_os.py and
+      test_os2.py through test_os13.py - and the commander deleted every one
+      of them by hand. Do not repeat this.
+
+================================================================================
+6. OUT OF SCOPE
+================================================================================
+    - Any change to custom_gui/app.py, save_paths.py or region_stats.py.
+    - New features, new tests for behaviour that is not already covered.
+    - Reformatting, renaming or reorganising the test files.
+    - The 広告 / 表紙 buttons. They are a separate task.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+7. FAILSAFE
+================================================================================
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+================================================================================
+8. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[4] to how you satisfied it.
+    2. Every open() you changed in tests/test_save_direct.py, with the
+       encoding you gave it and why.
+    3. The two failing outputs required by section 4, the exact defect you
+       injected for each, and the passing output after reverting.
+    4. `git diff --stat` proving only two files changed, both under tests/.
+    5. `git diff custom_gui/` proving it is empty.
+    6. The output of `git status` showing no stray files.
+    7. The full output of `python -m pytest tests/ -v`.
+    8. Open questions or compromises. Write "none" if there are none.
