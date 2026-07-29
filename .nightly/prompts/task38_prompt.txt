@@ -1,0 +1,273 @@
+Task 38: [UX] Ctrl+S saves the page, Enter confirms, and the dialog offers the next page
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+Three related changes to the save flow. All of them are about keeping the
+user's hands on the keyboard while they proof-read page after page.
+
+================================================================================
+1. WHAT THE USER ASKED FOR
+================================================================================
+    "Ctrlボタン+Sボタンで現在のページ保存（ショートカット）。
+     ページ保存は現在OKボタンを押下しておりますが、エンターキーの押下でも
+     保存できるようにしてください。また、OKボタン押下後に次のページに進むかの
+     ウィンドウの表示をお願いいたします。"
+
+Asked whether the confirmation and the next-page prompt should be two dialogs
+or one, the user chose ONE dialog - two dialogs would mean pressing Enter
+twice. So the finished flow is:
+
+    Ctrl+S  ->  saves  ->  one dialog  ->  Enter  ->  next page
+
+Two keystrokes per page.
+
+================================================================================
+2. THE CODE AS IT IS TODAY
+================================================================================
+custom_gui/app.py, `_do_write_and_show_done(scope, csv_path, txt_path)` writes
+the files and then opens
+
+    self._save_dialog = ft.AlertDialog(
+        title=ft.Text("保存しました"),
+        content=ft.Text(f"{csv_path}\n{txt_path}"),
+        actions=[ft.TextButton("OK", on_click=close_dialog)],
+        modal=True
+    )
+    if self.page:
+        self.page.open(self._save_dialog)
+
+`_show_overwrite_dialog` opens the two-button 上書き確認 dialog, whose
+上書き保存 action calls `_do_write_and_show_done`. On a write error the same
+method opens a "保存できませんでした" dialog with one OK button.
+
+The global keyboard handler lives in `main()` at the bottom of the file:
+
+    def on_keyboard(e: ft.KeyboardEvent):
+        if viewer.editing_region_id is not None or viewer.inline_editing_region_id is not None:
+            if e.key == "Escape":
+                if viewer.inline_editing_region_id is not None:
+                    viewer._cancel_inline_edit()
+            # Suppress global shortcuts while editing text
+            return
+
+        if e.key == "N" and e.ctrl:
+            if viewer.btn_next and not viewer.btn_next.disabled:
+                viewer._on_next_click(None)
+        elif e.key == "F2":
+            ...
+
+    page.on_keyboard_event = on_keyboard
+
+Moving to the next page is `viewer._on_next_click(None)`, guarded by
+`viewer.btn_next.disabled`, which is already False only when a next page
+exists.
+
+================================================================================
+3. VERIFIED FACTS ABOUT flet 0.27.6 - DO NOT RE-DISCOVER THESE
+================================================================================
+The commander verified these in this project's own venv:
+
+    ft.TextButton(autofocus=True)          accepted, value reads back True
+    ft.Page.on_keyboard_event              exists
+    ft.KeyboardEvent has key, shift, ctrl, alt, meta
+    ft.Page.open(dlg) / ft.Page.close(dlg) exist
+    ft.Page.dialog DOES NOT EXIST          - never assign to it
+
+`autofocus=True` on a dialog action is how Enter reaches the button: the
+button takes keyboard focus when the dialog opens, and Enter activates the
+focused button. Do NOT implement Enter by adding a key handler that inspects
+whether a dialog is open - the dialog owns focus and the global handler is not
+a reliable place to do this.
+
+================================================================================
+4. DELIVERABLES
+================================================================================
+[A] Ctrl+S saves the current page
+
+    In `on_keyboard`, add a branch for `e.key == "S" and e.ctrl` that calls
+    `viewer._start_export("current")`.
+
+    It must sit AFTER the existing early return, so Ctrl+S does nothing while
+    the user is typing in the right hand panel or in the inline editor. That
+    early return is deliberate; do not move it or weaken it.
+
+    Ctrl+S must go through `_start_export` exactly like the toolbar icon, so
+    all of its validation still applies: "Nothing to export" when there are no
+    rectangles, "OCR not finished - cannot export yet", and the 上書き確認
+    dialog when the file already exists. Do not duplicate that logic.
+
+    Do not add Ctrl+Shift+S, and do not touch Ctrl+N or F2.
+
+[B] The done dialog becomes ONE dialog that also offers the next page
+
+    Replace the single-OK dialog in `_do_write_and_show_done` with:
+
+        title    ft.Text("保存しました")
+        content  the two absolute paths, then a blank line, then
+                 ft.Text("次のページへ進みますか？")
+        actions  ft.TextButton("ここに残る")  -> closes, stays on this page
+                 ft.TextButton("次へ", autofocus=True)
+                                            -> closes, then advances
+        modal    True
+
+    "次へ" is the LAST action and the autofocused one, so Enter advances.
+
+    Advancing means calling `self._on_next_click(None)` - the same path the ▶
+    button uses. Close the dialog FIRST, then advance, so the page switch
+    happens with no dialog on screen.
+
+    WHEN THERE IS NO NEXT PAGE
+        If `self.btn_next` is None or `self.btn_next.disabled` is True, the
+        dialog must NOT offer 次へ. Show a single ft.TextButton("OK",
+        autofocus=True) instead, and leave the "次のページへ進みますか？" line
+        out of the content. Enter then just closes it. The user is on the last
+        page; offering a move that cannot happen would be a lie.
+
+    WHEN THE SCOPE IS "all"
+        A whole-book export is not a per-page step, so do NOT offer 次へ after
+        it. Show the single autofocused OK, same as the last-page case.
+        `_do_write_and_show_done` already receives `scope`; branch on it.
+
+[C] Enter works on the completion dialogs
+
+    Give the affirmative action `autofocus=True`:
+
+        the 次へ button                                  -> autofocus
+        the OK button of the last-page / all-pages form  -> autofocus
+        the OK button of the "保存できませんでした" error dialog -> autofocus
+
+[D] The 上書き確認 dialog gets NO autofocus - this is deliberate
+
+    Do NOT put autofocus on 上書き保存 or on キャンセル. Enter must not be able
+    to overwrite a file the user has not looked at. The commander decided this
+    explicitly; if you think it is inconsistent, say so in your report but do
+    NOT change it.
+
+[E] Nothing else about saving changes
+
+    The file names, the folders, the encodings, the row building, the mark
+    rows from Task 36, the status messages, and the behaviour of the toolbar
+    icons all stay exactly as they are.
+
+================================================================================
+5. DEFINITION OF DONE
+================================================================================
+[1] Ctrl+S triggers the same save as the "このページを保存" icon.
+[2] Ctrl+S does nothing while the right hand panel editor or the inline editor
+    is open.
+[3] After a successful per-page save with a next page available, the dialog
+    has exactly two actions, the second is "次へ" and it has autofocus.
+[4] Firing "次へ" closes the dialog and advances to the next page.
+[5] On the last page, and for an all-pages save, the dialog has exactly one
+    action, "OK", with autofocus, and no 次のページ line in its content.
+[6] The 上書き確認 dialog has NO action with autofocus.
+[7] `python -m pytest tests/ -v` passes completely (the count on master or
+    more).
+
+================================================================================
+6. TESTS - create tests/test_save_shortcut.py
+================================================================================
+Real images built with Pillow under tmp_path - at least TWO, so "next page"
+is real. Monkeypatch `custom_gui.app.run_ocr_and_parse`. No real OCR, no GUI.
+
+Do NOT replace `self.selections_list`, `self.rects_layer`,
+`self.highlight_layer`, `self.selection_container`, `self.btn_next` or the
+toolbar row with MagicMock. This project has shipped EIGHT tests that could
+not detect the bug they were written for, every one of them because the thing
+under test was a mock. A test that cannot fail is worthless.
+
+    (a) The completion dialog on page 1 of 2 has exactly two actions; the
+        second one's text is "次へ" and its autofocus is True; the first is
+        "ここに残る".
+    (b) Firing the "次へ" action closes the dialog (`_save_dialog` is None)
+        AND `viewer.image_src` is now the second image.
+    (c) Firing "ここに残る" closes the dialog and `viewer.image_src` is
+        UNCHANGED.
+    (d) On the LAST page the dialog has exactly one action, its text is "OK",
+        autofocus is True, and the dialog content does NOT contain
+        "次のページへ進みますか？".
+    (e) An all-pages save produces the one-action OK form even when a next
+        page exists.
+    (f) The 上書き確認 dialog has no action with autofocus True.
+    (g) Ctrl+S: build the real `on_keyboard` handler the way `main()` does, or
+        reach it through the page, and fire a KeyboardEvent with key "S" and
+        ctrl True. Assert the export happened - the CSV and TXT exist on disk.
+        Then set `viewer.editing_region_id` to a real region id, fire the same
+        event, and assert NO new file was written and no dialog opened.
+
+    For (b), (d) and (g) you MUST prove the test can fail: break the code
+    deliberately, paste the FAILING pytest output, restore the code, and paste
+    the passing output. State exactly what you broke.
+
+================================================================================
+7. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/app.py
+          tests/test_save_shortcut.py    (new)
+    - Do NOT modify ANY existing file under tests/. If an existing test fails,
+      STOP and report which one and what it expects. Do not edit it, do not
+      weaken it, do not delete it. tests/test_save_direct.py asserts the
+      completion dialog's actions - if your change breaks it, that is a
+      finding to REPORT, not to fix by editing that file.
+    - tests/test_flet_constants.py is a guard test. If it objects to your
+      code, CHANGE YOUR CODE. NEVER add an exemption. A local variable named
+      `page` WILL collide with it.
+    - NEVER name an attribute `self.image` or `self.scale`. Both are reserved
+      by flet and previously caused a fatal startup crash here.
+    - Do NOT undo Task 30c, 30d, 32, 33b, 35, 36 or 37: the RLock around
+      _update_selections_ui, the layers carrying the pan offset, the offset
+      subtraction in _on_pan_start/_on_pan_update, the batch worker not
+      calling _switch_image, Pre-OCR All with its progress bar, Enter
+      committing the right hand panel edit, the inline editor layer ABOVE
+      self.gesture_detector in every stack construction, the two save icons
+      with no file dialog, the "[改行 N]" header, the 広告 / 表紙 buttons, and
+      the right-click Pan toggle with its cursor must all stay exactly as they
+      are.
+    - Do not make event handlers async. flet dispatches every non-async
+      handler on a thread pool without serialising them; changing that model
+      is out of scope and dangerous.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Task 35 left TWENTY files at the
+      repository root and Task 36 left SIXTEEN; the commander deleted every
+      one of them by hand.
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - Enter or any shortcut on the 上書き確認 dialog.
+    - A shortcut for the all-pages save.
+    - Escape to close a dialog.
+    - Remembering the user's answer so the dialog stops appearing.
+    - Auto-saving.
+    - Changing the export formats, folders or file names.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard
+      test objects, change your code. If you believe a guard test is genuinely
+      wrong, STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[7] to how you satisfied it.
+    2. The failing output for tests (b), (d) and (g) against deliberately
+       broken code, what you broke in each case, and the passing output after
+       restoring it.
+    3. Whether tests/test_save_direct.py still passes untouched, and if not,
+       exactly which assertion objects and what it expects.
+    4. How your test fires the Ctrl+S keyboard event.
+    5. The list of changed and added files with the reason for each.
+    6. The output of `git status` showing no stray files.
+    7. The full output of `python -m pytest tests/ -v`.
+    8. State explicitly that the real Ctrl+S key press and the real Enter on a
+       focused dialog button cannot be verified without a GUI - the commander
+       will confirm them on the real application.
+    9. Open questions or compromises. Write "none" if there are none.
