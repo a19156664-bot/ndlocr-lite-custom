@@ -73,6 +73,7 @@ class SelectableImageViewer(ImageViewer):
         
         self.drag_start_point = None
         self.drag_current_point = None
+        self._is_dragging = False
         self.active_rect = None
         self.active_region_id = None
         self.editing_region_id = None
@@ -186,10 +187,12 @@ class SelectableImageViewer(ImageViewer):
             on_pan_start=self._on_pan_start,
             on_pan_update=self._on_pan_update,
             on_pan_end=self._on_pan_end,
+            on_secondary_tap=self._toggle_mode,
             width=self.win_w,
             height=self.win_h,
             drag_interval=10,
         )
+        self._refresh_cursor()
         
         # Label for page mark
         self.mark_label = ft.Text("", weight=ft.FontWeight.BOLD)
@@ -369,12 +372,37 @@ class SelectableImageViewer(ImageViewer):
                 self.start_ocr(self.page, next_page)
 
 
+    def _refresh_cursor(self):
+        if self.mode_state.current == "SELECT":
+            self.gesture_detector.mouse_cursor = ft.MouseCursor.PRECISE
+        elif self.mode_state.current == "PAN":
+            if self._is_dragging:
+                self.gesture_detector.mouse_cursor = ft.MouseCursor.GRABBING
+            else:
+                self.gesture_detector.mouse_cursor = ft.MouseCursor.GRAB
+
+    def _toggle_mode(self, e):
+        new_mode = "PAN" if self.mode_state.current == "SELECT" else "SELECT"
+        self.mode_state.set_mode(new_mode)
+        self.mode_toggle.selected = {self.mode_state.current}
+        self._refresh_cursor()
+        if hasattr(self, 'status_text'):
+            self.status_text.value = self._get_status_message()
+        if self.page:
+            if getattr(self.mode_toggle, 'page', None):
+                self.mode_toggle.update()
+            if getattr(self.status_text, 'page', None):
+                self.status_text.update()
+            if getattr(self.gesture_detector, 'page', None):
+                self.gesture_detector.update()
+
     def _on_mode_change(self, e):
         if e.control.selected:
             self.mode_state.set_mode(list(e.control.selected)[0])
         else:
             # Prevent deselecting everything - fallback to current mode
             e.control.selected = {self.mode_state.current}
+        self._refresh_cursor()
         if hasattr(self, 'status_text'):
             self.status_text.value = self._get_status_message()
         if self.page:
@@ -999,6 +1027,10 @@ class SelectableImageViewer(ImageViewer):
         # Local coordinates within the stack
         self.drag_start_point = (e.local_x, e.local_y)
         self.drag_current_point = None
+        self._is_dragging = True
+        self._refresh_cursor()
+        if getattr(self.gesture_detector, 'page', None):
+            self.gesture_detector.update()
         
         if self.mode_state.current == "SELECT":
             self.active_rect = ft.Container(
@@ -1086,6 +1118,10 @@ class SelectableImageViewer(ImageViewer):
             
         self.drag_start_point = None
         self.drag_current_point = None
+        self._is_dragging = False
+        self._refresh_cursor()
+        if getattr(self.gesture_detector, 'page', None):
+            self.gesture_detector.update()
 
     def _update_selections_ui(self):
         with self.selections_lock:
