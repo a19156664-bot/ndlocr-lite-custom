@@ -868,14 +868,30 @@ class SelectableImageViewer(ImageViewer):
                     self.page.close(self._save_dialog)
                 self._save_dialog = None
                 
-            self._save_dialog = ft.AlertDialog(
-                title=ft.Text("保存しました"),
-                content=ft.Text(f"{csv_path}\n{txt_path}"),
-                actions=[
-                    ft.TextButton("OK", on_click=close_dialog),
-                ],
-                modal=True
-            )
+            def on_next(e):
+                close_dialog(e)
+                self._on_next_click(None)
+                
+            if scope == "current" and self.btn_next and not self.btn_next.disabled:
+                self._save_dialog = ft.AlertDialog(
+                    title=ft.Text("保存しました"),
+                    content=ft.Text(f"{csv_path}\n{txt_path}\n\n次のページへ進みますか？"),
+                    actions=[
+                        ft.TextButton("ここに残る", on_click=close_dialog),
+                        ft.TextButton("次へ", on_click=on_next, autofocus=True),
+                    ],
+                    modal=True
+                )
+            else:
+                self._save_dialog = ft.AlertDialog(
+                    title=ft.Text("保存しました"),
+                    content=ft.Text(f"{csv_path}\n{txt_path}"),
+                    actions=[
+                        ft.TextButton("OK", on_click=close_dialog, autofocus=True),
+                    ],
+                    modal=True
+                )
+
             if self.page:
                 self.page.open(self._save_dialog)
                 
@@ -892,7 +908,7 @@ class SelectableImageViewer(ImageViewer):
                 title=ft.Text("保存できませんでした"),
                 content=ft.Text(str(ex)),
                 actions=[
-                    ft.TextButton("OK", on_click=close_err_dialog),
+                    ft.TextButton("OK", on_click=close_err_dialog, autofocus=True),
                 ],
                 modal=True
             )
@@ -1451,7 +1467,9 @@ def main(page: ft.Page):
             # Suppress global shortcuts while editing text
             return
             
-        if e.key == "N" and e.ctrl:
+        if e.key == "S" and e.ctrl:
+            viewer._start_export("current")
+        elif e.key == "N" and e.ctrl:
             if viewer.btn_next and not viewer.btn_next.disabled:
                 viewer._on_next_click(None)
         elif e.key == "F2":
