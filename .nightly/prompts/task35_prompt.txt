@@ -1,0 +1,358 @@
+Task 35: [UX] Two save icons, no save dialog, and a line-break count in the panel
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+Three user requests in one task. They all touch the same two places - the
+toolbar and the right hand panel - so they ship together.
+
+================================================================================
+1. WHAT THE USER ASKED FOR
+================================================================================
+    (1) "全ページ保存と各ページ保存のアイコンの作成をお願いいたします。"
+        Two separate icons instead of today's single menu.
+
+    (2) "保存の際の出力先ウィンドウの表示は不要としてください。保存先は検査を
+         おこなっております画像と同じフォルダにするため。またウィンドウは保存
+         ＯＫボタンのみで大丈夫。"
+        Stop asking where to save. Save beside the image. Show a dialog that
+        only confirms the save happened.
+
+    (5) "右枠に表示画面に改行マークの数を表示してください。
+         理由：枠内での改行されている数を把握する為。"
+
+The user also decided, when asked:
+    - file names: per page = the image name; all pages = <folder name>_all
+    - an existing file: ASK before overwriting
+    - the count: the NUMBER OF LINE BREAKS, not the number of lines
+
+================================================================================
+2. THE CODE AS IT IS TODAY
+================================================================================
+In custom_gui/app.py, SelectableImageViewer.__init__ around line 133:
+
+    self.export_button = ft.PopupMenuButton(
+        icon=ft.Icons.SAVE,
+        tooltip="Export Results",
+        items=[
+            ft.PopupMenuItem(text="Current image only", on_click=lambda e: self._start_export("current")),
+            ft.PopupMenuItem(text="All images", on_click=lambda e: self._start_export("all")),
+        ]
+    )
+    self.controls_row.controls.append(self.export_button)
+
+`_start_export(scope)` (line ~716) validates, then calls
+`self.file_picker.save_file(...)`. The actual writing lives in
+`_on_file_picker_result` (line ~749), mixed in with the folder-open and
+PDF-open branches of the SAME picker.
+
+`self.file_picker` is ALSO used to open a folder and to open PDFs. Those two
+uses MUST KEEP WORKING. Only the save branch goes away.
+
+The right hand panel builds each region's header at line ~1113:
+
+    ft.Text(f"{rect.label}{label_suffix}:", weight=ft.FontWeight.BOLD)
+
+where `label_suffix` is " (edited)" when the region has been corrected.
+
+================================================================================
+3. VERIFIED FACTS ABOUT flet 0.27.6 - DO NOT RE-DISCOVER THESE
+================================================================================
+The commander verified all of this in the project's own venv:
+
+    ft.Icons.SAVE, ft.Icons.SAVE_ALT, ft.Icons.SAVE_AS  all exist
+    ft.AlertDialog                                       exists
+    ft.Page.open(control) and ft.Page.close(control)     exist
+
+    ft.Page.dialog DOES NOT EXIST in 0.27.6.
+
+Open a dialog with `self.page.open(dlg)` and close it with
+`self.page.close(dlg)`. NEVER write `page.dialog = dlg` or
+`self.page.dialog = dlg`; the attribute is gone and tests/test_flet_constants.py
+will reject it.
+
+================================================================================
+4. DELIVERABLES
+================================================================================
+[A] A new pure module: custom_gui/save_paths.py
+
+    No flet import, no I/O, no GUI. Pure string functions so they can be
+    tested honestly.
+
+        def resolve_export_dir(image_path, pdf_source=None) -> str
+            If pdf_source is not None, return the directory of pdf_source.
+            Otherwise return the directory of image_path.
+            Always an absolute path.
+
+        def export_basename(image_path, scope, export_dir) -> str
+            scope == "current" -> the image file's stem
+                                  ("a/b/foo_0008.jpg" -> "foo_0008")
+            scope == "all"     -> "<the last path component of export_dir>_all"
+                                  ("C:/scan/国際寫眞新聞_028号" ->
+                                   "国際寫眞新聞_028号_all")
+            If export_dir has no usable last component (a drive root such as
+            "C:\\" or "/"), use "export_all" for scope "all".
+
+        def export_targets(image_path, scope, pdf_source=None) -> (csv, txt)
+            The two absolute paths: <dir>/<basename>.csv and
+            <dir>/<basename>.txt.
+
+    WHY pdf_source: a PDF page is rendered into tempfile.mkdtemp(), which is
+    deleted when the app exits. Writing the export next to it would silently
+    throw the user's work away. For a PDF page the export goes next to the
+    SOURCE PDF.
+
+[B] A new pure module: custom_gui/region_stats.py
+
+        def count_line_breaks(text) -> int
+
+    Normalise "\r\n" to "\n", drop trailing newlines, then count "\n".
+
+        ""            -> 0
+        "abc"         -> 0
+        "a\nb"        -> 1
+        "a\r\nb"      -> 1        (\r\n is ONE break, not two)
+        "a\nb\n"      -> 1        (a trailing break is not counted)
+        "a\nb\r\n"    -> 1
+        "a\n\nb"      -> 2
+        None          -> 0
+
+[C] Two toolbar icons replace the PopupMenuButton
+
+        ft.Icons.SAVE      tooltip "このページを保存 (Save this page)"
+                           -> self._start_export("current")
+        ft.Icons.SAVE_ALT  tooltip "全ページを保存 (Save all pages)"
+                           -> self._start_export("all")
+
+    Both are ft.IconButton, in that order, at the position the old button
+    occupied. Keep them as attributes so tests can find them:
+    `self.save_page_button` and `self.save_all_button`. Delete
+    `self.export_button` and the PopupMenuButton entirely.
+
+[D] Saving no longer opens a file dialog
+
+    `_start_export(scope)` keeps its existing validation and its existing
+    status messages EXACTLY as they are:
+
+        "Nothing to export"
+        "OCR not finished - cannot export yet"
+        "Nothing to export (N skipped: OCR not finished)"
+
+    After validation it must NOT call `self.file_picker.save_file`. Instead:
+
+        1. Work out the pdf_source for the current image: if `self.image_src`
+           is a key of `self.pdf_page_map`, the source PDF is the first
+           element of the tuple stored there; otherwise None.
+        2. csv_path, txt_path = export_targets(self.image_src, scope, pdf_source)
+        3. If EITHER file already exists, open the overwrite dialog [E].
+           Otherwise write immediately and open the done dialog [F].
+
+    The writing itself moves into its own method so it can be tested and so
+    both the direct path and the overwrite path use ONE implementation:
+
+        def _write_export(self, scope, csv_path, txt_path) -> str
+
+    It builds the rows exactly as the code does today (build_export_rows with
+    edited_texts=self.edits for "current", build_export_rows_multi over
+    _collect_all_export_pages() for "all"), writes the CSV as utf-8-sig with
+    newline="" and the TXT as utf-8, and returns the success message. Do not
+    change the export FORMAT, the encodings, or the messages' wording beyond
+    the file names they now mention.
+
+    Delete the save branch from `_on_file_picker_result`. The "folder" and
+    "pdf" branches stay untouched, and `self.file_picker` stays registered.
+
+[E] The overwrite dialog - two buttons
+
+        title    ft.Text("上書き確認")
+        content  the full path of each file that already exists
+        actions  ft.TextButton("キャンセル")  -> close, status
+                                                "Export cancelled",
+                                                NOTHING is written
+                 ft.TextButton("上書き保存")  -> close, run _write_export,
+                                                then open the done dialog [F]
+
+    Nothing may be written before the user presses 上書き保存.
+
+[F] The done dialog - ONE button, as the user asked
+
+        title    ft.Text("保存しました")
+        content  the two absolute paths, one per line
+        actions  ft.TextButton("OK") -> closes the dialog
+        modal    True
+
+    If the write raises, show the same shape with the title
+    "保存できませんでした" and the exception text, and set
+    `self.latest_region_info = f"Export failed: {ex}"` as today.
+
+[G] Every dialog is reachable from a test
+
+    Before opening, store the dialog on `self._save_dialog`. Open it with
+    `if self.page: self.page.open(dlg)`. Set `self._save_dialog = None` when it
+    closes. A test with no real page must still be able to read
+    `self._save_dialog`, inspect its actions and call their `on_click`.
+    Initialise `self._save_dialog = None` in __init__.
+
+[H] The line-break count in the right hand panel
+
+    The region header becomes
+
+        Region 1 [改行 2]:
+        Region 1 (edited) [改行 0]:
+
+    i.e. `f"{rect.label}{label_suffix} [改行 {n}]:"`, where n is
+    `count_line_breaks(display_text)` - the text actually shown, so a
+    corrected region reports the count of the CORRECTED text. Keep
+    weight=ft.FontWeight.BOLD and keep the "(edited)" suffix where it is.
+
+================================================================================
+5. DEFINITION OF DONE
+================================================================================
+[1] Two icon buttons; no PopupMenuButton anywhere in app.py.
+[2] Saving writes beside the image (beside the source PDF for a PDF page)
+    without any file dialog.
+[3] Names are <image stem>.csv/.txt and <folder>_all.csv/.txt.
+[4] An existing file triggers the two-button confirm; cancel writes nothing.
+[5] A successful save shows a one-button dialog.
+[6] Opening a folder and opening a PDF still work through self.file_picker.
+[7] The panel header shows [改行 N] with N counted per [B].
+[8] `python -m pytest tests/ -v` passes completely (161+ tests).
+
+================================================================================
+6. TESTS
+================================================================================
+Create THREE new files. Do not edit any existing test file.
+
+6.1 tests/test_save_paths.py - pure, fast
+    Every example in [A] and the drive-root fallback. Use os.path.join so the
+    tests pass on Windows. Include a PDF page case: image
+    "<tmp>/ndlocr_pdf_xyz/page_0003.png" with pdf_source
+    "C:/scan/book.pdf" resolves into "C:/scan".
+
+6.2 tests/test_region_stats.py - pure, fast
+    Every example in [B], including None and "a\r\nb".
+
+6.3 tests/test_save_direct.py - drives the REAL viewer
+    Build a real image with Pillow under tmp_path. Monkeypatch
+    `custom_gui.app.run_ocr_and_parse`. Do NOT run real OCR. Find controls by
+    walking the real control tree.
+
+    Do NOT replace `self.selections_list`, `self.rects_layer`,
+    `self.highlight_layer`, `self.selections_container` or the toolbar row
+    with MagicMock. This project has shipped SIX tests that could not detect
+    the bug they were written for, every one of them because the thing under
+    test was a mock. A test that cannot fail is worthless.
+
+    (a) The toolbar contains an IconButton with icon ft.Icons.SAVE and one
+        with ft.Icons.SAVE_ALT, and NO ft.PopupMenuButton. Walk
+        `viewer.controls_row.controls`.
+    (b) Monkeypatch `viewer.file_picker.save_file` to a function that raises
+        AssertionError. Call `viewer._start_export("current")` with one region
+        and OCR done. It must NOT raise - proving the dialog is gone - and
+        <tmp>/<stem>.csv and <tmp>/<stem>.txt must both exist afterwards.
+    (c) After (b), `viewer._save_dialog` is not None, has exactly ONE action,
+        and that action's text is "OK". Calling its on_click sets
+        `viewer._save_dialog` to None.
+    (d) Overwrite: write "SENTINEL" into <stem>.csv first, then
+        `_start_export("current")`. Assert the file STILL contains exactly
+        "SENTINEL" - nothing was written yet - and `_save_dialog` has TWO
+        actions. Call the "上書き保存" action: the file no longer contains
+        SENTINEL. Repeat with a fresh SENTINEL and call "キャンセル": the file
+        still contains exactly "SENTINEL".
+    (e) All pages: two images in one tmp folder, both with a region and OCR
+        done, `_start_export("all")` writes "<folder name>_all.csv" and
+        "<folder name>_all.txt" in that folder.
+    (f) The panel: give a region OCR text of three lines, and assert the
+        header ft.Text found in the real `viewer.selections_list` tree has
+        "[改行 2]" in its value. Then commit an edit of "一行だけ" through
+        `viewer.commit_edit(rect_id, "一行だけ")` and assert the header now
+        has "[改行 0]" and still has "(edited)".
+
+    For (b), (d) and (f) you MUST prove the test can fail: break the code
+    deliberately, paste the FAILING pytest output, restore the code, and paste
+    the passing output. State exactly what you broke.
+
+================================================================================
+7. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/app.py
+          custom_gui/save_paths.py        (new)
+          custom_gui/region_stats.py      (new)
+          tests/test_save_paths.py        (new)
+          tests/test_region_stats.py      (new)
+          tests/test_save_direct.py       (new)
+    - Do NOT modify ANY existing file under tests/. If an existing test fails,
+      STOP and report which one and what it expects. Do not edit it, do not
+      weaken it, do not delete it. tests/test_picker_modes.py exercises the
+      PDF branch of `_on_file_picker_result` and MUST keep passing untouched -
+      it is your proof that removing the save branch broke nothing.
+    - tests/test_flet_constants.py is a guard test: if it objects to your code,
+      CHANGE YOUR CODE. NEVER add an exemption. A local variable named `page`
+      WILL collide with it.
+    - Do NOT change custom_gui/exporter.py. The CSV columns, the TXT format
+      (one line per image, "<name>\t<segments joined by U+FF5C>"), and the
+      encodings do not change in this task.
+    - Do NOT undo Task 30c, 30d, 32 or 33b: the RLock around
+      _update_selections_ui, the layers carrying the pan offset, the offset
+      subtraction in _on_pan_start/_on_pan_update, the batch worker not
+      calling _switch_image, the Pre-OCR All button and its progress bar,
+      Enter committing the right hand panel edit (multiline + shift_enter +
+      on_submit), and the inline editor layer sitting ABOVE
+      self.gesture_detector in every stack construction must all stay exactly
+      as they are.
+    - Do not make event handlers async. flet dispatches every non-async
+      handler on a thread pool without serialising them; changing that model
+      is out of scope and dangerous.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - NEVER use `self.image` or `self.scale` as attribute names. Both are
+      reserved by flet and previously caused a fatal startup crash here.
+    - All verified working and must stay working: rectangle selection,
+      Select/Pan, panning, yellow highlights, the "Region N" label outside the
+      rectangle, the inline editor next to the rectangle, the lazy OCR
+      scheduler, cache-first reading, Pre-OCR All with progress and cancel,
+      folder loading, PDF loading, Prev/Next/Ctrl+N, F2 correction with
+      revert, the right-to-left button, and the error display for a missing
+      image WITHOUT crashing.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. FIVE previous tasks left probe files at
+      the repository root - Task 33 left TWENTY - and the commander had to
+      delete them by hand.
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - The 広告 and 表紙 buttons. They are a separate task.
+    - Persisting rectangles or corrections across restarts.
+    - Changing the CSV or TXT format, columns, separator or encoding.
+    - Letting the user configure the output folder or the file names.
+    - A progress dialog for saving, or saving in a background thread.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard
+      test objects, change your code. If you believe a guard test is genuinely
+      wrong, STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and report
+      exactly what blocked you.
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[8] to how you satisfied it.
+    2. The failing output for tests (b), (d) and (f) against deliberately
+       broken code, what you broke in each case, and the passing output after
+       restoring it.
+    3. The exact file paths written for: a plain image in C:/scan/issue028,
+       and a PDF page whose source PDF is C:/scan/book.pdf.
+    4. How a test reaches the dialog without a real ft.Page.
+    5. Confirmation that tests/test_picker_modes.py passes untouched.
+    6. The list of changed and added files with the reason for each.
+    7. The output of `git status` showing no stray files.
+    8. The full output of `python -m pytest tests/ -v`.
+    9. State explicitly that the dialog's appearance and the real button
+       clicks cannot be verified without a GUI - the commander will confirm
+       them on the real application.
+   10. Open questions or compromises. Write "none" if there are none.
