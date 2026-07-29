@@ -1,0 +1,354 @@
+Task 39b: [FIX] Task 39 の結線を完成させる - 現状ディスクには何も書かれていない
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+================================================================================
+0. START FROM THE FEATURE BRANCH - NOT FROM master
+================================================================================
+Your session starts on master, but this task continues work that is already
+committed on a branch. Before you change anything, run:
+
+    git fetch origin
+    git checkout integration/task-39
+
+That branch is master plus commit 4559563. Verify with `git log --oneline -3`
+that you see:
+
+    4559563 wip(Task 39): 永続化の純粋部分のみ - アプリ側の結線は未完成
+
+If you cannot get onto that branch, STOP and report it. Do NOT reimplement
+`custom_gui/work_state.py` on master - it already exists and it is correct.
+
+================================================================================
+1. WHAT HAPPENED
+================================================================================
+Task 39 asked for persistence of rectangles, edited texts and the 広告 / 表紙
+mark. The pure module was delivered and is good. The wiring into the
+application was not. The commander ran the real widgets and got 7 failures
+out of 7 checks. Nothing is written to disk and nothing is ever restored.
+
+There were four defects. Read all four before you write any code.
+
+DEFECT 1 - `work_state` is never imported
+    `custom_gui/app.py` calls `work_state.save_work_state(...)` inside
+    `_persist_work_state`, but the file has no
+    `import custom_gui.work_state as work_state`. Every call raises
+    NameError.
+
+DEFECT 2 - the NameError is swallowed
+    `_persist_work_state` ends with
+
+        except Exception:
+            pass
+
+    so the NameError never surfaces. The user sees a normal save and the
+    disk stays empty. This is the worst kind of failure: silent. The
+    commander's own instruction to swallow write errors is what made it
+    possible, and section 4[B] below narrows it.
+
+DEFECT 3 - restore does not exist
+    Neither `_switch_image` nor `__init__` calls `load_work_state`. The
+    entire second half of the feature is missing.
+
+DEFECT 4 - only 3 of the 6 mutation points persist
+    Wired:     _on_pan_end, commit_edit, _on_mark_click
+    NOT wired: delete_rect, restore_rect, rtl_rect
+
+And the test file `tests/test_persistence.py` did not even parse -
+`IndentationError` on line 22 - which stopped pytest during COLLECTION, so
+the whole suite refused to run. It has been deleted. You are writing it from
+scratch.
+
+================================================================================
+2. WHAT IS ALREADY DONE - DO NOT REDO OR "IMPROVE" IT
+================================================================================
+custom_gui/work_state.py  (new, correct, 9 passing tests)
+    WORK_SCHEMA_VERSION = 1
+    work_dir_for(source_path)
+    work_path_for(source_path, page_index=None)
+        -> .ndlocr_cache/<stem>.work.json
+        -> .ndlocr_cache/<stem>_p0001.work.json  when page_index is given
+    save_work_state(source_path, rects, edits, mark, page_index=None) -> str
+    load_work_state(source_path, page_index=None) -> Optional[dict]
+        -> {"rects": [{"rect_id","bbox"(tuple),"label"}...],
+            "edits": {...}, "mark": ... }  or None
+    clear_work_state(source_path, page_index=None) -> bool
+
+custom_gui/selection.py  (correct, 4 passing tests)
+    SelectionContainer.restore(rects) - keeps every rect_id and sets
+    _next_id to (largest numeric id) + 1.
+
+Do NOT change either file. Do NOT change tests/test_work_state.py or
+tests/test_selection_restore.py. If you believe one of them is wrong, STOP
+and report it.
+
+The three existing `_persist_work_state()` call sites are correctly placed.
+Leave them where they are.
+
+================================================================================
+3. THE DECISIONS THE USER MADE - STILL BINDING
+================================================================================
+[i]   Persist on EVERY mutation, automatically.
+[ii]  If the source image changed (size or mtime), DISCARD the saved state.
+      Do not restore, do not ask, do not migrate coordinates.
+[iii] Restore rectangles, edited texts AND the mark.
+
+================================================================================
+4. DELIVERABLES
+================================================================================
+[A] Import the module
+
+    Add, next to the other `import custom_gui.X as X` lines near the top of
+    custom_gui/app.py:
+
+        import custom_gui.work_state as work_state
+
+[B] Narrow the exception handling in `_persist_work_state`
+
+    Replace
+
+        except Exception:
+            pass
+
+    with
+
+        except (OSError, TypeError, ValueError):
+            pass
+
+    Rationale, and this is the whole point of the change: a disk that is
+    full or read-only must not interrupt the user's editing. A NameError, an
+    AttributeError or an ImportError is a PROGRAMMING mistake and must be
+    allowed to crash loudly in the test suite instead of hiding for a day.
+    Do NOT widen this back to `Exception`. Do NOT add a `finally`. Do NOT
+    log and continue.
+
+[C] Wire the three missing mutation points
+
+    In custom_gui/app.py, add `self._persist_work_state()` AFTER the state
+    has changed in each of:
+
+        delete_rect     (inside _update_selections_ui, ~line 1222 on master)
+                        after delete_by_id and the `del self.edits[rid]`
+        restore_rect    (~line 1244) after the edit is removed
+        rtl_rect        (~line 1258) after self.edits is set or removed
+
+    Put the call after the existing `self._update_selections_ui()` in each
+    one, so the UI updates first and a slow disk cannot delay the redraw.
+
+    Do NOT call `_persist_work_state` from inside `_update_selections_ui`
+    itself. That method also runs from background OCR threads and from pure
+    redraws; a write hung off it would persist state that no user action
+    produced.
+
+[D] Restore - this is the missing half of the feature
+
+    Write ONE private helper and use it from BOTH places that build a fresh
+    `image_states` entry:
+
+        def _load_persisted_state(self, path):
+            """Returns (SelectionContainer, edits dict, mark) for `path`,
+            restoring from disk when a valid saved state exists, otherwise a
+            fresh empty container, {} and None."""
+
+    It must resolve the source and page index exactly the way
+    `_persist_work_state` does:
+
+        PDF page  -> self.pdf_page_map[path] -> (pdf_path, page_index)
+        otherwise -> path, None
+
+    and it must survive a missing or invalid state by returning the empty
+    triple. `load_work_state` already returns None for every invalid case;
+    do not re-validate what it validated.
+
+    Use it in:
+
+        `_switch_image`, inside the existing
+        `if path not in self.image_states:` branch
+        `__init__`, for the very first image
+
+    The restored `SelectionContainer` is built with `restore(...)`, fed
+    `SelectionRect(rect_id=..., bbox=..., label=...)` objects rebuilt from
+    the dicts `load_work_state` returned. `SelectionRect` is already
+    imported? Check - if not, import it from custom_gui.selection.
+
+    `ocr_state`, `ocr_results` and `ocr_error` are NOT part of this task.
+    They keep coming from `ocr_cache` and the existing logic, untouched.
+
+    EVERY place that builds an `image_states` entry must build the SAME
+    SHAPE: selections, ocr_state, ocr_results, ocr_error, edits, mark. Task
+    36 shipped a `KeyError: 'mark'` by adding a key in one place and not the
+    other. There are exactly two such places; keep them identical.
+
+[E] Restoring must not immediately rewrite the file
+
+    Do not call `_persist_work_state` from `__init__`, from
+    `_switch_image`, or from `_load_persisted_state`. Restoring is a read.
+    If a page turn rewrote the file, an unnoticed serialisation bug would
+    destroy the user's work on the very act of looking at the page.
+
+[F] Nothing else changes
+
+    No new toolbar button, no menu item, no dialog, no status bar redesign,
+    no change to any export file, no change to the OCR cache format.
+
+================================================================================
+5. DEFINITION OF DONE
+================================================================================
+[1]  Drawing a rectangle creates a real file at
+     `work_state.work_path_for(image)`. Proven with `os.path.exists`.
+[2]  Deleting a rectangle, committing an edit, undoing an edit ("復元"), the
+     RTL conversion, and 広告 / 表紙 each rewrite that file.
+[3]  A second `SelectableImageViewer` built on the same image restores the
+     rectangles with their rect_ids and labels, the edited texts, and the
+     mark.
+[4]  After restoring N rectangles, the next rectangle drawn gets an id that
+     collides with none of them, and editing it leaves every restored
+     rectangle's text unchanged.
+[5]  A changed source image (size or mtime) restores nothing, raises
+     nothing, opens no dialog.
+[6]  A corrupt `.work.json` restores nothing and raises nothing.
+[7]  A PDF page persists beside the PDF, keyed by page index, never in the
+     temporary render directory.
+[8]  `save_work_state` raising OSError does not break editing: the
+     rectangle is still in the container and nothing escapes.
+[9]  `_persist_work_state` does NOT catch NameError / AttributeError /
+     ImportError.
+[10] `python -m pytest tests/ --collect-only -q` succeeds - no file in
+     tests/ fails to parse. RUN THIS BEFORE YOU SUBMIT.
+[11] `python -m pytest tests/ -v` passes completely: 204 on
+     integration/task-39, or more.
+
+================================================================================
+6. TESTS - create tests/test_persistence.py
+================================================================================
+Real images built with Pillow under tmp_path - at least TWO, so a page turn
+is real. Monkeypatch `custom_gui.app.run_ocr_and_parse`. No real OCR, no GUI.
+
+Do NOT replace `self.selections_list`, `self.rects_layer`,
+`self.highlight_layer`, `self.selection_container`, `self.image_states`,
+`self.edits` or `self.btn_next` with MagicMock. This project has shipped
+EIGHT tests that could not detect the bug they were written for, every one of
+them because the thing under test was a mock. A test that cannot fail is
+worthless. Mocking the flet Page object is fine and expected; mocking the
+state you are asserting about is not.
+
+    (a) add a rectangle, then assert
+        `os.path.exists(work_state.work_path_for(img))`. Open the JSON and
+        assert the rectangle's bbox and label are in it. Asserting only that
+        a method was called would NOT have caught defect 1 - assert on the
+        FILE.
+    (b) commit an edit, build a SECOND viewer on the same image, assert the
+        rectangle AND the edited text came back.
+    (c) press 広告 via `_on_mark_click`, build a second viewer, assert
+        `viewer.mark` is 【広告】.
+    (d) delete the only rectangle through the real container plus
+        `_persist_work_state`, build a second viewer, assert it has NO
+        rectangles. Deletion must persist, not only addition.
+    (e) undo an edit ("復元" / restore_rect path) and assert the saved JSON
+        no longer contains that rect_id in "edits".
+    (f) restore a page that has rectangles, draw a NEW rectangle, edit the
+        new one, and assert the RESTORED rectangle's text is unchanged.
+        This is condition [4] and it is the failure mode that would silently
+        corrupt a user's work.
+    (g) rewrite the image file so its size changes, build a second viewer,
+        assert no rectangles are restored and no exception was raised.
+    (h) write garbage into the `.work.json`, build a second viewer, assert
+        no rectangles and no exception.
+    (i) monkeypatch `custom_gui.app.work_state.save_work_state` to raise
+        OSError, add a rectangle, assert the rectangle IS in the container
+        and no exception escaped.
+    (j) monkeypatch it to raise NameError instead, and assert that
+        `_persist_work_state` DOES propagate it (`pytest.raises`). This is
+        condition [9] and it is the test that would have caught defect 1.
+    (k) a PDF page: put an entry in `viewer.pdf_page_map` for the current
+        image and assert the file lands at
+        `work_state.work_path_for(pdf_path, page_index)` and NOT at
+        `work_state.work_path_for(png_path)`.
+
+    For (b), (d), (f) and (j) you MUST prove the test can fail: break the
+    code deliberately, paste the FAILING pytest output, restore the code,
+    and paste the passing output. State exactly what you broke. For (j) the
+    natural break is putting `except Exception` back.
+
+================================================================================
+7. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/app.py
+          tests/test_persistence.py            (new)
+    - Do NOT touch custom_gui/work_state.py or custom_gui/selection.py.
+      They are finished.
+    - Do NOT modify ANY existing file under tests/. If an existing test
+      fails, STOP and report which one and what it expects. Do not edit it,
+      do not weaken it, do not delete it. tests/test_ocr_scheduler.py reads
+      `image_states` directly - if it breaks, that is a finding to REPORT.
+    - tests/test_flet_constants.py is a guard test. If it objects to your
+      code, CHANGE YOUR CODE. NEVER add an exemption. A local variable named
+      `page` WILL collide with it.
+    - NEVER name an attribute `self.image` or `self.scale`. Both are
+      reserved by flet and previously caused a fatal startup crash here.
+    - Do NOT undo Task 30c, 30d, 32, 33b, 35, 36, 37 or 38: the RLock around
+      _update_selections_ui, the layers carrying the pan offset, the offset
+      subtraction in _on_pan_start/_on_pan_update, the batch worker not
+      calling _switch_image, Pre-OCR All with its progress bar, Enter
+      committing the right hand panel edit, the inline editor layer ABOVE
+      self.gesture_detector in every stack construction, the two save icons
+      with no file dialog, the "[改行 N]" header, the 広告 / 表紙 buttons,
+      the right-click Pan toggle with its cursor, and Ctrl+S with the
+      next-page dialog must all stay exactly as they are.
+    - Do not make event handlers async. flet dispatches every non-async
+      handler on a thread pool without serialising them; changing that model
+      is out of scope and dangerous.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Task 35 left TWENTY files, Task 36
+      left SIXTEEN, and Task 39 left TEN - debug.py, fix_app2.py,
+      fix_tests.py, img1.png, img_manual.png, patch_selection.py,
+      patch_selection.sh, plan.py, proper_patch.py, test_manual.py. The
+      commander deleted every one of them by hand. If you need a scratch
+      script, write it under the system temp directory, not the repository.
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - Persisting OCR results, zoom, pan offset, the current page, the window
+      size, or which folder was last open.
+    - Any UI for clearing the saved state.
+    - Asking the user whether to restore.
+    - Moving or resizing an existing rectangle.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+    - Touching anything under src/, config/, model/ or resource/. The OCR
+      engine must stay byte identical to upstream.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard
+      test objects, change your code. If you believe a guard test is
+      genuinely wrong, STOP and report it instead of editing it.
+    - Do not invent workarounds. If blocked, stop, keep what works, and
+      report exactly what blocked you.
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. Confirmation that you started from integration/task-39, and the
+       output of `git log --oneline -3`.
+    2. A table mapping each condition [1]-[11] to how you satisfied it.
+    3. The failing output for tests (b), (d), (f) and (j) against
+       deliberately broken code, what you broke in each case, and the
+       passing output after restoring it.
+    4. The full list of `_persist_work_state()` call sites after your change
+       - there must be six - and why you are confident there is no seventh
+       mutation point.
+    5. The exact code of `_load_persisted_state` and both call sites, and
+       proof that the two `image_states` entries have identical keys.
+    6. What guarantees that restoring does not rewrite the file.
+    7. Whether every existing test still passes untouched, and if not,
+       exactly which assertion objects and what it expects.
+    8. The output of `python -m pytest tests/ --collect-only -q`.
+    9. The list of changed and added files with the reason for each.
+   10. The output of `git status` showing no stray files.
+   11. The full output of `python -m pytest tests/ -v`.
+   12. Open questions or compromises. Write "none" if there are none.
