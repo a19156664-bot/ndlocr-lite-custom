@@ -79,7 +79,7 @@ def test_c_cursor_updates(viewer):
 
     # First right click
     viewer.gesture_detector.on_secondary_tap(create_control_event())
-    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.GRAB
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.CLICK
 
     # Second right click
     viewer.gesture_detector.on_secondary_tap(create_control_event())
@@ -88,24 +88,24 @@ def test_c_cursor_updates(viewer):
 def test_d_pan_mode_drag(viewer):
     # Setup PAN mode
     viewer.gesture_detector.on_secondary_tap(create_control_event())
-    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.GRAB
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.CLICK
 
     # Drag start
     start_event = create_drag_start(100, 100)
     viewer.gesture_detector.on_pan_start(start_event)
-    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.GRABBING
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.ALL_SCROLL
 
     # Drag update
     update_event = create_drag_update(150, 120, 50, 20)
     viewer.gesture_detector.on_pan_update(update_event)
-    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.GRABBING
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.ALL_SCROLL
     assert viewer.offset_x == 50
     assert viewer.offset_y == 20
 
     # Drag end
     end_event = create_drag_end()
     viewer.gesture_detector.on_pan_end(end_event)
-    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.GRAB
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.CLICK
     assert viewer.offset_x == 50
     assert viewer.offset_y == 20
 
@@ -164,4 +164,41 @@ def test_g_toolbar_toggle_refreshes_cursor(viewer):
             
     assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.PRECISE
     viewer._on_mode_change(DummyEvent({"PAN"}))
-    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.GRAB
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.CLICK
+
+def test_h_full_cycle_real_handlers(viewer):
+    # (a) full cycle driven through the REAL handlers:
+    # start in SELECT and assert PRECISE
+    assert viewer.mode_state.current == "SELECT"
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.PRECISE
+    
+    # fire `_toggle_mode` (the right-click handler) and assert CLICK
+    viewer.gesture_detector.on_secondary_tap(create_control_event())
+    assert viewer.mode_state.current == "PAN"
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.CLICK
+    
+    # fire `_on_pan_start` and assert ALL_SCROLL
+    start_event = create_drag_start(100, 100)
+    viewer.gesture_detector.on_pan_start(start_event)
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.ALL_SCROLL
+    
+    # fire `_on_pan_end` and assert CLICK again
+    end_event = create_drag_end()
+    viewer.gesture_detector.on_pan_end(end_event)
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.CLICK
+    
+    # fire `_toggle_mode` and assert PRECISE
+    viewer.gesture_detector.on_secondary_tap(create_control_event())
+    assert viewer.mode_state.current == "SELECT"
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.PRECISE
+
+def test_i_select_mode_drag_keeps_precise(viewer):
+    # (b) dragging in SELECT mode keeps PRECISE - `_on_pan_start` must not
+    # turn a Select drag into a pan cursor.
+    assert viewer.mode_state.current == "SELECT"
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.PRECISE
+    
+    # Drag start
+    start_event = create_drag_start(10, 10)
+    viewer.gesture_detector.on_pan_start(start_event)
+    assert viewer.gesture_detector.mouse_cursor == ft.MouseCursor.PRECISE

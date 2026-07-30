@@ -391,9 +391,9 @@ class SelectableImageViewer(ImageViewer):
             self.gesture_detector.mouse_cursor = ft.MouseCursor.PRECISE
         elif self.mode_state.current == "PAN":
             if self._is_dragging:
-                self.gesture_detector.mouse_cursor = ft.MouseCursor.GRABBING
+                self.gesture_detector.mouse_cursor = ft.MouseCursor.ALL_SCROLL
             else:
-                self.gesture_detector.mouse_cursor = ft.MouseCursor.GRAB
+                self.gesture_detector.mouse_cursor = ft.MouseCursor.CLICK
 
     def _toggle_mode(self, e):
         new_mode = "PAN" if self.mode_state.current == "SELECT" else "SELECT"
