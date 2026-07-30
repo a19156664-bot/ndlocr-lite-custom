@@ -346,7 +346,7 @@ class SelectableImageViewer(ImageViewer):
             if target_path not in self.pdf_page_map:
                 try:
                     ocr_cache.save_cache(target_path, results)
-                except OSError:
+                except Exception:
                     pass
             
         if self.image_src == target_path:
@@ -536,7 +536,7 @@ class SelectableImageViewer(ImageViewer):
                         if getattr(self, 'page', None) and getattr(self.status_text, 'page', None):
                             self.status_row.update()
                         self._update_selections_ui()
-                except OSError:
+                except Exception:
                     pass
 
     def _on_batch_ocr_click(self, e):
@@ -1196,6 +1196,8 @@ class SelectableImageViewer(ImageViewer):
             self.gesture_detector.update()
 
     def _update_selections_ui(self):
+        with self.selections_lock:
+            if hasattr(self, 'mark_label'):
                 if self.mark:
                     self.mark_label.value = self.mark
                     self.mark_label.visible = True
@@ -1501,7 +1503,7 @@ def main(page: ft.Page):
     try:
         with Image.open(image_path) as img:
             img_w, img_h = img.size
-    except OSError:
+    except Exception:
         img_w, img_h = 2048, 1446
     
     viewer = SelectableImageViewer(
