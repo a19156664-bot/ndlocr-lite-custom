@@ -85,6 +85,8 @@ class SelectableImageViewer(ImageViewer):
         self.active_region_id = None
         self.editing_region_id = None
         
+        self._pending_export = None
+        
         self.batch_running = False
         self._batch_cancel_requested = False
         self.batch_progress = None
@@ -360,7 +362,15 @@ class SelectableImageViewer(ImageViewer):
             if self.page:
                 self.status_row.update()
             self._update_selections_ui()
-            
+
+        if self._pending_export == target_path:
+            self._pending_export = None
+            if state["ocr_state"] == OcrState.DONE and self.image_src == target_path:
+                self._start_export("current")
+            elif state["ocr_state"] == OcrState.ERROR and self.image_src == target_path:
+                self.latest_region_info = state["ocr_error"] if state["ocr_error"] else "OCR Error"
+                self._update_status()
+
         current_page = self.image_src
         current_state = self.image_states.get(current_page)
         needs_ocr = current_state is not None and current_state["ocr_state"] in (OcrState.IDLE, OcrState.WAITING)
@@ -695,6 +705,8 @@ class SelectableImageViewer(ImageViewer):
         if not path:
             return
             
+        self._pending_export = None
+        
         # [A] Render before deciding whether the file exists.
         render_error = None
         if path in self.pdf_page_map:
@@ -846,26 +858,71 @@ class SelectableImageViewer(ImageViewer):
         return pages, skipped, regions_count
 
     def _start_export(self, scope):
+        def close_dialog(e):
+            if self.page:
+                self.page.close(self._save_dialog)
+            self._save_dialog = None
+
         self._export_scope = scope
         if scope == "current":
             rects = self.selection_container.get_all()
             if not rects and not self.mark:
                 self.latest_region_info = "Nothing to export"
                 self._update_status()
+                self._save_dialog = ft.AlertDialog(
+                    title=ft.Text("保存できません"),
+                    content=ft.Text("OCRデータがございません。"),
+                    actions=[ft.TextButton("OK", autofocus=True, on_click=close_dialog)],
+                    modal=True
+                )
+                if self.page:
+                    self.page.open(self._save_dialog)
                 return
             if rects and self.ocr_state != OcrState.DONE:
-                self.latest_region_info = "OCR not finished - cannot export yet"
-                self._update_status()
-                return
+                if self.ocr_state == OcrState.ERROR:
+                    self.latest_region_info = self.ocr_error if self.ocr_error else "OCR Error"
+                    self._update_status()
+                    self._save_dialog = ft.AlertDialog(
+                        title=ft.Text("保存できません"),
+                        content=ft.Text(self.latest_region_info),
+                        actions=[ft.TextButton("OK", autofocus=True, on_click=close_dialog)],
+                        modal=True
+                    )
+                    if self.page:
+                        self.page.open(self._save_dialog)
+                    return
+                else:
+                    self._pending_export = self.image_src
+                    self.latest_region_info = "OCR待ち - 完了後に保存します"
+                    self._update_status()
+                    if self.page:
+                        self.start_ocr(self.page)
+                    return
         elif scope == "all":
             pages, skipped, regions_count = self._collect_all_export_pages()
             if not pages and skipped == 0:
                 self.latest_region_info = "Nothing to export"
                 self._update_status()
+                self._save_dialog = ft.AlertDialog(
+                    title=ft.Text("保存できません"),
+                    content=ft.Text("OCRデータがございません。"),
+                    actions=[ft.TextButton("OK", autofocus=True, on_click=close_dialog)],
+                    modal=True
+                )
+                if self.page:
+                    self.page.open(self._save_dialog)
                 return
             if not pages and skipped > 0:
                 self.latest_region_info = f"Nothing to export ({skipped} skipped: OCR not finished)"
                 self._update_status()
+                self._save_dialog = ft.AlertDialog(
+                    title=ft.Text("保存できません"),
+                    content=ft.Text(f"OCRデータがございません。({skipped}ページスキップ: OCR未完了)"),
+                    actions=[ft.TextButton("OK", autofocus=True, on_click=close_dialog)],
+                    modal=True
+                )
+                if self.page:
+                    self.page.open(self._save_dialog)
                 return
             
         pdf_source = None
@@ -874,43 +931,7 @@ class SelectableImageViewer(ImageViewer):
             
         csv_path, txt_path = export_targets(self.image_src, scope, pdf_source)
         
-        if os.path.exists(csv_path) or os.path.exists(txt_path):
-            self._show_overwrite_dialog(scope, csv_path, txt_path)
-        else:
-            self._do_write_and_show_done(scope, csv_path, txt_path)
-
-    def _show_overwrite_dialog(self, scope, csv_path, txt_path):
-        def on_cancel(e):
-            if self.page:
-                self.page.close(self._save_dialog)
-            self._save_dialog = None
-            self.latest_region_info = "Export cancelled"
-            self._update_status()
-            
-        def on_overwrite(e):
-            if self.page:
-                self.page.close(self._save_dialog)
-            self._save_dialog = None
-            self._do_write_and_show_done(scope, csv_path, txt_path)
-            
-        exists_paths = []
-        if os.path.exists(csv_path):
-            exists_paths.append(csv_path)
-        if os.path.exists(txt_path):
-            exists_paths.append(txt_path)
-            
-        content_text = "\n".join(exists_paths)
-            
-        self._save_dialog = ft.AlertDialog(
-            title=ft.Text("上書き確認"),
-            content=ft.Text(content_text),
-            actions=[
-                ft.TextButton("キャンセル", on_click=on_cancel),
-                ft.TextButton("上書き保存", on_click=on_overwrite),
-            ],
-        )
-        if self.page:
-            self.page.open(self._save_dialog)
+        self._do_write_and_show_done(scope, csv_path, txt_path)
 
     def _do_write_and_show_done(self, scope, csv_path, txt_path):
         try:
