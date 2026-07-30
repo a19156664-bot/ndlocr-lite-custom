@@ -1,0 +1,402 @@
+Task 40: [FIX] このページ保存と Ctrl+S が2回目以降きかない
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+================================================================================
+1. THE DEFECT AS THE USER REPORTED IT
+================================================================================
+    "このページ保存ボタン、CTRL+S（ショートカット）を押下しても保存されません。
+     補足: 全ページ保存ボタンは実行できました。"
+
+and then, having investigated it themselves:
+
+    "原因：OCR画面でのselect（OCR）を行っていない場合に、現在のページが保存が
+     できない事象でした。
+     追加依頼1: OCR情報がない状態で、ページ保存を行った場合にエラーメッセージを
+     表示。表示内容案：OCRデータがございません。"
+
+THE USER'S DIAGNOSIS IS THE PRIMARY ONE. When the page has no rectangles and
+no mark, `_start_export("current")` returns at line ~852 after writing
+"Nothing to export" into the status bar - in English, in a small status line
+the user does not watch. Nothing else happens. From the user's seat the button
+is simply dead. The all-pages save appeared to work because OTHER pages in the
+folder did have rectangles.
+
+    if not rects and not self.mark:
+        self.latest_region_info = "Nothing to export"
+        self._update_status()
+        return
+
+The real defect is that a refusal is invisible. Sections 2 and 3 below cover
+two more paths, found by the commander while reproducing, that fail the same
+silent way. All of them are in scope.
+
+This is NOT a mystery to investigate - every cause is printed below.
+Implement the fix.
+
+================================================================================
+2. SECOND PATH - the overwrite confirmation dead-ends the keyboard
+================================================================================
+`_start_export` (custom_gui/app.py line ~877) branches on whether the output
+file already exists:
+
+    if os.path.exists(csv_path) or os.path.exists(txt_path):
+        self._show_overwrite_dialog(scope, csv_path, txt_path)
+    else:
+        self._do_write_and_show_done(scope, csv_path, txt_path)
+
+The per-page output is `<image stem>.csv` / `.txt`, so the SECOND time a page
+is saved the file exists and the flow stops at the 上書き確認 dialog. Task 38
+deliberately gave that dialog NO autofocus, so Enter does nothing there -
+which means `Ctrl+S` followed by `Enter` dead-ends from the second save
+onward. The 広告 / 表紙 buttons also create `<stem>.txt` the moment they are
+pressed, so almost every page the user has touched hits this.
+
+The all-pages output is `<folder>_all.csv` / `.txt` - one pair for the whole
+folder - so on its first use the file does not exist and it saves immediately.
+That is the whole asymmetry the user noticed.
+
+Reproduction, from the commander's run on a restored session:
+
+    === このページ保存 ===
+      latest_region_info = 'OCR not finished - cannot export yet'   (stale)
+      dialog             = 上書き確認
+        action: 'キャンセル'  autofocus=False
+        action: '上書き保存'  autofocus=False
+
+    === 全ページ保存（同じ状態） ===
+      latest_region_info = 'Exported 1 regions from 1 images'
+      dialog             = 保存しました
+      issue_all.csv exists = True
+
+================================================================================
+3. THIRD PATH - a save requested before OCR finishes is thrown away
+================================================================================
+Right after startup the rectangles restored by Task 39 are on screen but the
+OCR for that page has not finished, so `_start_export("current")` refuses at
+line ~856 - again into the status bar only:
+
+    if rects and self.ocr_state != OcrState.DONE:
+        self.latest_region_info = "OCR not finished - cannot export yet"
+        return
+
+Before Task 39, rectangles only existed after the user drew them, by which
+time OCR had been requested. Restoring changed that. This must be fixed too.
+
+================================================================================
+4. THE DECISIONS THE USER MADE - DO NOT REOPEN THEM
+================================================================================
+[i]   No OCR data means a DIALOG, not a status line. The user's own wording
+      for it is 「OCRデータがございません。」 Use that string.
+[ii]  The overwrite confirmation goes away. Saving the page's own output file
+      again is normal work, not a dangerous act. The output path is derived
+      from the image name and cannot point at an unrelated file.
+[iii] When OCR has not finished, the save is REMEMBERED and performed
+      automatically once OCR completes. The user must not have to press it
+      again.
+
+After this task, `_start_export("current")` has exactly four outcomes:
+
+    no rectangles and no mark          -> dialog 「OCRデータがございません。」
+    rectangles, OCR not done, no error -> queue it, save when OCR completes
+    rectangles, OCR ended in ERROR     -> dialog showing the OCR error
+    otherwise                          -> write immediately, no confirmation
+
+================================================================================
+5. DELIVERABLES
+================================================================================
+[A0] A refusal is never silent - show 「OCRデータがございません。」
+
+    Replace the "Nothing to export" early return for `scope == "current"`
+    with a modal dialog:
+
+        title    ft.Text("保存できません")
+        content  ft.Text("OCRデータがございません。")
+        actions  ft.TextButton("OK", autofocus=True)   -> closes it
+        modal    True
+
+    Store it in `self._save_dialog` exactly like the other dialogs, so tests
+    can reach it and so `page.close` works. Keep setting
+    `self.latest_region_info` as well - the status line stays informative -
+    but the dialog is what the user sees.
+
+    Do the same for the `scope == "all"` "Nothing to export" and
+    "Nothing to export (N skipped: OCR not finished)" returns. The wording for
+    the all-pages skipped case must say how many pages were skipped, because
+    that is actionable. A silent status line is the defect being fixed; do not
+    leave one behind.
+
+    When the OCR ended in ERROR for a page that HAS rectangles, show the same
+    style of dialog with the actual OCR error text as the content.
+
+[A] Delete the overwrite confirmation
+
+    In `_start_export`, replace the exists/else branch with an unconditional
+    call:
+
+        self._do_write_and_show_done(scope, csv_path, txt_path)
+
+    Delete the `_show_overwrite_dialog` method entirely. It becomes dead code
+    and dead code in this file has already caused one silent defect.
+
+    This applies to BOTH scopes. `<folder>_all.csv` gets overwritten without
+    confirmation too, for the same reason.
+
+    Everything else about writing stays exactly as it is: the file names, the
+    folders, the encodings (`utf-8-sig` for CSV), the row building, the mark
+    rows from Task 36, and the 保存しました dialog with its 次へ / ここに残る
+    / OK actions from Task 38.
+
+[B] A save requested before OCR finishes is performed when OCR finishes
+
+    The QUEUING applies to `scope == "current"` ONLY. The all-pages scope
+    keeps refusing when pages are skipped - but as a dialog now, per [A0], not
+    as a status line. Do not queue an all-pages export.
+
+    In `_start_export`, replace the refusal at line ~856 with:
+
+        if rects and self.ocr_state != OcrState.DONE:
+            if self.ocr_state == OcrState.ERROR:
+                <keep refusing - show the existing OCR error, do NOT queue>
+            else:
+                self._pending_export = self.image_src
+                self.latest_region_info = "OCR待ち - 完了後に保存します"
+                self._update_status()
+                if self.page:
+                    self.start_ocr(self.page)
+                return
+
+    Initialise `self._pending_export = None` in `__init__`.
+
+    In `_on_ocr_complete` (line ~333), AFTER the existing state updates and
+    AFTER the `self.image_src == target_path` block that refreshes the UI,
+    add:
+
+        if self._pending_export == target_path:
+            self._pending_export = None
+            if state["ocr_state"] == OcrState.DONE and self.image_src == target_path:
+                self._start_export("current")
+
+    Rules this must obey:
+
+    - Clear `_pending_export` BEFORE calling `_start_export`, so a second
+      failure cannot loop.
+    - If the OCR ended in ERROR, clear the pending save and do NOT export.
+      Put the OCR error in the status line.
+    - If the user has moved to another page in the meantime
+      (`self.image_src != target_path`), clear the pending save and do NOT
+      export. Saving a page the user is no longer looking at would write a
+      file they did not ask for.
+    - `_switch_image` must clear `_pending_export`. Leaving a page cancels
+      the queued save.
+    - Pressing save twice while waiting must not queue two exports.
+
+[C] The status line must never be stale when a save is refused or queued
+
+    Every early return in `_start_export` already sets `latest_region_info`
+    and calls `_update_status()`. Check that this is true after your change
+    and that the queued case does it too. The reproduction above shows a
+    stale 'OCR not finished - cannot export yet' left on screen while a
+    different dialog was open; that is what made the defect look like
+    "nothing happens".
+
+[D] Nothing else changes
+
+    No new button, no new setting, no change to the persistence from Task 39,
+    no change to the 保存しました dialog, no change to Ctrl+S itself.
+
+================================================================================
+6. EXISTING TESTS YOU ARE AUTHORISED TO CHANGE - AND ONLY THESE
+================================================================================
+Deleting the overwrite dialog is a deliberate specification change, so three
+existing assertions become wrong. You MAY change these three, and nothing
+else under tests/:
+
+    tests/test_save_direct.py     line ~117  assert ... == "上書き確認"
+    tests/test_save_shortcut.py   line ~162  assert ... == "上書き確認"
+    tests/test_mark_buttons.py    line ~168  assert ... == "上書き確認"
+
+For EACH one, the replacement must be STRONGER, not weaker:
+
+    - Assert the dialog title is now "保存しました".
+    - Assert the file was actually written - read it back and check its
+      content, do not just check that a dialog appeared.
+    - Where the old test then clicked 上書き保存 to proceed, delete that step
+      and assert the write already happened.
+
+Do NOT delete these tests. Do NOT mark them skip or xfail. Do NOT loosen an
+assertion to `in` or to a truthiness check. A test that no longer proves
+anything is worse than a failing one. Quote the old and new lines side by side
+in your report.
+
+Every other test under tests/ must pass UNMODIFIED. If one fails, STOP and
+report which assertion objects and what it expects.
+
+================================================================================
+7. DEFINITION OF DONE
+================================================================================
+[0a] Pressing このページ保存 on a page with no rectangles and no mark opens a
+     modal dialog whose content is exactly "OCRデータがございません。" - not a
+     status line only.
+[0b] Ctrl+S in the same situation opens the same dialog.
+[0c] The all-pages save with nothing to export also opens a dialog, and when
+     pages were skipped for unfinished OCR it says how many.
+[0d] A page with rectangles whose OCR ended in ERROR opens a dialog containing
+     the OCR error text, and writes nothing.
+[1]  Saving the same page twice writes the file both times, with no dialog in
+     between other than 保存しました.
+[2]  Ctrl+S on an already-saved page writes the file. Enter on the resulting
+     dialog moves to the next page (Task 38 behaviour, unchanged).
+[3]  A page that has been stamped 広告 or 表紙 - so its TXT already exists -
+     saves without a confirmation.
+[4]  `_show_overwrite_dialog` no longer exists anywhere in the file.
+[5]  Saving while OCR is still running queues the save; when OCR completes
+     successfully the file is written and 保存しました appears, with no second
+     key press.
+[6]  Saving while OCR is running, then switching pages, writes NOTHING.
+[7]  OCR ending in ERROR after a queued save writes nothing and leaves the
+     OCR error in the status line.
+[8]  Pressing save twice while OCR runs results in ONE export, not two.
+[9]  All-pages save still works and still overwrites `<folder>_all.*`.
+[10] `python -m pytest tests/ -v` passes completely: 215 or more.
+
+================================================================================
+8. TESTS - extend tests/test_save_direct.py, and add
+   tests/test_pending_export.py for the OCR-wait behaviour
+================================================================================
+Real images built with Pillow under tmp_path - at least TWO. Monkeypatch
+`custom_gui.app.run_ocr_and_parse`. No real OCR, no GUI.
+
+Do NOT replace `selections_list`, `rects_layer`, `highlight_layer`,
+`selection_container`, `image_states`, `edits`, `mark` or `btn_next` with
+MagicMock. This project has shipped twelve tests that could not fail, every
+one of them because the thing under test was a mock. Mocking the flet Page
+object is fine and expected.
+
+Reach the behaviour through the real entry points: the toolbar button's
+`on_click`, the `on_keyboard` handler for Ctrl+S, `viewer._on_mark_click`,
+`viewer._switch_image`, and `viewer._on_ocr_complete`. Do not call
+`_write_export` directly.
+
+    (z1) a page with NO rectangles and NO mark: fire the real
+        `save_page_button.on_click` and assert `_save_dialog` is open and its
+        content value is exactly "OCRデータがございません。", and that no CSV
+        and no TXT were created. This is the user's reported defect - it MUST
+        have a test.
+    (z2) the same via the real Ctrl+S keyboard handler.
+    (z3) a page whose `ocr_state` is ERROR and which HAS a rectangle: assert
+        the dialog content contains the OCR error text and no file was
+        written.
+    (a) save a page, then save it AGAIN: assert the second save produced the
+        保存しました dialog and that the CSV on disk contains the new content.
+        Write a sentinel into the file between the two saves and assert it is
+        gone, proving a real overwrite.
+    (b) Ctrl+S twice in a row on the same page: both write.
+    (c) press 広告 (real handler), then save: no 上書き確認, the TXT contains
+        both the mark line and the region rows.
+    (d) grep-style check: assert `_show_overwrite_dialog` is not an attribute
+        of the viewer.
+    (e) queue a save while OCR is pending, fire `_on_ocr_complete` with
+        results, and assert the CSV now exists and `_save_dialog` is
+        保存しました.
+    (f) queue a save, then `_switch_image` to page 2, then fire
+        `_on_ocr_complete` for page 1: assert page 1's CSV does NOT exist.
+    (g) queue a save, then fire `_on_ocr_complete` with an error: assert no
+        CSV, no 保存しました dialog, and the status message mentions the error.
+    (h) press save twice while OCR is pending, then complete OCR: assert the
+        export ran once. Count it by monkeypatching a counter around
+        `_do_write_and_show_done`, or by asserting `_pending_export` is None
+        and the dialog opened once.
+    (i) the all-pages save still overwrites `<folder>_all.csv` with no
+        confirmation.
+
+    For (z1), (a), (e), (f) and (h) you MUST prove the test can fail: break
+    the code deliberately, paste the FAILING pytest output, restore the code, and
+    paste the passing output. State exactly what you broke.
+
+================================================================================
+9. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/app.py
+          tests/test_save_direct.py       (the three-line change + new tests)
+          tests/test_save_shortcut.py     (the one authorised assertion)
+          tests/test_mark_buttons.py      (the one authorised assertion)
+          tests/test_pending_export.py    (new)
+    - Do NOT modify any OTHER file under tests/. In particular
+      tests/test_persistence.py, tests/test_work_state.py and
+      tests/test_selection_restore.py are finished; if one of them fails,
+      STOP and report it.
+    - Do NOT touch custom_gui/work_state.py, custom_gui/selection.py,
+      custom_gui/save_paths.py, custom_gui/exporter.py or
+      custom_gui/page_marks.py.
+    - Do NOT add a guard, an early return, a hasattr check or a try/except to
+      production code to make a test pass. Task 39c was rejected for exactly
+      that. If a test needs a widget attached to a page, attach it in the TEST.
+    - Do NOT remove `with self.selections_lock:` from `_update_selections_ui`.
+      It is the Task 30c fix for "Panning corrupts the control tree". Task 39c
+      deleted it and broke the application.
+    - Do NOT change any `except Exception:` you were not asked to change.
+      Task 39c narrowed three of them out of scope.
+    - Do NOT touch anything under .nightly/. Task 39b and Task 39c each
+      deleted their own instruction sheet and the commander restored them by
+      hand.
+    - tests/test_flet_constants.py is a guard test. If it objects to your
+      code, CHANGE YOUR CODE. NEVER add an exemption. A local variable named
+      `page` WILL collide with it.
+    - NEVER name an attribute `self.image` or `self.scale`. Both are reserved
+      by flet and previously caused a fatal startup crash here.
+    - Do NOT undo Task 30c, 30d, 32, 33b, 35, 36, 37, 38 or 39.
+    - Do not make event handlers async. flet dispatches every non-async
+      handler on a thread pool without serialising them.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - Run `python -m pytest tests/ --collect-only -q` before you submit. Task
+      39 shipped a test file with an IndentationError that stopped collection
+      for the whole suite.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Tasks 35, 36, 39, 39b and 39c left
+      twenty, sixteen, ten, three and four files respectively, and the
+      commander deleted every one by hand. Scratch scripts go in the system
+      temp directory, NOT the repository - and never name one `test_*.py`,
+      because pytest will collect it.
+
+================================================================================
+10. OUT OF SCOPE
+================================================================================
+    - A setting to bring the confirmation back.
+    - Backing up the previous version of the file before overwriting.
+    - Any change to where files are written or what they contain.
+    - Auto-saving on page turn.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+    - Touching anything under src/, config/, model/ or resource/.
+
+================================================================================
+11. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass, beyond the
+      three assertions section 5 authorises - and those must get STRONGER.
+    - Do not invent workarounds. If blocked, stop, keep what works, and
+      report exactly what blocked you.
+
+================================================================================
+12. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [0a]-[10] to how you satisfied it.
+    2. The three authorised assertion changes, old line and new line side by
+       side, with a sentence each on why the new one is stronger.
+    3. The failing output for tests (z1), (a), (e), (f) and (h) against
+       deliberately broken code, what you broke, and the passing output after
+       restoring.
+    4. The exact code of your `_pending_export` handling in
+       `_on_ocr_complete`, and how conditions [6], [7] and [8] are enforced.
+    5. Confirmation that `_show_overwrite_dialog` appears nowhere in the
+       repository, with the output of a grep.
+    6. Confirmation that every other test under tests/ is unmodified, with
+       `git diff --stat -- tests/`.
+    7. The output of `python -m pytest tests/ --collect-only -q`.
+    8. The list of changed files with the reason for each.
+    9. The output of `git status` showing no stray files, and confirmation
+       that `.nightly/prompts/task40_prompt.txt` still exists.
+   10. The full output of `python -m pytest tests/ -v`.
+   11. Open questions or compromises. Write "none" if there are none.
