@@ -364,3 +364,77 @@ uid 未採番のまま更新され破綻する。`page.update()` のロックは
 加えて、指揮官側で**実ウィジェット駆動**（`ft.AppView.FLET_APP_HIDDEN`）による
 独立検証を必ず行う。Task 28 の `[C]` 未達、Task 30c のプレビューずれは
 いずれもユニットテストを通過し、この駆動でのみ検出された。
+
+---
+
+# 🔖 セッション再開ポイント（2026-07-30 時点）
+
+**master**: `6d079b6` / **230 tests passed** / 作業ツリーなし / Jules セッション稼働なし
+
+## ✅ 完了（master に統合済み）
+
+Task 01〜38 のほか、本セッションで以下を完了。
+
+| Task | 内容 |
+|---|---|
+| 39 / 39b / 39c | 矩形・修正文字・広告/表紙マークの永続化（`custom_gui/work_state.py`） |
+| 40 | 保存の拒否をダイアログ化／上書き確認廃止／OCR待ちの自動保存 |
+| 41 | Pan カーソルを Windows で描画できる値へ（`CLICK` / `ALL_SCROLL`） |
+
+## 🔴 最初にやること — 人間による実機確認（未実施）
+
+ヘッドレスでは検証できないため、**再開時にまずユーザーへ結果を確認する**。
+
+### Task 41（カーソル）
+| 状態 | 期待 |
+|---|---|
+| Select | 十字 ✛ |
+| Pan・待機 | 指差しの手 👆 |
+| Pan・ドラッグ中 | 四方向矢印 ✥ |
+
+### Task 40（保存）
+1. 矩形なしで「このページ保存」／`Ctrl+S` → 「OCRデータがございません。」
+2. 同じページを2回保存 → 確認なしで保存、`Ctrl+S` → `Enter` で次ページへ
+3. 広告／表紙を押したページを保存 → 上書き確認が出ない
+4. OCR 実行中に保存 → 「OCR待ち」→ 完了後に自動保存
+5. OCR 待ち中に別ページへ移動 → 前のページは保存されない
+
+### Task 39（永続化）
+6. 矩形を引き F2 で修正 → アプリを閉じる → 開き直す → 復元されている
+7. 矩形を削除して閉じ、開き直す → 消えたまま
+8. 復元後に新しい矩形を引いて修正 → 既存の矩形の文字が変わらない
+
+## 🟡 未着手タスク（優先順）
+
+- [ ] **Task 42（推奨）: 既存の矩形をタップしてインラインエディタを開く**
+      Task 33b で見送った項目。現状は新規描画時のみインラインエディタが開く。
+      日々の操作回数を最も減らせる。
+- [ ] Task 43: PDF の一括 OCR
+      `ocr_cache` は `page_index` を引数に持ち、`work_state` が初の実利用者。
+      現状 `_on_ocr_complete` は `if target_path not in self.pdf_page_map` で
+      PDF ページのキャッシュ保存を回避している。ここを外すのが起点。
+- [ ] Task 44: 矩形のリサイズ・移動
+- [ ] ~~Ctrl+ホイールのズーム~~ — flet 0.27.6 では実現不可を確認済み（採用しない）
+
+## ⚙️ 環境メモ（再開時に迷わないため）
+
+```
+リポジトリ      C:\Users\user\ndlocr-lite-custom      （master・常にクリーンに保つ）
+統合作業ツリー  C:\Users\user\ndlocr-work            （毎回 worktree add / remove）
+Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
+テスト          python -m pytest tests/ -q            （230 passed）
+検収ツール      .nightly/verify/                      （README.md に使い方）
+```
+
+**Jules のパッチは常に master 基準で作られる。** 機能ブランチ起点の続きタスクでも
+`jules remote pull --apply` は master ベースのブランチでのみ成功する。
+`integration/task-XX` に当てると `patch does not apply` になる。
+
+## 🚫 繰り返し発生する事故（指示書に必ず書く）
+
+1. 指示書ファイル自身の削除（`.nightly/` 全面禁止と冒頭の DO NOT DELETE）
+2. 作業用ファイルの残置（`test_*.py` の名前をリポジトリ直下に置くと pytest が収集する）
+3. 範囲外の変更（`except Exception` の無断変更、不要なガードの追加）
+4. `with self.selections_lock:` の削除（Task 30c の重大修正）
+5. 提出前の `pytest --collect-only` 未実施（構文エラーでスイート全体が停止する）
+6. ハンドラを迂回した無効なテスト（通算12件。欠陥再注入で必ず証明させる）
