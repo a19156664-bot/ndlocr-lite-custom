@@ -159,9 +159,9 @@ def test_f_overwrite_dialog_has_no_autofocus(tmp_path, dummy_viewer_multi):
     viewer._start_export("current")
     
     assert viewer._save_dialog is not None
-    assert viewer._save_dialog.title.value == "上書き確認"
-    for action in viewer._save_dialog.actions:
-        assert getattr(action, "autofocus", False) is False
+    assert viewer._save_dialog.title.value == "保存しました"
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
+        assert "SENTINEL" not in f.read()
 
 def test_g_ctrl_s_shortcut(tmp_path, monkeypatch):
     monkeypatch.setattr("custom_gui.app.run_ocr_and_parse", MagicMock(return_value=[]))

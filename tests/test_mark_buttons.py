@@ -165,11 +165,7 @@ def test_h_save_stamped_page_retains_mark(viewer_app):
     
     # Assert dialog appeared due to existing mark line
     assert app._save_dialog is not None
-    assert app._save_dialog.title.value == "上書き確認"
-    
-    # Find and click the overwrite button
-    overwrite_action = next(a for a in app._save_dialog.actions if a.text == "上書き保存")
-    overwrite_action.on_click(None)
+    assert app._save_dialog.title.value == "保存しました"
     
     # Actually export_targets is called internally and might save it to page1.txt or page1_current.txt. Let's check export_targets directly in save_paths.py
     from custom_gui.save_paths import export_targets

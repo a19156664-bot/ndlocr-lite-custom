@@ -110,42 +110,11 @@ def test_d_overwrite_dialog(tmp_path, dummy_viewer, monkeypatch):
     viewer.selection_container.add((10, 10, 50, 50), "Region 1")
     viewer._start_export("current")
     
-    with open(csv_path, "r", encoding="utf-8") as f:
-        assert f.read() == "SENTINEL"
-        
     assert viewer._save_dialog is not None
-    assert viewer._save_dialog.title.value == "上書き確認"
-    assert len(viewer._save_dialog.actions) == 2
-    
-    overwrite_action = None
-    for a in viewer._save_dialog.actions:
-        if a.text == "上書き保存":
-            overwrite_action = a
-            break
-            
-    assert overwrite_action is not None
-    overwrite_action.on_click(None)
+    assert viewer._save_dialog.title.value == "保存しました"
     
     with open(csv_path, "r", encoding="utf-8-sig") as f:
-        assert f.read() != "SENTINEL"
-        
-    # Cancel case
-    with open(csv_path, "w", encoding="utf-8") as f:
-        f.write("SENTINEL")
-        
-    viewer._start_export("current")
-    
-    cancel_action = None
-    for a in viewer._save_dialog.actions:
-        if a.text == "キャンセル":
-            cancel_action = a
-            break
-            
-    assert cancel_action is not None
-    cancel_action.on_click(None)
-    
-    with open(csv_path, "r", encoding="utf-8") as f:
-        assert f.read() == "SENTINEL"
+        assert "SENTINEL" not in f.read()
 
 def test_e_save_all(tmp_path, monkeypatch):
     monkeypatch.setattr("custom_gui.app.run_ocr_and_parse", MagicMock(return_value=[]))
