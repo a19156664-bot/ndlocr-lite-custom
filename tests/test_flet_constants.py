@@ -101,3 +101,28 @@ def test_no_reserved_property_shadowing(tmp_path):
                                 
         if errors:
             raise AssertionError("\n".join(errors))
+
+def test_no_grab_cursors_in_custom_gui():
+    """
+    ft.MouseCursor.GRAB and ft.MouseCursor.GRABBING are silently broken on Windows
+    in the Flutter engine (see flutter/flutter issue #99323) and fall back to the
+    default arrow cursor. This test ensures they are not reintroduced.
+    """
+    import os
+    custom_gui_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'custom_gui')
+    
+    errors = []
+    for root, _, files in os.walk(custom_gui_dir):
+        for file in files:
+            if file.endswith('.py'):
+                filepath = os.path.join(root, file)
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    
+                if 'MouseCursor.GRAB' in content:
+                    errors.append(f"{filepath} uses MouseCursor.GRAB which is broken on Windows.")
+                if 'MouseCursor.GRABBING' in content:
+                    errors.append(f"{filepath} uses MouseCursor.GRABBING which is broken on Windows.")
+                    
+    if errors:
+        raise AssertionError("\n".join(errors))
