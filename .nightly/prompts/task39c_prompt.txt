@@ -1,0 +1,283 @@
+Task 39c: [FIX-TESTS] 範囲外のガード1行を戻し、永続化テストをハンドラ経由に書き換える
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+================================================================================
+0. START FROM THE FEATURE BRANCH - NOT FROM master
+================================================================================
+Your session starts on master, but this task continues work already committed
+on a branch. Before you change anything, run:
+
+    git fetch origin
+    git checkout integration/task-39b
+
+Verify with `git log --oneline -3` that you see:
+
+    5b0e19c wip(Task 39b): 永続化の結線 - 機能は動くが範囲外の変更で既存テスト13件が破損
+
+If you cannot get onto that branch, STOP and report it. Do NOT reimplement
+the feature on master.
+
+DO NOT DELETE THIS FILE. Task 39b deleted `.nightly/prompts/task39b_prompt.txt`
+- its own instruction sheet - and the commander restored it by hand. The
+`.nightly/prompts/` directory is the project's order history. Never touch it.
+
+================================================================================
+1. WHERE THINGS STAND
+================================================================================
+The persistence feature WORKS. The commander drove the real widgets through
+22 checks and every one passed: rectangles, edited texts and the 広告 / 表紙
+mark are written to `.ndlocr_cache/<stem>.work.json` and restored on a fresh
+viewer; deletion and edit-undo are reflected; a restored page can take a new
+rectangle without corrupting an existing one; a swapped image or a corrupt
+JSON restores nothing; a PDF page lands beside the PDF as
+`book_p0004.work.json`; NameError propagates while OSError is swallowed; and
+restoring never rewrites the file.
+
+Two things block the merge. Both are in this task.
+
+PROBLEM 1 - an unrequested guard broke 13 existing tests
+
+    `_update_selections_ui` now begins with
+
+        if not hasattr(self, 'selections_list') or not getattr(self.selections_list, 'page', None):
+            return
+
+    Nobody asked for this. It makes the whole method a no-op whenever the
+    panel is not attached to a page, which is the normal condition in a
+    headless test. It breaks:
+
+        tests/test_concurrency.py    3 tests
+        tests/test_edit_enter.py     6 tests
+        tests/test_inline_edit.py    3 tests
+        tests/test_save_direct.py    1 test
+
+    The commander removed the single line and the suite went to 215 passed,
+    including all eleven of the new persistence tests. The guard is not
+    needed by anything.
+
+PROBLEM 2 - the new tests cannot detect the defect they exist to prevent
+
+    All eleven tests in tests/test_persistence.py bypass the event handlers.
+    They do
+
+        app.selection_container._rects.append(rect)
+        app._persist_work_state()      # "simulate the _on_pan_end logic"
+
+    so they verify `_persist_work_state` and `_load_persisted_state` in
+    isolation and never verify that anything CALLS them. The commander
+    re-injected six defects:
+
+        remove _persist_work_state() from _on_pan_end     -> 215 passed
+        remove _persist_work_state() from delete_rect     -> 215 passed
+        remove _persist_work_state() from _on_mark_click   -> 215 passed
+        remove _load_persisted_state() from _switch_image  -> 215 passed
+        restore `except Exception`                         -> 1 failed
+        make restore() leave _next_id at 1                 -> 4 failed
+
+    FOUR OF SIX GO UNDETECTED - and the missing-call-site defect is exactly
+    what Task 39 shipped. This project has now produced twelve tests that
+    could not fail. A test that cannot fail is worthless.
+
+================================================================================
+2. DELIVERABLES
+================================================================================
+[A] Delete the guard
+
+    Remove these two lines from the top of `_update_selections_ui` in
+    custom_gui/app.py:
+
+        if not hasattr(self, 'selections_list') or not getattr(self.selections_list, 'page', None):
+            return
+
+    Nothing replaces them. Do not add a narrower guard, do not add a
+    try/except, do not add an early return of any kind. The method must
+    behave exactly as it did on master.
+
+    If a test of yours then fails, the fix goes in the TEST, not here.
+
+[B] Rewrite tests/test_persistence.py so every assertion travels through the
+    real handler
+
+    Keep the eleven scenarios. Change HOW each one triggers the mutation.
+    Nothing may call `_persist_work_state()` or `_load_persisted_state()`
+    directly except the two tests that specifically test their error
+    behaviour (the OSError and NameError cases).
+
+    HOW TO REACH EACH MUTATION POINT
+
+    drawing a rectangle
+        Drive `_on_pan_start`, `_on_pan_update`, `_on_pan_end` with real
+        flet drag events while `viewer.mode_state.current` is "SELECT", so
+        the rectangle is created by the code the user's mouse reaches.
+        `tests/test_inline_edit.py` and `tests/test_pan.py` already build
+        these events; copy their approach.
+
+    committing an edit
+        `viewer.commit_edit(rid, "text")` is a real method - calling it is
+        fine and is NOT a bypass.
+
+    deleting a rectangle / undoing an edit / the RTL conversion
+        `delete_rect`, `restore_rect` and `rtl_rect` are closures created
+        inside `_update_selections_ui`. Reach them the way the existing
+        tests do: let `_update_selections_ui` build the panel, then walk
+        `viewer.selections_list.controls`, find the IconButton or TextButton
+        for the region, and fire its `on_click`.
+        `tests/test_edit_enter.py` and `tests/test_save_direct.py` already do
+        exactly this - copy their traversal. Do NOT invent a new way, and do
+        NOT reach into the closure through `__closure__` or similar tricks.
+
+    the mark
+        `viewer._on_mark_click("【広告】")` is the real handler the button
+        calls. Better still, fire `viewer.btn_mark_ad.on_click`.
+
+    restoring
+        Build a SECOND `SelectableImageViewer` on the same image (that
+        exercises `__init__`), and separately use `viewer._switch_image(img2)`
+        followed by `viewer._switch_image(img1)` on a viewer whose
+        `image_states` does not yet hold img1, so the `_switch_image` restore
+        path is covered too. BOTH paths need a test - a defect in either one
+        must fail the suite.
+
+    Mocking the flet Page object is fine and expected. Do NOT replace
+    `selections_list`, `rects_layer`, `highlight_layer`, `selection_container`,
+    `image_states`, `edits`, `mark` or `btn_next` with MagicMock. Those are
+    the things you are asserting about.
+
+[C] The four undetected defects must now be detected
+
+    This is the whole point of the task. For EACH of the four, break the
+    code, paste the FAILING pytest output naming the test that caught it,
+    restore the code, and paste the passing output:
+
+        (1) delete `self._persist_work_state()` from `_on_pan_end`
+        (2) delete `self._persist_work_state()` from `delete_rect`
+        (3) delete `self._persist_work_state()` from `_on_mark_click`
+        (4) in `_switch_image`, replace
+                container, edits, mark = self._load_persisted_state(path)
+            with
+                container, edits, mark = SelectionContainer(), {}, None
+
+    A submission without these four failing outputs is incomplete. Do not
+    paraphrase them; paste them.
+
+    Also keep the two that already worked passing-and-failing correctly:
+        (5) restore `except Exception:` -> some test must fail
+        (6) make `restore()` leave `_next_id` at 1 -> some test must fail
+    Report which test catches each.
+
+[D] Fix test_k_pdf_page's temp path
+
+    It uses `"/tmp/fake_doc.pdf"`, which on Windows is `C:\tmp\fake_doc.pdf`
+    - outside `tmp_path`. It pollutes the machine and could pass on a stale
+    leftover from an earlier run. Use a real file under `tmp_path` instead.
+
+    Check every other test in the file for the same problem.
+
+[E] Nothing else changes
+
+    The feature is finished. Do NOT modify custom_gui/work_state.py,
+    custom_gui/selection.py, `_persist_work_state`, `_load_persisted_state`,
+    the six call sites, or the two `image_states` constructions. The only
+    change to custom_gui/app.py in this task is deleting the two guard lines
+    from [A].
+
+================================================================================
+3. DEFINITION OF DONE
+================================================================================
+[1]  The guard is gone from `_update_selections_ui`.
+[2]  `python -m pytest tests/ --collect-only -q` succeeds.
+[3]  `python -m pytest tests/ -v` gives 215 passed or more, with
+     tests/test_concurrency.py, tests/test_edit_enter.py,
+     tests/test_inline_edit.py and tests/test_save_direct.py all green and
+     UNMODIFIED.
+[4]  Deleting the persist call from `_on_pan_end` fails the suite.
+[5]  Deleting the persist call from `delete_rect` fails the suite.
+[6]  Deleting the persist call from `_on_mark_click` fails the suite.
+[7]  Removing the restore from `_switch_image` fails the suite.
+[8]  Restoring `except Exception` fails the suite.
+[9]  Making `restore()` leave `_next_id` at 1 fails the suite.
+[10] No test writes outside `tmp_path`.
+[11] `git status` shows no stray files.
+
+================================================================================
+4. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/app.py                 (delete the two guard lines ONLY)
+          tests/test_persistence.py         (rewrite)
+    - Do NOT modify ANY other file under tests/. tests/test_work_state.py
+      and tests/test_selection_restore.py are finished and correct. The four
+      suites the guard broke must pass WITHOUT being edited - that is the
+      proof the guard was the problem. If one of them still fails after you
+      remove the guard, STOP and report which assertion objects and what it
+      expects. Do not edit it, do not weaken it, do not delete it.
+    - Do NOT touch custom_gui/work_state.py or custom_gui/selection.py.
+    - Do NOT touch anything under .nightly/.
+    - tests/test_flet_constants.py is a guard test. If it objects to your
+      code, CHANGE YOUR CODE. NEVER add an exemption. A local variable named
+      `page` WILL collide with it.
+    - NEVER name an attribute `self.image` or `self.scale`. Both are reserved
+      by flet and previously caused a fatal startup crash here.
+    - Do NOT undo Task 30c, 30d, 32, 33b, 35, 36, 37, 38 or 39: the RLock
+      around _update_selections_ui, the layers carrying the pan offset, the
+      offset subtraction in _on_pan_start/_on_pan_update, the batch worker
+      not calling _switch_image, Pre-OCR All with its progress bar, Enter
+      committing the right hand panel edit, the inline editor layer ABOVE
+      self.gesture_detector in every stack construction, the two save icons
+      with no file dialog, the "[改行 N]" header, the 広告 / 表紙 buttons,
+      the right-click Pan toggle with its cursor, Ctrl+S with the next-page
+      dialog, and the whole persistence mechanism must all stay exactly as
+      they are.
+    - Do not make event handlers async.
+    - No new dependencies. flet stays pinned at 0.27.6.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Task 35 left TWENTY files, Task 36
+      SIXTEEN, Task 39 TEN and Task 39b THREE (fix_ui_update.py,
+      run_proofs.sh, test_proof_b.py). The commander deleted every one of
+      them by hand. If you need a scratch script, write it under the system
+      temp directory, NOT the repository.
+
+================================================================================
+5. OUT OF SCOPE
+================================================================================
+    - Any change to how persistence works.
+    - New features, new buttons, new dialogs.
+    - Persisting OCR results, zoom, pan offset or the current page.
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+    - Touching anything under src/, config/, model/ or resource/.
+
+================================================================================
+6. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test to make code pass. If a guard
+      test objects, change your code. If you believe a guard test is
+      genuinely wrong, STOP and report it instead of editing it.
+    - Do not add a guard, an early return, a try/except or a hasattr check to
+      production code to make a test pass. That is what caused this task to
+      exist. If a test needs the widget attached to a page, attach it in the
+      TEST.
+    - Do not invent workarounds. If blocked, stop, keep what works, and
+      report exactly what blocked you.
+
+================================================================================
+7. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. Confirmation that you started from integration/task-39b, and the
+       output of `git log --oneline -3`.
+    2. A table mapping each condition [1]-[11] to how you satisfied it.
+    3. For EACH of the six injected defects: what you broke, the FAILING
+       pytest output naming the test that caught it, and the passing output
+       after restoring. Six blocks, pasted verbatim.
+    4. For each of the eleven scenarios, one line saying which real handler
+       the test now fires and how it reaches it.
+    5. Confirmation that tests/test_concurrency.py, test_edit_enter.py,
+       test_inline_edit.py and test_save_direct.py are byte-identical to
+       what you started with, and the output of
+       `git diff --stat integration/task-39b -- tests/` proving it.
+    6. The list of changed files with the reason for each.
+    7. The output of `git status` showing no stray files, and confirmation
+       that `.nightly/prompts/task39c_prompt.txt` still exists.
+    8. The full output of `python -m pytest tests/ -v`.
+    9. Open questions or compromises. Write "none" if there are none.
