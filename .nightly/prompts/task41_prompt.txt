@@ -1,0 +1,243 @@
+Task 41: [FIX] Pan のカーソルが Windows で手にならない - grab は Windows 未実装
+
+You MUST read AGENTS.md at the repository root and follow its rules.
+
+================================================================================
+1. THE DEFECT
+================================================================================
+The user reported, after restarting the application:
+
+    "再起動いたしましたが、カーソルのままでした。
+     右クリックでselectボタンとPanボタンは切り替わります。
+     Panボタンでの**操作時**のマウスカーソルは切り替わりますが、
+     手🖐✊のアイコンに変更されません。"
+
+Task 37 set `ft.MouseCursor.GRAB` / `GRABBING` on the gesture detector for
+PAN mode. The code is correct and the mechanism works - the user confirms the
+cursor changes. The VALUES are what fail.
+
+================================================================================
+2. THE CAUSE - VERIFIED, DO NOT RE-INVESTIGATE
+================================================================================
+`ft.MouseCursor.GRAB` is the Flutter cursor kind string "grab", which maps to
+`SystemMouseCursors.grab`. That cursor is NOT IMPLEMENTED in the Flutter
+Windows embedder: the Windows `GetCursorByName` mapping has no IDC_ constant
+for "grab", "grabbing" or "verticalText", so Flutter silently falls back to
+the default arrow.
+
+    flutter/flutter issue #99323
+    "[Windows] SystemMouseCursors grab, grabbing and verticalText aren't
+     working on Desktop"  - P2, still OPEN as of July 2026.
+    "windows and windows uwp entries missing in flutter docs";
+    with SystemMouseCursors.grab on Windows the "basic cursor symbol is shown".
+    Works correctly on web, macOS, Android and Linux.
+
+Windows has no open-hand or closed-fist cursor at all. The only hand in Win32
+is IDC_HAND, the pointing hand, reached through the "click" kind.
+
+The commander enumerated all 36 members of `ft.MouseCursor` in this project's
+own venv. The values that matter here:
+
+    ft.MouseCursor.CLICK       'click'       -> IDC_HAND     pointing hand
+    ft.MouseCursor.ALL_SCROLL  'allScroll'   -> IDC_SIZEALL  four-way arrow
+    ft.MouseCursor.MOVE        'move'        -> IDC_SIZEALL  four-way arrow
+    ft.MouseCursor.PRECISE     'precise'     -> IDC_CROSS    crosshair (works today)
+    ft.MouseCursor.GRAB        'grab'        -> NOT MAPPED   falls back to arrow
+    ft.MouseCursor.GRABBING    'grabbing'    -> NOT MAPPED   falls back to arrow
+
+================================================================================
+3. THE DECISION THE USER MADE - DO NOT REOPEN IT
+================================================================================
+    PAN, not dragging  ->  ft.MouseCursor.CLICK       (pointing hand)
+    PAN, dragging      ->  ft.MouseCursor.ALL_SCROLL  (four-way arrow)
+    SELECT             ->  ft.MouseCursor.PRECISE     (unchanged)
+
+The user wants a hand while hovering, and a visibly different cursor while
+actually dragging. Do not substitute other values. Do not use GRAB or
+GRABBING anywhere.
+
+================================================================================
+4. DELIVERABLES
+================================================================================
+[A] Change the two values in `_refresh_cursor`
+
+    custom_gui/app.py, `_refresh_cursor` currently reads:
+
+        def _refresh_cursor(self):
+            if self.mode_state.current == "SELECT":
+                self.gesture_detector.mouse_cursor = ft.MouseCursor.PRECISE
+            elif self.mode_state.current == "PAN":
+                if self._is_dragging:
+                    self.gesture_detector.mouse_cursor = ft.MouseCursor.GRABBING
+                else:
+                    self.gesture_detector.mouse_cursor = ft.MouseCursor.GRAB
+
+    Replace GRABBING with `ft.MouseCursor.ALL_SCROLL` and GRAB with
+    `ft.MouseCursor.CLICK`. Change NOTHING else in this method: not the
+    structure, not the SELECT branch, not the `_is_dragging` check.
+
+    Do NOT touch the four call sites (`__init__`, `_toggle_mode`,
+    `_on_mode_change`, `_on_pan_start`, `_on_pan_end`) or their
+    `gesture_detector.update()` calls. They work - the user confirmed the
+    cursor does change.
+
+[B] Update the existing cursor assertions - AUTHORISED, and only these
+
+    tests/test_right_click_pan.py asserts the old values on these lines:
+
+        82, 91, 108, 167   ft.MouseCursor.GRAB      -> ft.MouseCursor.CLICK
+        96, 101            ft.MouseCursor.GRABBING  -> ft.MouseCursor.ALL_SCROLL
+
+    The PRECISE assertions (78, 86, 113, 118, 123, 128, 165) do NOT change.
+
+    This is a value substitution only. Do NOT delete a test, do NOT rename
+    one, do NOT loosen an assertion to `in` or to a truthiness check, do NOT
+    change what any test drives or in what order. Every one of these tests
+    must still exercise the same transition it exercises today and still
+    assert on `viewer.gesture_detector.mouse_cursor` with `==`.
+
+    Count them in your report: six substitutions, no other edit to the file.
+
+[C] A guard test so this class of defect cannot come back
+
+    Add to tests/test_flet_constants.py - the project's platform-guard file -
+    a test asserting that the string "GRAB" does not appear as a MouseCursor
+    reference anywhere in custom_gui/. Read the source of custom_gui/app.py
+    and assert that neither `MouseCursor.GRAB` nor `MouseCursor.GRABBING`
+    occurs in it.
+
+    Reason: these two values are silently broken on Windows. A future task
+    reaching for the "obvious" grab cursor would reintroduce a defect that no
+    functional test can catch, because setting an unsupported cursor raises
+    nothing and asserts fine.
+
+    Put a comment above the test naming flutter/flutter#99323 so the next
+    reader knows why.
+
+[D] Nothing else changes
+
+    No new button, no new mode, no change to right-click toggling, no change
+    to panning itself, no change to Task 40's save behaviour.
+
+================================================================================
+5. DEFINITION OF DONE
+================================================================================
+[1] In PAN mode while not dragging, `gesture_detector.mouse_cursor` is
+    `ft.MouseCursor.CLICK`.
+[2] In PAN mode while dragging, it is `ft.MouseCursor.ALL_SCROLL`.
+[3] In SELECT mode it is `ft.MouseCursor.PRECISE`, dragging or not.
+[4] Right-click still toggles the mode and still refreshes the cursor.
+[5] `MouseCursor.GRAB` and `MouseCursor.GRABBING` appear nowhere under
+    custom_gui/.
+[6] A guard test in tests/test_flet_constants.py fails if either is
+    reintroduced.
+[7] `python -m pytest tests/ --collect-only -q` succeeds.
+[8] `python -m pytest tests/ -v` passes completely: 227 or more.
+
+================================================================================
+6. TESTS
+================================================================================
+Beyond [B] and [C], add to tests/test_right_click_pan.py:
+
+    (a) full cycle driven through the REAL handlers: start in SELECT and
+        assert PRECISE; fire `_toggle_mode` (the right-click handler) and
+        assert CLICK; fire `_on_pan_start` and assert ALL_SCROLL; fire
+        `_on_pan_end` and assert CLICK again; fire `_toggle_mode` and assert
+        PRECISE.
+    (b) dragging in SELECT mode keeps PRECISE - `_on_pan_start` must not
+        turn a Select drag into a pan cursor.
+
+    Do NOT replace `gesture_detector`, `mode_state`, `selection_container`,
+    `rects_layer` or `selections_list` with MagicMock. Mocking the flet Page
+    object is fine. This project has shipped twelve tests that could not fail
+    because the thing under test was a mock.
+
+    For (a) you MUST prove the test can fail: put GRAB back, paste the
+    FAILING pytest output, restore, paste the passing output.
+
+    State clearly in your report that the actual on-screen cursor SHAPE
+    cannot be verified without a GUI - the commander will ask the user to
+    confirm the pointing hand appears.
+
+================================================================================
+7. REGRESSION SAFETY
+================================================================================
+    - ALLOWED SCOPE, and nothing else:
+          custom_gui/app.py                 (the two values in _refresh_cursor)
+          tests/test_right_click_pan.py     (six substitutions + two new tests)
+          tests/test_flet_constants.py      (one new guard test, ADD only)
+    - tests/test_flet_constants.py: you are ADDING a test. Do NOT modify or
+      remove anything already in it, and NEVER add an exemption to an existing
+      guard. If an existing guard objects to your code, CHANGE YOUR CODE.
+    - Do NOT modify any other file under tests/. If one fails, STOP and
+      report which assertion objects and what it expects.
+    - Do NOT touch custom_gui/viewer.py, custom_gui/selection.py,
+      custom_gui/work_state.py or any other module.
+    - Do NOT add a guard, an early return, a hasattr check or a try/except to
+      production code to make a test pass. Task 39c was rejected for exactly
+      that.
+    - Do NOT remove `with self.selections_lock:` from `_update_selections_ui`.
+      It is the Task 30c fix for "Panning corrupts the control tree". Task 39c
+      deleted it and broke the application.
+    - Do NOT change any `except Exception:` anywhere. Task 39c narrowed three
+      of them out of scope.
+    - Do NOT touch anything under .nightly/. Task 39b and Task 39c each
+      deleted their own instruction sheet and the commander restored them by
+      hand.
+    - NEVER name an attribute `self.image` or `self.scale`. Both are reserved
+      by flet and previously caused a fatal startup crash here.
+    - Do NOT undo Task 30c, 30d, 32, 33b, 35, 36, 37, 38, 39 or 40.
+    - Do not make event handlers async.
+    - No new dependencies. flet stays pinned at 0.27.6. Do NOT try to ship a
+      custom cursor image, a plugin, or a Win32 call to work around the
+      Flutter limitation - that is out of scope and would not survive a flet
+      upgrade.
+    - Leave NO scratch or probe files anywhere in the repository. Run
+      `git status` before you finish. Tasks 35, 36, 39, 39b and 39c left
+      twenty, sixteen, ten, three and four files respectively. Scratch
+      scripts go in the system temp directory, NOT the repository - and never
+      name one `test_*.py`, because pytest will collect it.
+
+================================================================================
+8. OUT OF SCOPE
+================================================================================
+    - A custom cursor bitmap, a Flutter plugin, or any native workaround to
+      obtain a real open-hand cursor on Windows.
+    - Changing the mode toggle, the right-click behaviour, or panning.
+    - A setting to choose the cursor.
+    - Ctrl+wheel zoom (already established as impossible in flet 0.27.6).
+    - Removing, altering or relocating the National Diet Library copyright,
+      credit or licence notices.
+    - Touching anything under src/, config/, model/ or resource/.
+
+================================================================================
+9. FAILSAFE
+================================================================================
+    - Do not weaken, skip or delete any test. The six substitutions in
+      section [B] are value changes, not relaxations.
+    - Do not invent workarounds. If blocked, stop, keep what works, and
+      report exactly what blocked you.
+
+================================================================================
+10. WHAT YOUR SUBMISSION MUST DESCRIBE
+================================================================================
+    1. A table mapping each condition [1]-[8] to how you satisfied it.
+    2. The diff of `_refresh_cursor`, before and after.
+    3. The six substituted lines in tests/test_right_click_pan.py, old and
+       new, and confirmation that nothing else in that file changed except
+       the two added tests.
+    4. The code of the new guard test in tests/test_flet_constants.py, and
+       proof it fails when GRAB is reintroduced.
+    5. The failing output for test (a) with GRAB put back, and the passing
+       output after restoring.
+    6. Confirmation that GRAB and GRABBING appear nowhere under custom_gui/,
+       with the output of a grep.
+    7. `git diff --stat -- tests/` proving no other test file changed.
+    8. The output of `python -m pytest tests/ --collect-only -q`.
+    9. The list of changed files with the reason for each.
+   10. The output of `git status` showing no stray files, and confirmation
+       that `.nightly/prompts/task41_prompt.txt` still exists.
+   11. The full output of `python -m pytest tests/ -v`.
+   12. An explicit statement that the on-screen cursor shape needs human
+       confirmation.
+   13. Open questions or compromises. Write "none" if there are none.
