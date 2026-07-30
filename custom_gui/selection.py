@@ -25,6 +25,18 @@ class SelectionContainer:
         self._next_id += 1
         return rect
 
+    def restore(self, rects: List[SelectionRect]) -> None:
+        self._rects = list(rects)
+        max_id = 0
+        for r in rects:
+            try:
+                val = int(r.rect_id)
+                if val > max_id:
+                    max_id = val
+            except ValueError:
+                pass
+        self._next_id = max_id + 1
+
     def get_all(self) -> List[SelectionRect]:
         return list(self._rects)
 

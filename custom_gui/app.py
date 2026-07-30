@@ -1,8 +1,9 @@
 import flet as ft
 from custom_gui.image_sequence import ImageSequence, list_images_in_folder
 from custom_gui.viewer import ImageViewer, original_to_display, apply_pan, InteractionMode, calculate_label_position
-from custom_gui.selection import SelectionContainer, calculate_normalized_bbox
+from custom_gui.selection import SelectionContainer, calculate_normalized_bbox, SelectionRect
 from custom_gui.ocr_bridge import run_ocr_and_parse
+import custom_gui.work_state as work_state
 from custom_gui.region_filter import filter_lines_by_region
 from custom_gui.text_assembler import assemble_text
 from custom_gui.exporter import build_export_rows, build_export_rows_multi, rows_to_csv_text, rows_to_txt_text
@@ -51,15 +52,21 @@ class SelectableImageViewer(ImageViewer):
         import threading
         self.selections_lock = threading.RLock()
         
+        self.pdf_cache_dir = tempfile.mkdtemp(prefix="ndlocr_pdf_")
+        self.pdf_page_map = {}
+
         # New state variables for per-image state
         self.image_states = {}
+        
+        container, edits, mark = self._load_persisted_state(image_src)
+        
         self.image_states[image_src] = {
-            "selections": SelectionContainer(),
+            "selections": container,
             "ocr_state": OcrState.IDLE if os.path.exists(image_src) else OcrState.ERROR,
             "ocr_results": [],
             "ocr_error": None if os.path.exists(image_src) else f"Error: Image not found at {image_src}",
-            "edits": {},
-            "mark": None
+            "edits": edits,
+            "mark": mark
         }
         
         self.selection_container = self.image_states[image_src]["selections"]
@@ -77,9 +84,6 @@ class SelectableImageViewer(ImageViewer):
         self.active_rect = None
         self.active_region_id = None
         self.editing_region_id = None
-        
-        self.pdf_cache_dir = tempfile.mkdtemp(prefix="ndlocr_pdf_")
-        self.pdf_page_map = {}
         
         self.batch_running = False
         self._batch_cancel_requested = False
@@ -342,7 +346,7 @@ class SelectableImageViewer(ImageViewer):
             if target_path not in self.pdf_page_map:
                 try:
                     ocr_cache.save_cache(target_path, results)
-                except Exception:
+                except OSError:
                     pass
             
         if self.image_src == target_path:
@@ -532,7 +536,7 @@ class SelectableImageViewer(ImageViewer):
                         if getattr(self, 'page', None) and getattr(self.status_text, 'page', None):
                             self.status_row.update()
                         self._update_selections_ui()
-                except Exception:
+                except OSError:
                     pass
 
     def _on_batch_ocr_click(self, e):
@@ -606,6 +610,7 @@ class SelectableImageViewer(ImageViewer):
     def _on_mark_click(self, mark_str):
         self.mark = mark_str
         self.image_states[self.image_src]["mark"] = mark_str
+        self._persist_work_state()
         
         pdf_source = None
         if self.image_src in self.pdf_page_map:
@@ -638,6 +643,54 @@ class SelectableImageViewer(ImageViewer):
         if self.sequence.has_next():
             self._switch_image(self.sequence.next())
             
+    def _load_persisted_state(self, path: str):
+        """Returns (SelectionContainer, edits dict, mark) for `path`,
+        restoring from disk when a valid saved state exists, otherwise a
+        fresh empty container, {} and None."""
+        pdf_path = None
+        page_index = None
+        if path in self.pdf_page_map:
+            pdf_path, page_index = self.pdf_page_map[path]
+            
+        source = pdf_path if pdf_path else path
+        data = work_state.load_work_state(source, page_index=page_index)
+        
+        container = SelectionContainer()
+        edits = {}
+        mark = None
+        
+        if data:
+            rects = []
+            for r in data.get("rects", []):
+                rects.append(SelectionRect(rect_id=r["rect_id"], bbox=tuple(r["bbox"]), label=r["label"]))
+            container.restore(rects)
+            edits = data.get("edits", {})
+            mark = data.get("mark")
+            
+        return container, edits, mark
+
+    def _persist_work_state(self):
+        if not getattr(self, 'image_src', None):
+            return
+        
+        pdf_path = None
+        page_index = None
+        if self.image_src in self.pdf_page_map:
+            pdf_path, page_index = self.pdf_page_map[self.image_src]
+            
+        source = pdf_path if pdf_path else self.image_src
+        
+        try:
+            work_state.save_work_state(
+                source,
+                self.selection_container.get_all(),
+                self.edits,
+                self.mark,
+                page_index=page_index
+            )
+        except (OSError, TypeError, ValueError):
+            pass
+
     def _switch_image(self, path: str):
         if not path:
             return
@@ -659,13 +712,15 @@ class SelectableImageViewer(ImageViewer):
                 ocr_state = OcrState.IDLE if os.path.exists(path) else OcrState.ERROR
                 ocr_error = None if os.path.exists(path) else f"Error: Image not found at {path}"
                 
+            container, edits, mark = self._load_persisted_state(path)
+            
             self.image_states[path] = {
-                "selections": SelectionContainer(),
+                "selections": container,
                 "ocr_state": ocr_state,
                 "ocr_results": [],
                 "ocr_error": ocr_error,
-                "edits": {},
-                "mark": None
+                "edits": edits,
+                "mark": mark
             }
             
         state = self.image_states[path]
@@ -1131,6 +1186,7 @@ class SelectableImageViewer(ImageViewer):
             
             self._update_selections_ui()
             self._update_inline_editor()
+            self._persist_work_state()
             
         self.drag_start_point = None
         self.drag_current_point = None
@@ -1140,8 +1196,6 @@ class SelectableImageViewer(ImageViewer):
             self.gesture_detector.update()
 
     def _update_selections_ui(self):
-        with self.selections_lock:
-            if hasattr(self, 'mark_label'):
                 if self.mark:
                     self.mark_label.value = self.mark
                     self.mark_label.visible = True
@@ -1228,6 +1282,7 @@ class SelectableImageViewer(ImageViewer):
                     if self.editing_region_id == rid:
                         self.editing_region_id = None
                     self._update_selections_ui()
+                    self._persist_work_state()
                 
                 def edit_rect(e, rid=rect.rect_id):
                     self.active_region_id = rid
@@ -1245,6 +1300,7 @@ class SelectableImageViewer(ImageViewer):
                     if rid in self.edits:
                         del self.edits[rid]
                     self._update_selections_ui()
+                    self._persist_work_state()
                 
                 def make_active(e, rid=rect.rect_id):
                     if self.active_region_id != rid:
@@ -1265,6 +1321,7 @@ class SelectableImageViewer(ImageViewer):
                     else:
                         self.edits[rid] = converted
                     self._update_selections_ui()
+                    self._persist_work_state()
 
                 is_active = (self.active_region_id == rect.rect_id)
                 is_editing = (self.editing_region_id == rect.rect_id)
@@ -1404,6 +1461,7 @@ class SelectableImageViewer(ImageViewer):
             if self.editing_region_id == rid:
                 self.editing_region_id = None
         self._update_selections_ui()
+        self._persist_work_state()
 
     def _cancel_inline_edit(self, e=None):
         with self.selections_lock:
@@ -1443,7 +1501,7 @@ def main(page: ft.Page):
     try:
         with Image.open(image_path) as img:
             img_w, img_h = img.size
-    except Exception:
+    except OSError:
         img_w, img_h = 2048, 1446
     
     viewer = SelectableImageViewer(
