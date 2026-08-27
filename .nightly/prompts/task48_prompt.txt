@@ -1,0 +1,240 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+This order corresponds to ROADMAP.md -> Task 48. The approver chose the shape of
+this feature on 2026-08-28: **one button does both jobs.** Do not add a second
+button, and do not make it automatic on page load.
+
+================================================================================
+Task 48: Make 「マーク読取」 also record 【広告】 from the orange mark
+================================================================================
+
+## 1. Purpose and background
+
+The user marks scanned pages by hand in two colours. AGENTS.md section 8.1
+records what the approver decided they mean:
+
+    cyan   -> an area to OCR          -> detect_marks()      (Task 45, merged)
+    orange -> THIS PAGE IS AN ADVERT  -> detect_page_mark()  (Task 47, merged)
+
+Task 46 shipped the 「マーク読取」 button, which uses `detect_marks` only.
+This task makes that same button also act on the orange mark, so one press
+does everything the page's marks ask for.
+
+Both functions are on master already:
+
+    from custom_gui.mark_detector import load_image, detect_marks, detect_page_mark
+
+    detect_page_mark(image_bgr, min_area: int = 2000) -> Optional[str]
+        returns page_marks.MARK_AD ("【広告】") or None
+
+Recording an advert is ALREADY implemented, in `_on_mark_click(MARK_AD)`.
+It sets `self.mark`, updates `self.image_states[self.image_src]["mark"]`,
+persists the work state, and appends a line to the page's .txt via
+`append_mark_line`, which returns False when the line is already there.
+
+**Call the existing handler. Do not write a second copy of that logic, and do
+not write the string "【広告】" anywhere.** One vocabulary, one code path.
+
+## 2. THE POINT OF THIS TASK — read this before you write anything
+
+`_on_marks_to_rects_click` currently returns early:
+
+        regions = detect_marks(img)
+
+        if not regions:
+            self.latest_region_info = "マークが見つかりません"
+            self._update_status()
+            return
+
+**Measured on the 52 real pages (2026-08-27): 8 of the 9 advert pages carry NO
+cyan mark at all** (`000002` `000003` `000004` `000005` `000006` `000050`
+`000051` `000052`). Only `000048` carries both.
+
+So if you leave that early return where it is, the feature does nothing on
+8 of the 9 pages it exists for.
+
+**The orange mark must be handled BEFORE the empty-regions check.**
+
+## 3. Definition of Done (verifiable)
+
+Rewrite the body of `_on_marks_to_rects_click` in `custom_gui/app.py` to this
+order. Everything else in the method stays as it is.
+
+    1. Load the image. Keep the existing try/except exactly as it is:
+       on FileNotFoundError, ValueError or OSError set self.latest_region_info
+       to a message containing "読み込めません", call self._update_status(),
+       and return. The handler must never raise.
+
+    2. page_mark = detect_page_mark(img)
+       If page_mark is not None:
+           call self._on_mark_click(page_mark)
+           and remember that you did, in a local flag.
+       If page_mark is None:
+           do NOTHING to the page's mark. **A 【広告】 or 【表紙】 the user set
+           by hand must survive this button untouched.** Never clear a mark.
+
+    3. regions = detect_marks(img)
+
+    4. Add the regions exactly as the method does today, including the
+       duplicate check within 2 pixels on all four sides (Task 46, DoD-3).
+
+    5. Set self.latest_region_info LAST, after step 2, because
+       `_on_mark_click` writes to `self.latest_region_info` itself and would
+       otherwise overwrite your message. The message must state both outcomes:
+
+           regions added and advert recorded:
+               マークから 3 個の矩形を作りました（囲み 3・傍線 0）／【広告】として記録しました
+           advert only, no cyan at all:
+               【広告】として記録しました（矩形のマークはありません）
+           regions only:
+               マークから 10 個の矩形を作りました（囲み 1・傍線 9）
+           neither:
+               マークが見つかりません
+
+       The exact wording is yours; the four cases must be distinguishable.
+       Build the 【広告】 half of the message from the value `_on_mark_click`
+       was given, not from a literal.
+
+    6. Call self._update_selections_ui() and self._persist_work_state() as the
+       method does today, in the same place. Skip neither, even when only the
+       advert was recorded.
+
+**Do not start OCR. Do not open the inline editor. Do not change the mode.
+Do not spawn a thread.**
+
+**Locking:** `_update_selections_ui`, `_persist_work_state` and
+`_on_mark_click` all take `self.selections_lock` or call something that does.
+Do not hold the lock while calling any of them. Never remove or weaken a
+`with self.selections_lock:` block - that was the serious defect of Task 30c.
+`grep -c "selections_lock" custom_gui/app.py` must stay at 6 or more.
+
+## 4. Tests you must write
+
+Add them to the EXISTING file `tests/test_marks_to_rects.py`.
+**Do not modify or delete any test already in it.** Append only.
+
+Build page images in code and write them to `tmp_path`, the way the tests
+already there do. Read that file first and follow its pattern.
+
+    orange BGR: cv2.cvtColor(np.uint8([[[25, 159, 238]]]), cv2.COLOR_HSV2BGR)[0, 0]
+    cyan   BGR: (255, 235, 60)
+
+`_on_mark_click` writes a .txt next to the image, so use `tmp_path` for the
+image and let it write there.
+
+Required cases, each an exact assertion:
+
+    9.  Orange only, no cyan (this is 8 of the 9 real pages):
+        -> self.mark == MARK_AD, imported from custom_gui.page_marks
+        -> 0 rectangles created
+        -> self.latest_region_info mentions the advert
+    10. Orange AND cyan (this is page 000048):
+        -> self.mark == MARK_AD
+        -> exactly 1 rectangle created
+    11. Cyan only, no orange:
+        -> self.mark is None (or whatever it was before; assert it did NOT
+           become MARK_AD)
+        -> exactly 1 rectangle created
+    12. **No orange, and the page was already marked 【表紙】 by hand**
+        (call self._on_mark_click(MARK_COVER) first):
+        -> after pressing the button, self.mark is STILL MARK_COVER.
+        **This is the "never clear a mark" rule. Do not skip it.**
+    13. Orange only, button pressed TWICE:
+        -> self.mark == MARK_AD, and the .txt file contains the 【広告】 line
+           exactly once (append_mark_line already guards this; prove it holds
+           through this path).
+
+Use exact values. Do not use assertGreater, assertIsNotNone, or "it exists"
+checks where a value can be written.
+
+## 5. Allowed and forbidden scope
+
+ALLOWED - these two files only:
+
+    custom_gui/app.py                (only _on_marks_to_rects_click and its
+                                      import line; change nothing else)
+    tests/test_marks_to_rects.py     (APPEND new tests; modify nothing existing)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/mark_detector.py   <- import from it; do not edit it
+    custom_gui/page_marks.py      <- import from it; do not edit it
+    custom_gui/selection.py  custom_gui/viewer.py
+    and every other file under custom_gui/
+    every other file under tests/
+    requirements.txt  pyproject.toml     (no new dependency; you need none)
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**
+
+Checks the commander will run on your patch:
+
+    git diff --name-only                        exactly the two files above
+    git diff custom_gui/mark_detector.py        must be empty
+    git diff custom_gui/page_marks.py           must be empty
+    grep -c "【広告】" custom_gui/app.py         must stay at exactly 1.
+        That one occurrence is the existing tooltip on the 広告 button,
+        "このページを【広告】として記録". Adding a second occurrence
+        anywhere - a message, a comparison, a variable - is a rejection.
+    grep -c "selections_lock" custom_gui/app.py must be 6 or more
+    git diff requirements.txt pyproject.toml    must be empty
+    the first 8 tests in tests/test_marks_to_rects.py must be unchanged
+    no *.injbak, no patch*.diff, no test_*.py at the repository root
+
+## 6. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Not one assertion. The 8 tests already in
+  `tests/test_marks_to_rects.py` must still pass unmodified.
+- The suite is currently **270 passed**. After your change it must be
+  270 + (your new tests), with zero failures.
+- If an existing test fails, do NOT edit it to make it green. Stop and report
+  which test, and the full failure output.
+
+## 7. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+`--collect-only` is not optional. Task 39 was submitted with an IndentationError
+in a test file; collection stopped for the whole suite and seven verification
+items went unrun.
+
+Then prove your tests detect the defects they claim to. For EACH of the four
+below: break the code, show the FAILING output, restore it, show it green.
+
+    (i)   Move the orange handling back BELOW the "if not regions: return"
+          early exit.  -> case 9 must fail. This is the whole point of the task.
+    (ii)  When detect_page_mark returns None, call
+          self._on_mark_click(None) instead of leaving the mark alone.
+          -> case 12 must fail.
+    (iii) Set self.latest_region_info BEFORE calling _on_mark_click.
+          -> case 9 must fail (the message is overwritten).
+    (iv)  Skip _persist_work_state when no regions were added.
+          -> add an assertion to one of your tests that catches this, or say
+          plainly that none of your tests catch it.
+
+If an injected defect does NOT make a test fail, say so plainly. That is a real
+finding and worth more than a green report. **It has happened twice on this
+project** (Task 42: a default value left unset meant the guard was never
+reached; Task 45: a threshold was never tested because a second threshold
+rejected the sample first). When a defect is not detected, ask what else is
+holding the test up.
+
+## 8. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If the contract above disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- You start from `master`.
+
+## 9. Your report must contain
+
+    1. git diff --name-only
+    2. the last 20 lines of python -m pytest tests/ -v
+    3. for each of the four injections in section 7: what you broke, the
+       FAILING output, and the passing output after restoring
+    4. anything you chose differently from this order, and why
