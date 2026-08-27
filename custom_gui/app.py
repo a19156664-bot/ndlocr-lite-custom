@@ -19,7 +19,7 @@ from custom_gui.ocr_scheduler import OcrScheduler
 from custom_gui.save_paths import export_targets
 from custom_gui.region_stats import count_line_breaks
 from custom_gui.page_marks import MARK_AD, MARK_COVER, mark_line, append_mark_line
-from custom_gui.mark_detector import load_image, detect_marks
+from custom_gui.mark_detector import load_image, detect_marks, detect_page_mark
 
 class OcrState(Enum):
     IDLE = auto()
@@ -637,43 +637,52 @@ class SelectableImageViewer(ImageViewer):
             self._update_status()
             return
             
+        page_mark = detect_page_mark(img)
+        recorded_advert = False
+        if page_mark is not None:
+            self._on_mark_click(page_mark)
+            recorded_advert = True
+            
         regions = detect_marks(img)
         
-        if not regions:
-            self.latest_region_info = "マークが見つかりません"
-            self._update_status()
-            return
-            
         existing_rects = self.selection_container.get_all()
         
         added_count = 0
         box_count = 0
         line_count = 0
         
-        for region in regions:
-            x1, y1, x2, y2 = region.bbox
-            
-            # Check for duplicates within 2 pixels
-            is_duplicate = False
-            for ex in existing_rects:
-                ex_x1, ex_y1, ex_x2, ex_y2 = ex.bbox
-                if (abs(x1 - ex_x1) <= 2.0 and
-                    abs(y1 - ex_y1) <= 2.0 and
-                    abs(x2 - ex_x2) <= 2.0 and
-                    abs(y2 - ex_y2) <= 2.0):
-                    is_duplicate = True
-                    break
-                    
-            if not is_duplicate:
-                self.selection_container.add(region.bbox)
-                added_count += 1
-                if region.kind == "box":
-                    box_count += 1
-                elif region.kind == "line":
-                    line_count += 1
-                    
-        self.latest_region_info = f"マークから {added_count} 個の矩形を作りました（囲み {box_count}・傍線 {line_count}）"
-        
+        if regions:
+            for region in regions:
+                x1, y1, x2, y2 = region.bbox
+                
+                # Check for duplicates within 2 pixels
+                is_duplicate = False
+                for ex in existing_rects:
+                    ex_x1, ex_y1, ex_x2, ex_y2 = ex.bbox
+                    if (abs(x1 - ex_x1) <= 2.0 and
+                        abs(y1 - ex_y1) <= 2.0 and
+                        abs(x2 - ex_x2) <= 2.0 and
+                        abs(y2 - ex_y2) <= 2.0):
+                        is_duplicate = True
+                        break
+                        
+                if not is_duplicate:
+                    self.selection_container.add(region.bbox)
+                    added_count += 1
+                    if region.kind == "box":
+                        box_count += 1
+                    elif region.kind == "line":
+                        line_count += 1
+
+        if regions and recorded_advert:
+            self.latest_region_info = f"マークから {added_count} 個の矩形を作りました（囲み {box_count}・傍線 {line_count}）／{page_mark}として記録しました"
+        elif recorded_advert and not regions:
+            self.latest_region_info = f"{page_mark}として記録しました（矩形のマークはありません）"
+        elif regions and not recorded_advert:
+            self.latest_region_info = f"マークから {added_count} 個の矩形を作りました（囲み {box_count}・傍線 {line_count}）"
+        else:
+            self.latest_region_info = "マークが見つかりません"
+
         self._update_selections_ui()
         self._persist_work_state()
 
