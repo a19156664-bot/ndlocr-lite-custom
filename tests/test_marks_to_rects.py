@@ -33,18 +33,13 @@ def get_app(page, tmp_path, img_maker):
     # mock things that app needs
     app.page = page
     app.selections_lock = __import__('threading').Lock()
-    # Mock update status to prevent UI exception
-    def mock_update_status():
-        pass
-    app._update_status = mock_update_status
-    
-    def mock_update_selections_ui():
-        pass
-    app._update_selections_ui = mock_update_selections_ui
-    
-    def mock_persist_work_state():
-        pass
-    app._persist_work_state = mock_persist_work_state
+
+    app.status_text = ft.Text("")
+    app.status_text.page = page
+
+    for name in ("gesture_detector", "highlight_layer", "rects_layer",
+                 "inline_editor_layer", "selections_list", "mode_toggle"):
+        getattr(app, name).page = page
 
     return app, path
 
@@ -243,3 +238,50 @@ def test_13_orange_only_twice(dummy_page, tmp_path):
     
     assert lines.count(ad_line) == 1
     
+
+def test_14_cyan_marked_status(dummy_page, tmp_path):
+    app, path = get_app(dummy_page, tmp_path, make_marked_page)
+    app.selection_container._rects = []
+    app.image_states[str(path)] = {}
+    
+    app._on_marks_to_rects_click(None)
+    
+    expected = app._get_status_message()
+    assert "マークから" in expected
+    assert app.status_text.value == expected
+
+def test_15_clean_page_status(dummy_page, tmp_path):
+    app, path = get_app(dummy_page, tmp_path, make_clean_page)
+    app.selection_container._rects = []
+    app.image_states[str(path)] = {}
+    
+    app._on_marks_to_rects_click(None)
+    
+    assert "マークが見つかりません" in app.status_text.value
+
+def test_16_orange_marked_status(dummy_page, tmp_path):
+    app, path = get_app(dummy_page, tmp_path, make_orange_page)
+    app.selection_container._rects = []
+    app.image_states[str(path)] = {}
+    app.mark = None
+    
+    app._on_marks_to_rects_click(None)
+    
+    expected = app._get_status_message()
+    from custom_gui.page_marks import MARK_AD
+    assert MARK_AD in expected
+    assert app.status_text.value == expected
+
+def test_17_cyan_marked_persistence(dummy_page, tmp_path):
+    app, path = get_app(dummy_page, tmp_path, make_marked_page)
+    app.selection_container._rects = []
+    app.image_states[str(path)] = {}
+    
+    app._on_marks_to_rects_click(None)
+    
+    cache_dir = path.parent / ".ndlocr_cache"
+    assert cache_dir.exists()
+    
+    import custom_gui.work_state
+    state = custom_gui.work_state.load_work_state(str(path))
+    assert len(state["rects"]) == 1
