@@ -685,6 +685,7 @@ class SelectableImageViewer(ImageViewer):
 
         self._update_selections_ui()
         self._persist_work_state()
+        self._update_status()
 
     def _on_mark_click(self, mark_str):
         self.mark = mark_str
