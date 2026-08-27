@@ -1,7 +1,7 @@
 import flet as ft
 from custom_gui.image_sequence import ImageSequence, list_images_in_folder
 from custom_gui.viewer import ImageViewer, original_to_display, apply_pan, InteractionMode, calculate_label_position
-from custom_gui.selection import SelectionContainer, calculate_normalized_bbox, SelectionRect
+from custom_gui.selection import SelectionContainer, calculate_normalized_bbox, SelectionRect, find_region_at_point
 from custom_gui.ocr_bridge import run_ocr_and_parse
 import custom_gui.work_state as work_state
 from custom_gui.region_filter import filter_lines_by_region
@@ -193,6 +193,7 @@ class SelectableImageViewer(ImageViewer):
             on_pan_start=self._on_pan_start,
             on_pan_update=self._on_pan_update,
             on_pan_end=self._on_pan_end,
+            on_tap_up=self._on_tap_up,
             on_secondary_tap=self._toggle_mode,
             width=self.win_w,
             height=self.win_h,
@@ -1215,6 +1216,24 @@ class SelectableImageViewer(ImageViewer):
         self._refresh_cursor()
         if getattr(self.gesture_detector, 'page', None):
             self.gesture_detector.update()
+
+
+    def _on_tap_up(self, e: ft.TapEvent):
+        if self.mode_state.current != "SELECT":
+            return
+            
+        rid = find_region_at_point(e.local_x, e.local_y, 
+                                   self.selection_container.get_all(),
+                                   self.zoom_scale, self.offset_x, self.offset_y)
+        if rid is None:
+            return
+            
+        with self.selections_lock:
+            self.active_region_id = rid
+            self.inline_editing_region_id = rid
+            
+        self._update_selections_ui()
+        self._update_inline_editor()
 
     def _update_selections_ui(self):
         with self.selections_lock:

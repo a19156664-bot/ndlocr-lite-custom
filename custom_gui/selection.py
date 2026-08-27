@@ -75,3 +75,24 @@ def calculate_normalized_bbox(
     y2 = max(0.0, min(y2, img_h))
     
     return (x1, y1, x2, y2)
+
+def find_region_at_point(
+    x: float, y: float,
+    rects: List[SelectionRect],
+    scale: float,
+    offset_x: float, offset_y: float
+) -> Optional[str]:
+    orig_x, orig_y = display_to_original(x, y, scale, offset_x, offset_y)
+    
+    best_rect_id = None
+    min_area = float('inf')
+    
+    for rect in rects:
+        x1, y1, x2, y2 = rect.bbox
+        if x1 <= orig_x <= x2 and y1 <= orig_y <= y2:
+            area = (x2 - x1) * (y2 - y1)
+            if area < min_area:
+                min_area = area
+                best_rect_id = rect.rect_id
+                
+    return best_rect_id
