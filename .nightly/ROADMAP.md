@@ -369,7 +369,7 @@ uid 未採番のまま更新され破綻する。`page.update()` のロックは
 
 # 🔖 セッション再開ポイント（2026-08-27 時点）
 
-**master**: `2e4299f` / **252 tests passed**（2026-08-27・1回の実行）/ 作業ツリー `C:\Users\user\ndlocr-work`（`integration/task-42`）/ Jules セッション稼働なし
+**master**: `dd94adc` / **270 tests passed**（2026-08-27・1回の実行）/ 作業ツリー `C:\Users\user\ndlocr-work`（`integration/task-42`）/ Jules セッション稼働なし
 
 ## ✅ 完了（master に統合済み）
 
@@ -411,7 +411,11 @@ Task 41（`CLICK` / `ALL_SCROLL`）で決着した。**
 9. 🔴 矩形を1つ描く → 別の場所をクリックしてエディタを閉じる →
    その矩形の中をクリック → インラインエディタが開く
 
-**残り 7項目は、次に実機を触るときに併せてご確認いただく。**
+### Task 46（マーク読取）— 🔴 1項目 未確認
+10. 🔴 水色マークのあるページを開く → 「マーク読取」を押す →
+    マークの位置に矩形が出る。もう一度押しても増えない
+
+**残り 8項目は、次に実機を触るときに併せてご確認いただく。**
 これらは OCR の実行や再起動を伴うため、5項目より時間がかかる。
 
 ### 起動方法（PowerShell に貼る）
@@ -440,10 +444,10 @@ cd C:\Users\user\ndlocr-lite-custom
       左右 20px 広げる（帯 12px に対し縦書きの見出し列は実測 48px）。
       Gemini など LLM は使わない。決定論的でないと破壊試験が成立しないため
       （2026-08-27 承認者のご判断・案ア）。
-- [ ] **Task 46（発注済）: Task 45 の検出結果を矩形として画面に載せる（GUI 結線）**
+- [x] ~~**Task 46: 「マーク読取」ボタンで水色を矩形にする**~~ **2026-08-27 完了**（`dd94adc`）
       「マーク読取」ボタンを追加し、水色の検出結果を矩形として積む。
       2回押しても増えない（bbox 2px 以内は同一とみなす）。触るのは app.py のみ。
-- [ ] **Task 47（発注済・Task 46 と並行）: 橙色を検出して【広告】を返す**
+- [x] ~~**Task 47: 橙色を検出して【広告】を返す**~~ **2026-08-27 完了**（`8e91206`）
       `detect_page_mark(image_bgr, min_area=2000) -> Optional[str]`。
       橙 H 10-35 / S>=120 / V>=180 の画素数が min_area 以上なら
       `page_marks.MARK_AD` を返す。触るのは mark_detector.py のみ。
@@ -451,6 +455,10 @@ cd C:\Users\user\ndlocr-lite-custom
       `custom_gui/mark_detector.py` の `detect_marks()` は完成済み。
       実物3枚での検出は指揮官の実測と一致（000007 囲み1+傍線9 /
       000018 囲み1 / 000028 囲み2）。傍線は幅 51-52px に広がっている。
+- [ ] **Task 48（次）: 【広告】の自動判定を画面に結線する**
+      `mark_detector.detect_page_mark()` は完成済み（Task 47）。橙色のページを
+      開いたときに `MARK_AD` を自動で記録するか、あるいは「マーク読取」に
+      まとめるかは未決。**発注前に承認者のご判断が要る。**
 - [ ] Task 43: PDF の一括 OCR
       `ocr_cache` は `page_index` を引数に持ち、`work_state` が初の実利用者。
       現状 `_on_ocr_complete` は `if target_path not in self.pdf_page_map` で
