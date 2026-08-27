@@ -1,0 +1,240 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+This order has NO number in ROADMAP.md yet. It is outside the existing plan.
+The approver decided on 2026-08-27 to add it as Task 45, after the commander
+measured that hand-drawn cyan marks on scanned pages separate cleanly from the
+printed ink by colour alone. It is placed before Task 43/44 because it removes
+the manual step of drawing every rectangle by hand.
+
+**This task is detection logic ONLY. No GUI wiring.** Wiring the result into
+the viewer is Task 46 and is NOT part of this order.
+
+================================================================================
+Task 45: Detect hand-drawn cyan marks and turn them into OCR regions
+================================================================================
+
+## 1. Purpose and background
+
+The user marks the areas to OCR by hand, with a cyan highlighter, on a scan of
+a 1933 Japanese magazine. Today every one of those areas has to be re-drawn in
+the app with the mouse. This task produces the pure function that finds them.
+
+The commander measured the three sample pages on 2026-08-27. These are facts,
+not estimates. Build to them.
+
+    hand-drawn cyan mark   HSV saturation 157-159, value 233-238
+    paper and printed text saturation 2-5
+    masthead printed ink   saturation 68-69, value 85-90   <- MUST be rejected
+
+A threshold of saturation >= 120 AND value >= 180 separates the hand-drawn
+marks from the printed cyan ink of the masthead. Do not widen it.
+
+Marks come in exactly two shapes, and both are in scope:
+
+    a "box"  - a closed loop drawn around a block of text
+               measured aspect ratios: 0.56, 1.45, 2.63, 3.29
+    a "line" - a straight highlighter stroke over a vertical heading
+               measured: width 11-12 px, height 145-435 px, 9 of them on one page
+
+The approver decided on 2026-08-27 that **lines are in scope too**. A line is
+thinner than the text column it marks, so its bounding box must be widened.
+
+## 2. Definition of Done (verifiable)
+
+Create `custom_gui/mark_detector.py`. Nothing in it may import flet.
+
+### DoD-1 — the data type and the constants
+
+    from dataclasses import dataclass
+    from typing import Tuple, List
+
+    CYAN_LOWER = (80, 120, 180)      # HSV lower bound, OpenCV convention (H is 0-179)
+    CYAN_UPPER = (105, 255, 255)     # HSV upper bound
+
+    @dataclass
+    class MarkRegion:
+        bbox: Tuple[int, int, int, int]   # (x1, y1, x2, y2) in ORIGINAL image pixels
+        kind: str                         # "box" or "line"
+
+`bbox` must use the same (x1, y1, x2, y2) convention as `SelectionRect.bbox` in
+`custom_gui/selection.py`, so the result can be handed to the existing
+`filter_lines_by_region()` later. Values are ints.
+
+### DoD-2 — the detector
+
+    def detect_marks(
+        image_bgr,                  # numpy.ndarray, BGR, as returned by load_image
+        min_area: int = 500,
+        thin_max: int = 20,
+        line_margin: int = 20,
+    ) -> List[MarkRegion]:
+
+Steps, in this order:
+
+    1. Convert BGR to HSV with cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV).
+    2. mask = cv2.inRange(hsv, CYAN_LOWER, CYAN_UPPER)   (as numpy arrays)
+    3. Close the mask so a hand-drawn stroke with gaps becomes one shape:
+           kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+           closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+       These numbers were measured. Do not change them.
+    4. cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    5. For each contour take cv2.boundingRect -> (x, y, w, h).
+       Discard it when w * h < min_area.
+    6. Classify by the SHORT side:
+           min(w, h) <= thin_max   -> kind = "line"
+           otherwise               -> kind = "box"
+    7. For a "line", widen the THIN direction by line_margin on BOTH sides:
+           if w <= h:  x1 -= line_margin, x2 += line_margin      (vertical stroke)
+           else:       y1 -= line_margin, y2 += line_margin      (horizontal stroke)
+       A "box" is never widened.
+    8. Clip every bbox to the image: 0 <= x <= width, 0 <= y <= height.
+    9. Return the list sorted by (y1, x1) ascending. The order must be
+       deterministic: the same image must always give the same list.
+
+Rationale for step 7, so you do not have to guess: the stroke is 12 px wide but
+the vertical text column it marks measures about 48 px. 12 + 20 + 20 = 52.
+
+### DoD-3 — a loader that survives Japanese file names
+
+    def load_image(path: str):
+        """Read an image file into a BGR numpy array."""
+
+**Use `cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)`.**
+
+**Do NOT use `cv2.imread`.** On Windows it returns None for a path containing
+non-ASCII characters, and every sample file here is named in Japanese
+(`国際寫眞新聞_028号_000007.jpg`). `cv2.imread` fails silently - it raises
+nothing, it just returns None - so this would look like "no marks found".
+
+Raise `FileNotFoundError` when the file does not exist, and `ValueError` when
+the bytes cannot be decoded as an image. Do not return None.
+
+## 3. Tests you must write
+
+Put them in `tests/test_mark_detector.py`.
+
+**Build every test image in code with numpy. Do not add any binary file to the
+repository.** A helper like this is what the tests should use:
+
+    def make_page(w=400, h=600):
+        page = np.full((h, w, 3), 255, dtype=np.uint8)   # white paper
+        return page
+
+    def paint_cyan(page, x1, y1, x2, y2):
+        page[y1:y2, x1:x2] = (255, 235, 60)   # BGR of the measured marker colour
+
+Before you rely on that BGR value, assert in one test that it really falls
+inside CYAN_LOWER..CYAN_UPPER after cv2.cvtColor. If it does not, adjust the
+BGR triple until it does, and say so in your report.
+
+Required cases, each an exact assertion:
+
+    1. A single filled rectangle 200x150 -> exactly 1 region, kind == "box",
+       and bbox equals the painted rectangle within +/- 8 px on every side
+       (the closing kernel grows the shape slightly; state the tolerance in
+       the assertion, do not use "is not None").
+    2. A vertical stroke 12 px wide and 300 px tall -> exactly 1 region,
+       kind == "line", and its width equals 12 + 2 * line_margin (+/- 8 px).
+    3. A horizontal stroke 300 px wide and 12 px tall -> kind == "line",
+       and its HEIGHT is the one that grew, not its width.
+    4. A patch painted with saturation 68 and value 88 (the masthead ink
+       measured on the real page) -> 0 regions. This is the false positive
+       the threshold exists to reject.
+    5. A cyan patch whose area is below min_area -> 0 regions.
+    6. Two marks at different heights -> returned sorted by y1 ascending.
+    7. Calling detect_marks twice on the same array returns equal results
+       (determinism).
+    8. A mark touching the image edge -> the bbox is clipped, never negative
+       and never larger than the image.
+    9. load_image on a file written to tmp_path with a Japanese name
+       (use `tmp_path / "国際寫眞新聞_test.jpg"`, write it with
+       `cv2.imencode(".jpg", page)[1].tofile(str(p))`) -> returns an array of
+       the right shape. **This test is the point of DoD-3.**
+   10. load_image on a path that does not exist -> raises FileNotFoundError.
+
+Do not use assertGreater, assertIsNotNone, or "it exists" style checks where an
+exact value or a stated tolerance can be written.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these two files only:
+
+    custom_gui/mark_detector.py      (new)
+    tests/test_mark_detector.py      (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    requirements.txt  pyproject.toml   <- opencv-python-headless==4.11.0.86 and
+                                          numpy==2.2.2 are ALREADY declared.
+                                          You need no new dependency. Adding one
+                                          is an immediate rejection.
+    custom_gui/app.py  custom_gui/selection.py  custom_gui/viewer.py
+    and every other file under custom_gui/
+    every existing file under tests/
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**
+
+Checks the commander will run on your patch:
+
+    git diff --name-only                       exactly the two files above
+    grep -n "flet" custom_gui/mark_detector.py  must find nothing
+    grep -n "cv2.imread" custom_gui/            must find nothing
+    git diff requirements.txt pyproject.toml    must be empty
+    no *.injbak, no patch*.diff, no test_*.py at the repository root
+    no image file added anywhere
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Not one assertion.
+- The suite is currently **240 passed**. After your change it must be
+  240 + (your new tests), with zero failures.
+- If an existing test fails, do NOT edit it to make it green. Stop and report
+  which test, and the full failure output.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+`--collect-only` is not optional. Task 39 was submitted with an IndentationError
+in a test file; collection stopped for the whole suite and seven verification
+items went unrun.
+
+Then prove your tests detect the defects they claim to. For EACH of the four
+below: break the code, show the FAILING output, restore it, show it green.
+
+    (i)   Lower the saturation floor in CYAN_LOWER from 120 to 40.
+          -> case 4 (masthead ink) must fail.
+    (ii)  Widen "box" regions by line_margin as well as "line" regions.
+          -> case 1 must fail.
+    (iii) For a vertical stroke, widen the TALL direction instead of the thin
+          one.  -> case 2 must fail.
+    (iv)  Replace the body of load_image with cv2.imread(path).
+          -> case 9 (Japanese file name) must fail.
+
+If an injected defect does NOT make a test fail, say so plainly. That is a real
+finding and worth more than a green report. On Task 42 exactly this happened:
+a test passed for the wrong reason because it left a default value unset.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If the contract above disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- Do not wire anything into the GUI. That is Task 46.
+- You start from `master`. Nothing from any other unfinished task is visible to
+  you, and you must not depend on anything that is not on `master` today.
+
+## 8. Your report must contain
+
+    1. git diff --name-only
+    2. the last 20 lines of python -m pytest tests/ -v
+    3. for each of the four injections in section 6: what you broke, the
+       FAILING output, and the passing output after restoring
+    4. the BGR triple you used for the marker colour, and the HSV it converts to
+    5. anything you chose differently from this order, and why

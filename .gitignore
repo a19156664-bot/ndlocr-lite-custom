@@ -15,3 +15,6 @@
 # 動作確認で resource/ に出力される CSV / TXT（NDL 由来のファイルは .jpg .png .xml .gif のみ）
 resource/*.csv
 resource/*.txt
+
+# 承認者ご提供の実地試験素材（NDL 由来の画像は resource/ のみに置く運用）
+/jpg/
