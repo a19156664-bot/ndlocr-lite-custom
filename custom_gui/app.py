@@ -19,6 +19,7 @@ from custom_gui.ocr_scheduler import OcrScheduler
 from custom_gui.save_paths import export_targets
 from custom_gui.region_stats import count_line_breaks
 from custom_gui.page_marks import MARK_AD, MARK_COVER, mark_line, append_mark_line
+from custom_gui.mark_detector import load_image, detect_marks
 
 class OcrState(Enum):
     IDLE = auto()
@@ -156,10 +157,17 @@ class SelectableImageViewer(ImageViewer):
         self.btn_mark_ad = ft.TextButton("広告", tooltip="このページを【広告】として記録", on_click=lambda e: self._on_mark_click(MARK_AD))
         self.btn_mark_cover = ft.TextButton("表紙", tooltip="このページを【表紙】として記録", on_click=lambda e: self._on_mark_click(MARK_COVER))
         
+        self.btn_marks_to_rects = ft.TextButton(
+            "マーク読取",
+            tooltip="水色のマークから矩形を作る",
+            on_click=self._on_marks_to_rects_click,
+        )
+        
         self.controls_row.controls.append(self.save_page_button)
         self.controls_row.controls.append(self.save_all_button)
         self.controls_row.controls.append(self.btn_mark_ad)
         self.controls_row.controls.append(self.btn_mark_cover)
+        self.controls_row.controls.append(self.btn_marks_to_rects)
         
         self._export_scope = "current"
         self._save_dialog = None
@@ -618,6 +626,57 @@ class SelectableImageViewer(ImageViewer):
                 allow_multiple=True
             )
             
+    def _on_marks_to_rects_click(self, e):
+        if not self.image_src:
+            return
+            
+        try:
+            img = load_image(self.image_src)
+        except (FileNotFoundError, ValueError, OSError):
+            self.latest_region_info = "読み込めません"
+            self._update_status()
+            return
+            
+        regions = detect_marks(img)
+        
+        if not regions:
+            self.latest_region_info = "マークが見つかりません"
+            self._update_status()
+            return
+            
+        existing_rects = self.selection_container.get_all()
+        
+        added_count = 0
+        box_count = 0
+        line_count = 0
+        
+        for region in regions:
+            x1, y1, x2, y2 = region.bbox
+            
+            # Check for duplicates within 2 pixels
+            is_duplicate = False
+            for ex in existing_rects:
+                ex_x1, ex_y1, ex_x2, ex_y2 = ex.bbox
+                if (abs(x1 - ex_x1) <= 2.0 and
+                    abs(y1 - ex_y1) <= 2.0 and
+                    abs(x2 - ex_x2) <= 2.0 and
+                    abs(y2 - ex_y2) <= 2.0):
+                    is_duplicate = True
+                    break
+                    
+            if not is_duplicate:
+                self.selection_container.add(region.bbox)
+                added_count += 1
+                if region.kind == "box":
+                    box_count += 1
+                elif region.kind == "line":
+                    line_count += 1
+                    
+        self.latest_region_info = f"マークから {added_count} 個の矩形を作りました（囲み {box_count}・傍線 {line_count}）"
+        
+        self._update_selections_ui()
+        self._persist_work_state()
+
     def _on_mark_click(self, mark_str):
         self.mark = mark_str
         self.image_states[self.image_src]["mark"] = mark_str
