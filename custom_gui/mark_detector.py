@@ -1,11 +1,15 @@
 from dataclasses import dataclass
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import cv2
 import numpy as np
 import os
+from custom_gui.page_marks import MARK_AD
 
 CYAN_LOWER = (80, 120, 180)      # HSV lower bound, OpenCV convention (H is 0-179)
 CYAN_UPPER = (105, 255, 255)     # HSV upper bound
+
+ORANGE_LOWER = (10, 120, 180)     # HSV lower bound, OpenCV convention (H is 0-179)
+ORANGE_UPPER = (35, 255, 255)     # HSV upper bound
 
 @dataclass
 class MarkRegion:
@@ -58,6 +62,13 @@ def detect_marks(
         
     regions.sort(key=lambda r: (r.bbox[1], r.bbox[0]))
     return regions
+
+def detect_page_mark(image_bgr, min_area: int = 2000) -> Optional[str]:
+    """Return MARK_AD when the page carries a hand-drawn orange mark, else None."""
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, ORANGE_LOWER, ORANGE_UPPER)
+    count = cv2.countNonZero(mask)
+    return MARK_AD if count >= min_area else None
 
 def load_image(path: str):
     """Read an image file into a BGR numpy array."""
