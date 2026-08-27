@@ -1,0 +1,211 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+This order corresponds to ROADMAP.md -> Task 49.
+
+================================================================================
+Task 49: 「マーク読取」 must reach the screen, and its tests must stop
+          replacing the very things they check
+================================================================================
+
+## 1. What is wrong, measured
+
+### 1-1. The status bar never refreshes
+
+`_on_marks_to_rects_click` sets `self.latest_region_info` and then calls
+`self._update_selections_ui()` and `self._persist_work_state()`.
+**Neither of those calls `self._update_status()`**, and `_update_status` is the
+only thing that pushes `_get_status_message()` into `self.status_text`.
+
+The commander measured this on 2026-08-28 with a real `ft.Text` status bar:
+
+    before the press : ... | Mode: SELECT | OCR not started | Last: None
+    internal value   : マークから 0 個の矩形を作りました（囲み 0・傍線 0）
+    after the press  : ... | Mode: SELECT | OCR not started | Last: None
+
+The rectangles are created correctly. **The user is simply never told.**
+Every other button in this file calls `_update_status()`; this one does not.
+
+### 1-2. The tests cannot see it, because they replaced it
+
+`tests/test_marks_to_rects.py` has a helper `get_app()` that does this:
+
+    def mock_update_status():
+        pass
+    app._update_status = mock_update_status
+
+    def mock_update_selections_ui():
+        pass
+    app._update_selections_ui = mock_update_selections_ui
+
+    def mock_persist_work_state():
+        pass
+    app._persist_work_state = mock_persist_work_state
+
+**Three of the four things the handler does are replaced by empty functions.**
+So no test in this file can detect a defect in the status bar, in the selections
+UI, or in persistence. This is the failure mode this project has rejected twelve
+times: the test mocks out the thing under test.
+
+**The mocks are not necessary.** The commander ran the handler on 2026-08-28
+with all three methods REAL, against a real page, using only
+`unittest.mock.MagicMock()` as `app.page` and a real `ft.Text` as
+`app.status_text`. Everything ran, and `_update_status()` produced the full
+status line. The comment "Mock update status to prevent UI exception" describes
+a problem that does not exist under that setup.
+
+## 2. Definition of Done (verifiable)
+
+### DoD-1 — the handler tells the user
+
+In `custom_gui/app.py`, in `_on_marks_to_rects_click` ONLY, call
+`self._update_status()` after `self.latest_region_info` has been given its final
+value, on every path that reaches the end of the method.
+
+Order matters. `_update_status` must run AFTER the message is final, not before.
+The existing early-return paths ("読み込めません") already call it and must keep
+doing so, unchanged.
+
+Change nothing else in `app.py`. Not one other method.
+
+### DoD-2 — the tests stop replacing what they check
+
+In `tests/test_marks_to_rects.py`, in the `get_app()` helper:
+
+    - Delete all three mocks: `_update_status`, `_update_selections_ui`,
+      `_persist_work_state`. Let the real methods run.
+    - Give the app a real status bar so `_update_status` has somewhere to write:
+
+          app.status_text = ft.Text("")
+          app.status_text.page = page
+
+    - Give the layers a page the same way, if a real method needs it:
+
+          for name in ("gesture_detector", "highlight_layer", "rects_layer",
+                       "inline_editor_layer", "selections_list", "mode_toggle"):
+              getattr(app, name).page = page
+
+      Use `unittest.mock.MagicMock()` for `page` if the existing DummyPage is
+      not enough. MagicMock is acceptable HERE because it stands in for flet's
+      renderer, which is outside this project. It is NOT acceptable as a
+      stand-in for anything in `custom_gui/`.
+
+**All 13 tests already in this file must still pass, unmodified.**
+If one of them genuinely cannot pass with the real methods running, do NOT
+re-introduce the mock and do NOT edit the test. Stop, and report which test,
+what it does, and the exact failure. That is a finding worth more than a green
+report.
+
+`_persist_work_state` writes into a `.ndlocr_cache` directory beside the image.
+The tests put their image in `tmp_path`, so the cache lands in `tmp_path` too
+and is cleaned up by pytest. This is intended - do not suppress it.
+
+### DoD-3 — new tests that watch the two paths the mocks were hiding
+
+Append these to the same file. Do not modify the 13 that are there.
+
+    14. Cyan-marked page, press the button:
+        assert the message the user actually sees.
+            expected = app._get_status_message()
+        must contain "マークから" AND app.status_text.value must equal that
+        same string. Assert on `app.status_text.value`, not on
+        `app.latest_region_info`. **The point is the screen, not the variable.**
+    15. Clean page (no marks), press the button:
+        `app.status_text.value` contains "マークが見つかりません".
+    16. Orange-marked page, press the button:
+        `app.status_text.value` mentions the advert, and equals
+        `app._get_status_message()`.
+    17. Cyan-marked page, press the button, then assert the work state was
+        really written: a `.ndlocr_cache` directory exists beside the image and
+        `custom_gui.work_state.load_work_state(str(path))` returns a dict whose
+        rectangles number exactly 1.
+        **This is the test that `_persist_work_state` being mocked made
+        impossible.**
+
+Use exact values. Do not use assertGreater, assertIsNotNone, or "it exists"
+checks where a value can be written.
+
+## 3. Allowed and forbidden scope
+
+ALLOWED - these two files only:
+
+    custom_gui/app.py                (only _on_marks_to_rects_click)
+    tests/test_marks_to_rects.py     (the get_app helper + append 4 tests)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/mark_detector.py  custom_gui/page_marks.py
+    custom_gui/work_state.py     custom_gui/selection.py  custom_gui/viewer.py
+    and every other file under custom_gui/
+    every other file under tests/
+    requirements.txt  pyproject.toml     (no new dependency; you need none)
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**
+
+Checks the commander will run on your patch:
+
+    git diff --name-only                        exactly the two files above
+    grep -c "selections_lock" custom_gui/app.py must be 6 or more
+    grep -c "【広告】" custom_gui/app.py            must stay at exactly 1
+    grep -n "mock_update_status\|mock_update_selections_ui\|mock_persist_work_state" \
+        tests/test_marks_to_rects.py            must find NOTHING
+    grep -c "MagicMock" custom_gui/             must be 0
+    git diff requirements.txt pyproject.toml    must be empty
+    no *.injbak, no patch*.diff, no test_*.py at the repository root
+
+## 4. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test, in this file or any other. The 13 tests in
+  `tests/test_marks_to_rects.py` must pass unmodified.
+  Editing the `get_app` helper is required by DoD-2 and is the ONLY change
+  permitted to existing test code.
+- The suite is currently **275 passed**. After your change it must be
+  275 + (your new tests), with zero failures.
+- If an existing test fails, do NOT edit it to make it green. Stop and report.
+
+## 5. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+`--collect-only` is not optional. Task 39 was submitted with an IndentationError
+in a test file; collection stopped for the whole suite and seven verification
+items went unrun.
+
+Then prove your tests detect the defects they claim to. For EACH of the four
+below: break the code, show the FAILING output, restore it, show it green.
+
+    (i)   Remove the `self._update_status()` call you added.
+          -> case 14 must fail.
+    (ii)  Move that call to BEFORE `self.latest_region_info` is given its final
+          value.  -> case 14 must fail (the screen shows the previous message).
+    (iii) Skip `self._persist_work_state()` in the handler.
+          -> case 17 must fail. **This one could not fail before this task.**
+    (iv)  Put the three mocks back into `get_app`.
+          -> cases 14, 15, 16 and 17 must ALL fail. This demonstrates that the
+             mocks were hiding real behaviour, which is the reason for DoD-2.
+
+If an injected defect does NOT make a test fail, say so plainly. That is a real
+finding and worth more than a green report. It has happened three times on this
+project (Task 42, Task 45, and the status bar this task exists to fix).
+
+## 6. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If the contract above disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- You start from `master`.
+
+## 7. Your report must contain
+
+    1. git diff --name-only
+    2. the last 20 lines of python -m pytest tests/ -v
+    3. for each of the four injections in section 5: what you broke, the
+       FAILING output, and the passing output after restoring
+    4. whether any of the 13 existing tests needed attention once the mocks
+       were gone, and exactly what happened
+    5. anything you chose differently from this order, and why
