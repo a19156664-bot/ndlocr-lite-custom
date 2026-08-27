@@ -1,0 +1,232 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+This order corresponds to ROADMAP.md, "未着手タスク (優先順)" -> Task 42.
+It is the highest-priority unstarted item, chosen because it removes the most
+repeated hand motions from daily use, not because it is quick or cheap.
+
+================================================================================
+Task 42: Tap an existing rectangle to open the inline editor
+================================================================================
+
+## 1. Purpose and background
+
+Task 33b added an inline editor: a TextField that appears next to a rectangle
+so the user can fix the OCR text without leaving the image.
+
+**It only opens for a rectangle that was just drawn.** `_on_pan_end` sets
+`self.inline_editing_region_id = new_rect.rect_id` right after creating a new
+rectangle. There is no way to reopen it for a rectangle that already exists.
+
+Today, to correct an existing rectangle the user must move to the right-hand
+result panel and press its EDIT button. That is the single most repeated
+detour in daily use.
+
+**After this task:** in SELECT mode, tapping inside an existing rectangle on
+the image opens the inline editor for that rectangle.
+
+## 2. Definition of Done (verifiable)
+
+### DoD-1 — a pure function that decides which rectangle was tapped
+
+Add to `custom_gui/selection.py`:
+
+    def find_region_at_point(
+        x: float, y: float,
+        rects: List[SelectionRect],
+        scale: float,
+        offset_x: float, offset_y: float
+    ) -> Optional[str]:
+
+`x` and `y` are display coordinates, in the same space as
+`ft.DragStartEvent.local_x` / `local_y` (this is what `_on_pan_start` already
+receives). Convert them with the existing helper:
+
+    from custom_gui.viewer import display_to_original      # already imported in selection.py
+    display_to_original(x, y, scale, offset_x, offset_y) -> Tuple[float, float]
+
+Return the `rect_id` of the rectangle whose `bbox` contains the converted
+point, or `None`.
+
+Rules that MUST hold, and MUST each have a test:
+
+    a. A point strictly inside one rectangle returns that rectangle's rect_id.
+    b. A point outside every rectangle returns None.
+    c. An empty list returns None.
+    d. When the point is inside more than one rectangle, return the one with
+       the SMALLEST area. Rationale: a small rectangle drawn on top of a large
+       one is unreachable otherwise. Compute area as (x2-x1)*(y2-y1).
+    e. A point exactly on the boundary counts as inside (use <= and >=).
+    f. `scale == 0` must not raise. `display_to_original` already returns
+       (0.0, 0.0) in that case; just do not divide anywhere yourself.
+
+`SelectionRect` is a dataclass already defined in the same file:
+
+    @dataclass
+    class SelectionRect:
+        rect_id: str
+        bbox: Tuple[float, float, float, float]     # (x1, y1, x2, y2) in ORIGINAL image coords
+        label: str
+
+Do not change `SelectionRect`, `SelectionContainer`, `calculate_normalized_bbox`,
+or anything else already in `selection.py`.
+
+### DoD-2 — the handler opens the inline editor
+
+In `custom_gui/app.py`, the GestureDetector is currently built as:
+
+    self.gesture_detector = ft.GestureDetector(
+        on_pan_start=self._on_pan_start,
+        on_pan_update=self._on_pan_update,
+        on_pan_end=self._on_pan_end,
+        on_secondary_tap=self._toggle_mode,
+        ...
+    )
+
+Add `on_tap_up=self._on_tap_up` and write that method.
+
+**Use `on_tap_up`. Do NOT use `on_tap` and do NOT use `on_tap_down`.**
+This was measured on the installed flet 0.27.6, not remembered:
+
+    on_tap      -> receives a plain ControlEvent. It has NO coordinates.
+    on_tap_down -> fires on press, BEFORE Flutter knows whether a drag follows.
+                   It would open the editor at the start of every new-rectangle
+                   drag, then close it again.
+    on_tap_up   -> receives ft.TapEvent, which carries local_x / local_y / kind,
+                   and only fires for a gesture that was recognised as a tap.
+
+The method must behave exactly as follows:
+
+    def _on_tap_up(self, e):
+        1. If self.mode_state.current != "SELECT": return, do nothing.
+           (PAN mode must stay a pure navigation mode.)
+        2. rid = find_region_at_point(e.local_x, e.local_y,
+                                      self.selection_container.get_all(),
+                                      self.zoom_scale, self.offset_x, self.offset_y)
+        3. If rid is None: return WITHOUT changing any state.
+           Tapping empty space must not close an editor that is open, must not
+           clear active_region_id, and must not touch self.edits.
+        4. Otherwise, inside `with self.selections_lock:` set
+               self.active_region_id = rid
+               self.inline_editing_region_id = rid
+           then, OUTSIDE the lock, call self._update_selections_ui()
+           and self._update_inline_editor().
+
+**`_update_selections_ui` and `_update_inline_editor` both acquire
+`self.selections_lock` themselves.** Calling them while holding the lock will
+deadlock. Set the fields inside the lock, release it, then call them.
+
+**Never remove or weaken any `with self.selections_lock:` block.** Deleting one
+was the serious defect of Task 30c.
+
+### DoD-3 — the existing draw-and-edit flow is unchanged
+
+Dragging in SELECT mode must still create a new rectangle and still open the
+inline editor for it. `_on_pan_start` / `_on_pan_update` / `_on_pan_end` must
+keep working exactly as they do now.
+
+`tests/test_inline_edit.py` and `tests/test_selection.py` must still pass
+without modification.
+
+## 3. Tests you must write
+
+Put new tests in `tests/test_tap_to_edit.py`.
+
+**Test through the handler, not around it.** Twelve tests in this project have
+already been rejected for mocking or bypassing the very thing under test.
+Constructing the viewer and calling `viewer._on_tap_up(fake_event)` with a
+simple object carrying `local_x` / `local_y` is acceptable, and is how
+`tests/test_pan.py` and `tests/test_right_click_pan.py` already work — read one
+of them first and follow the same construction pattern.
+
+Required cases:
+
+    1. find_region_at_point: inside -> that rect_id            (DoD-1 a)
+    2. find_region_at_point: outside -> None                   (DoD-1 b)
+    3. find_region_at_point: empty list -> None                (DoD-1 c)
+    4. find_region_at_point: overlapping -> smaller area wins  (DoD-1 d)
+    5. find_region_at_point: exact boundary -> inside          (DoD-1 e)
+    6. handler in SELECT, tap inside a rect -> inline_editing_region_id
+       equals that rect_id AND active_region_id equals that rect_id
+    7. handler in PAN, tap inside a rect -> inline_editing_region_id unchanged
+    8. handler in SELECT, tap on empty space while an editor is open ->
+       inline_editing_region_id is UNCHANGED (not cleared)
+    9. drag in SELECT still creates a rectangle and opens its editor
+
+Use exact assertions. `assert rid == "2"`, not `assertIsNotNone`.
+Do not use `assertGreater`, `assertIsNotNone`, or "it exists" style checks
+where an exact value can be written.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED — these three files only:
+
+    custom_gui/selection.py      (add find_region_at_point; change nothing else)
+    custom_gui/app.py            (add _on_tap_up; add on_tap_up= to the
+                                  GestureDetector; change nothing else)
+    tests/test_tap_to_edit.py    (new file)
+
+FORBIDDEN — do not create, modify, move, rename or delete anything else:
+
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header in any source file
+    train/**     src/**       scripts/**    resource/**
+    custom_gui/viewer.py  custom_gui/work_state.py  custom_gui/exporter.py
+    every other file under custom_gui/ and every other file under tests/
+
+Checks the commander will run on your patch:
+
+    git diff --name-only        must list exactly the three files above
+    grep -n "selections_lock" custom_gui/app.py     count must not decrease
+    grep -rn "on_tap_down\|on_tap=" custom_gui/app.py   must find nothing
+    no *.injbak, no patch*.diff, no test_*.py at the repository root
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Not one assertion.
+- The suite is currently **230 passed**. After your change it must be
+  230 + (your new tests), with zero failures.
+- If an existing test fails, do NOT edit the test to make it green. Stop and
+  report which test, and the full failure output.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+**`--collect-only` is not optional.** Task 39 was submitted with an
+IndentationError on line 22 of a test file; collection stopped for the whole
+suite and seven verification items went unrun.
+
+Then prove your tests actually detect the defects they claim to. For EACH of
+the three items below: break the code, show the FAILING pytest output, restore
+it, show it green again.
+
+    (i)   Make find_region_at_point return the LARGEST overlapping rectangle
+          instead of the smallest.  -> case 4 must fail.
+    (ii)  Remove the SELECT-mode guard from _on_tap_up so it also fires in PAN.
+          -> case 7 must fail.
+    (iii) Make _on_tap_up set inline_editing_region_id = None when rid is None.
+          -> case 8 must fail.
+
+If an injected defect does NOT make a test fail, say so plainly. That is a real
+finding and more valuable than a green report.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If the contract above disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- You start from `master`. Nothing from any other unfinished task is visible
+  to you, and you must not depend on anything that is not on `master` today.
+
+## 8. Your report must contain
+
+    1. git diff --name-only
+    2. the full output of python -m pytest tests/ -v (the last 20 lines are enough)
+    3. for each of the three injections in section 6: what you broke, the
+       FAILING output, and the passing output after restoring
+    4. anything you chose differently from this order, and why
