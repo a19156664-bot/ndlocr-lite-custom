@@ -148,3 +148,98 @@ def test_8_cyan_plus_existing(dummy_page, tmp_path):
     
     assert rects[0].bbox == (10, 20, 30, 40)
 
+
+def make_orange_page(path, w=400, h=600):
+    page = np.full((h, w, 3), 255, dtype=np.uint8)
+    orange = cv2.cvtColor(np.uint8([[[25, 159, 238]]]), cv2.COLOR_HSV2BGR)[0, 0]
+    page[100:250, 50:300] = orange
+    cv2.imencode(".jpg", page)[1].tofile(str(path))
+    return w, h
+
+def make_orange_and_cyan_page(path, w=400, h=600):
+    page = np.full((h, w, 3), 255, dtype=np.uint8)
+    orange = cv2.cvtColor(np.uint8([[[25, 159, 238]]]), cv2.COLOR_HSV2BGR)[0, 0]
+    page[50:150, 50:200] = orange
+    page[300:400, 50:200] = (255, 235, 60)
+    cv2.imencode(".jpg", page)[1].tofile(str(path))
+    return w, h
+
+def test_9_orange_only(dummy_page, tmp_path):
+    app, path = get_app(dummy_page, tmp_path, make_orange_page)
+    app.selection_container._rects = []
+    app.mark = None
+    app.image_states[str(path)] = {}
+    
+    app._on_marks_to_rects_click(None)
+    
+    from custom_gui.page_marks import MARK_AD
+    assert app.mark == MARK_AD
+    assert len(app.selection_container.get_all()) == 0
+    assert "として記録しました（矩形のマークはありません）" in app.latest_region_info
+    assert "に記録しました" not in app.latest_region_info
+    assert MARK_AD in app.latest_region_info
+
+def test_10_orange_and_cyan(dummy_page, tmp_path):
+    app, path = get_app(dummy_page, tmp_path, make_orange_and_cyan_page)
+    app.selection_container._rects = []
+    app.mark = None
+    app.image_states[str(path)] = {}
+    
+    app._on_marks_to_rects_click(None)
+    
+    from custom_gui.page_marks import MARK_AD
+    assert app.mark == MARK_AD
+    assert len(app.selection_container.get_all()) == 1
+
+def test_11_cyan_only(dummy_page, tmp_path):
+    app, path = get_app(dummy_page, tmp_path, make_marked_page)
+    app.selection_container._rects = []
+    app.mark = None
+    app.image_states[str(path)] = {}
+    
+    app._on_marks_to_rects_click(None)
+    
+    from custom_gui.page_marks import MARK_AD
+    assert app.mark != MARK_AD
+    assert app.mark is None
+    assert len(app.selection_container.get_all()) == 1
+
+def test_12_no_orange_preserves_cover_mark(dummy_page, tmp_path):
+    app, path = get_app(dummy_page, tmp_path, make_clean_page)
+    app.selection_container._rects = []
+    app.image_states[str(path)] = {}
+    
+    from custom_gui.page_marks import MARK_COVER
+    app._on_mark_click(MARK_COVER)
+    
+    assert app.mark == MARK_COVER
+    
+    app._on_marks_to_rects_click(None)
+    
+    assert app.mark == MARK_COVER
+
+def test_13_orange_only_twice(dummy_page, tmp_path):
+    app, path = get_app(dummy_page, tmp_path, make_orange_page)
+    app.selection_container._rects = []
+    app.mark = None
+    app.image_states[str(path)] = {}
+    
+    app._on_marks_to_rects_click(None)
+    
+    from custom_gui.page_marks import MARK_AD
+    assert app.mark == MARK_AD
+    
+    txt_path = str(path.with_suffix(".txt"))
+    with open(txt_path, "r", encoding="utf-8-sig") as f:
+        lines = f.readlines()
+    
+    ad_line = f"test_page.jpg\t{MARK_AD}\n"
+    assert lines.count(ad_line) == 1
+    
+    app._on_marks_to_rects_click(None)
+    
+    with open(txt_path, "r", encoding="utf-8-sig") as f:
+        lines = f.readlines()
+    
+    assert lines.count(ad_line) == 1
+    
