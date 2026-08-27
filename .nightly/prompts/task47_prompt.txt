@@ -1,0 +1,210 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+This order corresponds to ROADMAP.md -> Task 47.
+
+**Task 46 is running in parallel and owns `custom_gui/app.py`.
+You must NOT touch that file.**
+
+================================================================================
+Task 47: Detect the orange page mark and report it as 【広告】
+================================================================================
+
+## 1. Purpose and background
+
+The user marks the scanned pages by hand with two marker colours. The approver
+confirmed the meaning on 2026-08-27, and it is recorded in AGENTS.md section 8.1:
+
+    cyan   -> an area to OCR          (already shipped: detect_marks)
+    orange -> THIS PAGE IS AN ADVERT  (this task)
+
+An advert page is a property of the whole page, not of a region. So this is a
+separate function that returns a page-level mark, not a list of rectangles.
+
+The commander measured all 52 real pages on 2026-08-27. These are facts:
+
+    hand-drawn orange   H=25, S=159, V=236-239
+    hand-drawn cyan     H=90, S=157-159, V=233-238
+    paper and text      S=2-5
+    masthead printed    S=68, V=88
+
+    orange pixels on the 9 marked pages : 3,506 - 8,411 each
+    orange pixels on the other 43 pages : 10 in TOTAL
+
+That gap is why a threshold of 2000 pixels is safe. One page (`000048`) carries
+both colours: it is an advert AND has areas to OCR. Both must be possible.
+
+## 2. Definition of Done (verifiable)
+
+All of this goes in the EXISTING file `custom_gui/mark_detector.py`, by adding
+to it. **Do not modify anything already in that file** - not `CYAN_LOWER`,
+not `CYAN_UPPER`, not `MarkRegion`, not `detect_marks`, not `load_image`.
+
+### DoD-1 — the constants and the import
+
+    from custom_gui.page_marks import MARK_AD
+
+    ORANGE_LOWER = (10, 120, 180)     # HSV lower bound, OpenCV convention (H is 0-179)
+    ORANGE_UPPER = (35, 255, 255)     # HSV upper bound
+
+`custom_gui/page_marks.py` already defines `MARK_AD = "【広告】"` and imports
+only `os`, so importing it keeps `mark_detector.py` free of flet.
+
+**Return `MARK_AD`. Never write the string `"【広告】"` as a literal in
+`mark_detector.py`.** One vocabulary, one definition.
+
+Note that the saturation and value bounds are deliberately the SAME as the cyan
+ones. Only the hue differs. Do not widen either bound.
+
+### DoD-2 — the detector
+
+    def detect_page_mark(image_bgr, min_area: int = 2000) -> Optional[str]:
+        """Return MARK_AD when the page carries a hand-drawn orange mark, else None."""
+
+Steps, in this order:
+
+    1. hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    2. mask = cv2.inRange(hsv, ORANGE_LOWER, ORANGE_UPPER)
+    3. count = cv2.countNonZero(mask)
+    4. return MARK_AD if count >= min_area else None
+
+**Count the mask pixels. Do not use contours here.** The measurement above is a
+pixel count, and the threshold 2000 is meaningful only against the same
+quantity. A contour area is a different number and would make 2000 arbitrary.
+
+Do no morphology. A hand-drawn stroke with gaps still has the same pixel count,
+so closing it would only add pixels that were never drawn.
+
+### DoD-3 — cyan must never be reported as an advert
+
+`detect_page_mark` must return `None` for a page that carries only cyan marks,
+however many of them there are. The hue window is what enforces this: cyan sits
+at H=90, far outside 10-35.
+
+## 3. Tests you must write
+
+Put them in `tests/test_page_mark_detector.py`. Build every image in code with
+numpy. **Do not add any binary file to the repository.**
+
+    def make_page(w=400, h=600):
+        return np.full((h, w, 3), 255, dtype=np.uint8)
+
+    def paint(page, x1, y1, x2, y2, hsv_triple):
+        bgr = cv2.cvtColor(np.uint8([[hsv_triple]]), cv2.COLOR_HSV2BGR)[0, 0]
+        page[y1:y2, x1:x2] = bgr
+
+Required cases, each an exact assertion:
+
+    1. A blank white page -> returns None.
+    2. An orange patch of 100x100 = 10,000 px, painted from HSV (25, 159, 238)
+       -> returns MARK_AD. Assert against the imported MARK_AD constant, not
+       against a string literal you typed.
+    3. A cyan patch of 200x150 painted from HSV (90, 158, 236) -> returns None.
+       **This is DoD-3.**
+    4. Orange AND cyan on the same page -> returns MARK_AD (page 000048).
+    5. An orange patch of 40x40 = 1,600 px, below min_area -> returns None.
+    6. The same 40x40 orange patch with min_area=1000 -> returns MARK_AD
+       (the parameter is honoured).
+    7. A patch painted from HSV (25, 68, 220) - orange hue, but washed out,
+       saturation below the floor -> returns None.
+       **This guards ORANGE_LOWER[1]. Do not skip it.**
+    8. A patch painted from HSV (25, 159, 88) - orange hue and saturation, but
+       dark, value below the floor -> returns None.
+       **This guards ORANGE_LOWER[2] separately from case 7.**
+    9. Calling detect_page_mark twice on the same array returns the same result.
+   10. detect_marks still returns [] for a page that has only an orange mark
+       (the two functions do not interfere).
+
+Cases 7 and 8 exist because of what happened on Task 45: a threshold was never
+actually guarded, because a *second* threshold rejected the test sample first.
+Each bound must be tested by a sample that only that bound rejects. Do not
+collapse cases 7 and 8 into one.
+
+Use exact values. Do not use assertGreater, assertIsNotNone, or "it exists"
+checks where a value can be written.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these two files only:
+
+    custom_gui/mark_detector.py         (ADD to it; change nothing existing)
+    tests/test_page_mark_detector.py    (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/app.py       <- Task 46 owns this file, in parallel.
+                               Touching it is an immediate rejection.
+    custom_gui/page_marks.py   <- import from it; do not edit it
+    custom_gui/selection.py  custom_gui/viewer.py
+    and every other file under custom_gui/
+    every existing file under tests/ - including tests/test_mark_detector.py
+    requirements.txt  pyproject.toml     (no new dependency; you need none)
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**
+
+Checks the commander will run on your patch:
+
+    git diff --name-only                        exactly the two files above
+    git diff custom_gui/app.py                  must be empty
+    git diff custom_gui/page_marks.py           must be empty
+    git diff tests/test_mark_detector.py        must be empty
+    grep -n "flet" custom_gui/mark_detector.py  must find nothing
+    grep -n "【広告】" custom_gui/mark_detector.py   must find nothing
+    git diff requirements.txt pyproject.toml    must be empty
+    no *.injbak, no patch*.diff, no test_*.py at the repository root
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Not one assertion. `tests/test_mark_detector.py` in particular must be
+  byte-identical after your change.
+- The suite is currently **252 passed**. After your change it must be
+  252 + (your new tests), with zero failures.
+- If an existing test fails, do NOT edit it to make it green. Stop and report
+  which test, and the full failure output.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+`--collect-only` is not optional. Task 39 was submitted with an IndentationError
+in a test file; collection stopped for the whole suite and seven verification
+items went unrun.
+
+Then prove your tests detect the defects they claim to. For EACH of the four
+below: break the code, show the FAILING output, restore it, show it green.
+
+    (i)   Widen ORANGE_UPPER hue from 35 to 105, so cyan falls inside it.
+          -> case 3 must fail.
+    (ii)  Lower min_area from 2000 to 5.
+          -> case 5 must fail.
+    (iii) Lower the saturation floor in ORANGE_LOWER from 120 to 40.
+          -> case 7 must fail.
+    (iv)  Lower the value floor in ORANGE_LOWER from 180 to 40.
+          -> case 8 must fail.
+
+If an injected defect does NOT make a test fail, say so plainly. That is a real
+finding and worth more than a green report. Injections (iii) and (iv) exist
+precisely because this happened on Task 45.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If the contract above disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- Do not wire anything into the GUI. That is a later task.
+- You start from `master`. Task 46 is running at the same time and its work is
+  NOT visible to you. Do not depend on anything that is not on master today.
+
+## 8. Your report must contain
+
+    1. git diff --name-only
+    2. the last 20 lines of python -m pytest tests/ -v
+    3. for each of the four injections in section 6: what you broke, the
+       FAILING output, and the passing output after restoring
+    4. the HSV triples you painted and what they convert to in BGR
+    5. anything you chose differently from this order, and why

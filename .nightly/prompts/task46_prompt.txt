@@ -1,0 +1,230 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+This order corresponds to ROADMAP.md -> Task 46. It is the GUI half of Task 45,
+which is already merged on master.
+
+**Task 47 is running in parallel and owns `custom_gui/mark_detector.py`.
+You must NOT touch that file. Import from it, nothing more.**
+
+================================================================================
+Task 46: A button that turns detected cyan marks into selection rectangles
+================================================================================
+
+## 1. Purpose and background
+
+The user marks the areas to OCR by hand with a cyan highlighter, then has to
+re-draw every one of them with the mouse. Task 45 shipped the detector that
+finds them. This task adds the one button that uses it.
+
+Measured on the 52 real pages (2026-08-27): 38 of 52 pages carry marks,
+118 regions in total, up to 11 on a single page. Drawing those by hand is the
+work this button removes.
+
+`custom_gui/mark_detector.py` is on master already. Its contract:
+
+    from custom_gui.mark_detector import load_image, detect_marks
+
+    load_image(path: str) -> numpy.ndarray (BGR)
+        raises FileNotFoundError when the file is missing
+        raises ValueError when the bytes are not a decodable image
+
+    detect_marks(image_bgr) -> List[MarkRegion]
+        MarkRegion is a dataclass with:
+            .bbox : Tuple[int, int, int, int]   -> (x1, y1, x2, y2) ORIGINAL pixels
+            .kind : str                          -> "box" or "line"
+        The list is sorted by (y1, x1) and is deterministic.
+
+`.bbox` is already in the same (x1, y1, x2, y2) convention as
+`SelectionRect.bbox`, so it can be handed to `SelectionContainer.add()`
+unchanged. **Do not convert it to (x, y, w, h).**
+
+## 2. Definition of Done (verifiable)
+
+### DoD-1 — the button
+
+In `custom_gui/app.py`, next to the existing 広告 / 表紙 buttons, which are
+built like this:
+
+    self.btn_mark_ad = ft.TextButton("広告", tooltip="...", on_click=lambda e: self._on_mark_click(MARK_AD))
+    self.btn_mark_cover = ft.TextButton("表紙", tooltip="...", on_click=lambda e: self._on_mark_click(MARK_COVER))
+
+    self.controls_row.controls.append(self.save_page_button)
+    self.controls_row.controls.append(self.save_all_button)
+    self.controls_row.controls.append(self.btn_mark_ad)
+    self.controls_row.controls.append(self.btn_mark_cover)
+
+add one more, appended AFTER 表紙:
+
+    self.btn_marks_to_rects = ft.TextButton(
+        "マーク読取",
+        tooltip="水色のマークから矩形を作る",
+        on_click=self._on_marks_to_rects_click,
+    )
+
+and append it to `self.controls_row.controls` in the same place as the others.
+Change nothing about the existing four buttons.
+
+### DoD-2 — the handler
+
+    def _on_marks_to_rects_click(self, e):
+
+Behaviour, exactly:
+
+    1. Read the current page image with load_image(self.image_src).
+       Catch FileNotFoundError, ValueError and OSError. On any of them:
+       set self.latest_region_info to a message containing the word
+       "読み込めません", call self._update_status(), and RETURN.
+       **The application must not raise out of this handler, ever.**
+    2. regions = detect_marks(img)
+    3. If regions is empty: set self.latest_region_info to a message containing
+       "マークが見つかりません", call self._update_status(), and RETURN
+       **without changing any other state**. Existing rectangles, self.edits,
+       active_region_id and inline_editing_region_id must all be untouched.
+    4. Otherwise, for each region in order, add it unless the same area is
+       already present (see DoD-3):
+           self.selection_container.add(region.bbox)
+    5. Set self.latest_region_info to a message that contains the number added,
+       for example:  マークから 10 個の矩形を作りました（囲み 1・傍線 9）
+    6. Call self._update_selections_ui() and self._persist_work_state().
+
+**Do not start OCR from this handler.** Do not open the inline editor. Do not
+change the mode. Do not spawn a thread - detection takes about 0.2 s per page,
+measured.
+
+**Locking:** `_update_selections_ui` and `_persist_work_state` acquire
+`self.selections_lock` themselves. If you take the lock, release it before
+calling them, or the application deadlocks. This was the serious defect of
+Task 30c; never remove or weaken a `with self.selections_lock:` block.
+
+### DoD-3 — pressing the button twice must not duplicate
+
+Before adding a detected region, skip it when a rectangle already in
+`self.selection_container.get_all()` has a bbox within **2 pixels on all four
+sides**. Use a tolerance, not equality: existing rectangles were produced by
+`calculate_normalized_bbox` and hold floats, while `MarkRegion.bbox` holds ints.
+
+Pressing the button twice on the same page must leave exactly the same number
+of rectangles as pressing it once.
+
+## 3. Tests you must write
+
+Put them in `tests/test_marks_to_rects.py`.
+
+**Test through the handler**, the way `tests/test_tap_to_edit.py` and
+`tests/test_pan.py` already do - read one of them first and follow the same
+construction pattern. Twelve tests in this project have been rejected for
+mocking or bypassing the thing under test.
+
+Build the page image in code and write it to `tmp_path`, then construct the
+viewer with that file as `image_src`. Do not add any binary file to the repo.
+
+    def make_marked_page(path, w=400, h=600):
+        page = np.full((h, w, 3), 255, dtype=np.uint8)
+        page[100:250, 50:300] = (255, 235, 60)     # one cyan box
+        cv2.imencode(".jpg", page)[1].tofile(str(path))
+        return w, h
+
+Required cases, each an exact assertion:
+
+    1. One cyan box on the page -> pressing the button once creates exactly
+       1 rectangle, and its bbox is within 8 px of the painted area.
+    2. Pressing the button twice -> still exactly 1 rectangle (DoD-3).
+    3. A page with no cyan at all -> 0 rectangles created, and
+       self.latest_region_info contains "マークが見つかりません".
+    4. A page with no cyan, when a rectangle already exists -> that existing
+       rectangle is STILL THERE afterwards, and self.edits is unchanged.
+    5. self.image_src pointing at a path that does not exist -> the handler
+       returns normally (no exception propagates) and
+       self.latest_region_info contains "読み込めません".
+    6. Two cyan boxes at different heights -> 2 rectangles, added in the order
+       detect_marks returned them (topmost first).
+    7. The button object exists and is present in self.controls_row.controls.
+    8. A cyan box plus an already-drawn rectangle somewhere else -> the count
+       becomes 2, and the pre-existing one is not modified.
+
+Use exact values. Do not use assertGreater, assertIsNotNone, or "it exists"
+checks where a number or a stated tolerance can be written.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these two files only:
+
+    custom_gui/app.py                (add the button and the handler; nothing else)
+    tests/test_marks_to_rects.py     (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/mark_detector.py   <- Task 47 owns this file, in parallel.
+                                     Touching it is an immediate rejection.
+    custom_gui/selection.py  custom_gui/viewer.py  custom_gui/page_marks.py
+    and every other file under custom_gui/
+    every existing file under tests/
+    requirements.txt  pyproject.toml     (no new dependency; you need none)
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**
+
+Checks the commander will run on your patch:
+
+    git diff --name-only                    exactly the two files above
+    git diff custom_gui/mark_detector.py    must be empty
+    grep -c "selections_lock" custom_gui/app.py    must not go below 6
+    git diff requirements.txt pyproject.toml       must be empty
+    no *.injbak, no patch*.diff, no test_*.py at the repository root
+    no image file added anywhere
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Not one assertion.
+- The suite is currently **252 passed**. After your change it must be
+  252 + (your new tests), with zero failures.
+- If an existing test fails, do NOT edit it to make it green. Stop and report
+  which test, and the full failure output.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+`--collect-only` is not optional. Task 39 was submitted with an IndentationError
+in a test file; collection stopped for the whole suite and seven verification
+items went unrun.
+
+Then prove your tests detect the defects they claim to. For EACH of the four
+below: break the code, show the FAILING output, restore it, show it green.
+
+    (i)   Remove the duplicate check, so every press adds again.
+          -> case 2 must fail.
+    (ii)  When regions is empty, clear self.selection_container instead of
+          returning.  -> case 4 must fail.
+    (iii) Let the load_image exception propagate instead of catching it.
+          -> case 5 must fail.
+    (iv)  Pass (x1, y1, x2-x1, y2-y1) to add() instead of the bbox as-is.
+          -> case 1 must fail.
+
+If an injected defect does NOT make a test fail, say so plainly. That is a real
+finding and worth more than a green report. **It has now happened twice on this
+project.** On Task 42 a test passed because a default value was left unset; on
+Task 45 a threshold was never guarded because a second threshold rejected the
+sample first. When a defect is not detected, ask what else is holding the test
+up.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If the contract above disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- You start from `master`. Task 47 is running at the same time and its work is
+  NOT visible to you. Do not depend on anything that is not on master today.
+
+## 8. Your report must contain
+
+    1. git diff --name-only
+    2. the last 20 lines of python -m pytest tests/ -v
+    3. for each of the four injections in section 6: what you broke, the
+       FAILING output, and the passing output after restoring
+    4. anything you chose differently from this order, and why
