@@ -127,6 +127,12 @@ def test_handler_pan_tap_inside(viewer):
     # DoD-2 case 7
     viewer.mode_state.set_mode("PAN")
     assert viewer.mode_state.current == "PAN"
+
+    # 指揮官が追加: 既定の zoom_scale は 0.48 で、タップ(30,30)は矩形の外へ落ちる。
+    # SELECT ガードを一度も通らないため、外しても落ちないテストになっていた。
+    viewer.zoom_scale = 1.0
+    viewer.offset_x = 0
+    viewer.offset_y = 0
     
     viewer.selection_container.add((10, 10, 50, 50))
     rect_id = viewer.selection_container.get_all()[0].rect_id
