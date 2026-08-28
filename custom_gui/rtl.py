@@ -37,3 +37,24 @@ def convert_right_to_left(text: str) -> str:
     lines = text.split("\n")
     reversed_lines = [reverse_line(line) for line in lines]
     return "\n".join(reversed_lines)
+
+RTL_MIN_CHARS = 2
+
+def needs_rtl(line: dict) -> bool:
+    """True when this OCR line is horizontal text that reads right-to-left."""
+    if line.get("is_vertical", True):
+        return False
+    text = line.get("text")
+    if text is None:
+        return False
+    if len(text) < RTL_MIN_CHARS:
+        return False
+    return True
+
+def count_rtl_lines(lines) -> int:
+    """How many of these OCR lines need right-to-left conversion."""
+    count = 0
+    for line in lines:
+        if isinstance(line, dict) and needs_rtl(line):
+            count += 1
+    return count

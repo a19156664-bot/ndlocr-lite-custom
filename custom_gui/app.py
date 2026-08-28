@@ -7,7 +7,7 @@ import custom_gui.work_state as work_state
 from custom_gui.region_filter import filter_lines_by_region
 from custom_gui.text_assembler import assemble_text
 from custom_gui.exporter import build_export_rows, build_export_rows_multi, rows_to_csv_text, rows_to_txt_text
-from custom_gui.rtl import convert_right_to_left
+from custom_gui.rtl import convert_right_to_left, count_rtl_lines
 import os
 import tempfile
 from custom_gui.pdf_loader import build_source_list, ensure_page_rendered, plan_pdf_pages
@@ -1421,6 +1421,9 @@ class SelectableImageViewer(ImageViewer):
                 has_edit = rect.rect_id in self.edits
                 display_text = self.edits[rect.rect_id] if has_edit else extracted_text
                 label_suffix = " (edited)" if has_edit else ""
+                rtl_count = count_rtl_lines(filtered_lines)
+                if rtl_count > 0:
+                    label_suffix += f" [横書き? {rtl_count}]"
 
                 def rtl_rect(e, rid=rect.rect_id, current_text=display_text, orig_text=extracted_text):
                     if not current_text:

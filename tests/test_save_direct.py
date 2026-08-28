@@ -167,9 +167,9 @@ def test_f_panel_breaks(tmp_path, monkeypatch):
     
     viewer.ocr_state = OcrState.DONE
     viewer.ocr_results = [
-        {"text": "Line 1", "bbox": (10, 10, 50, 20), "confidence": 0.9, "is_vertical": False, "source_image": str(img_path)},
-        {"text": "Line 2", "bbox": (10, 20, 50, 30), "confidence": 0.9, "is_vertical": False, "source_image": str(img_path)},
-        {"text": "Line 3", "bbox": (10, 30, 50, 40), "confidence": 0.9, "is_vertical": False, "source_image": str(img_path)},
+        {"text": "Line 1", "bbox": (10, 10, 50, 20), "confidence": 0.9, "is_vertical": True, "source_image": str(img_path)},
+        {"text": "Line 2", "bbox": (10, 20, 50, 30), "confidence": 0.9, "is_vertical": True, "source_image": str(img_path)},
+        {"text": "Line 3", "bbox": (10, 30, 50, 40), "confidence": 0.9, "is_vertical": True, "source_image": str(img_path)},
     ]
     
     rect = viewer.selection_container.add((0, 0, 100, 100), "Region 1"); rect_id = rect.rect_id
