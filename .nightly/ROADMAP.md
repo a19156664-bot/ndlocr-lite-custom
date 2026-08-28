@@ -369,7 +369,7 @@ uid 未採番のまま更新され破綻する。`page.update()` のロックは
 
 # 🔖 セッション再開ポイント（2026-08-27 時点）
 
-**master**: `66d14e9` / **279 tests passed**（2026-08-28・1回の実行）/ 作業ツリー `C:\Users\user\ndlocr-work`（`integration/task-42`）/ Jules セッション稼働なし
+**master**: `39db6f8` / **293 tests passed**（2026-08-28・1回の実行）/ 作業ツリー `C:\Users\user\ndlocr-work`（`integration/task-42`）/ Jules セッション稼働なし
 
 ## ✅ 完了（master に統合済み）
 
@@ -421,7 +421,11 @@ Task 41（`CLICK` / `ALL_SCROLL`）で決着した。**
 12. 🔴 「マーク読取」を押すと、**画面下の表示**が
     「マークから N 個の矩形を作りました…」に変わる
 
-**残り 10項目は、次に実機を触るときに併せてご確認いただく。**
+### Task 50（横書きの印）— 🔴 1項目 未確認
+13. 🔴 横書きを含むページ（例 p000009 / p000016 / p000043）を開き、OCR 後に
+    右パネルの区画ラベルへ `[横書き? N]` が出る。RTL ボタンを押すと本文が直る
+
+**残り 11項目は、次に実機を触るときに併せてご確認いただく。**
 これらは OCR の実行や再起動を伴うため、5項目より時間がかかる。
 
 ### 起動方法（PowerShell に貼る）
@@ -468,6 +472,10 @@ cd C:\Users\user\ndlocr-lite-custom
       Task 46 から入っていた2つの不具合。`_update_status()` 未呼び出しで表示が
       更新されず、テストは `_update_status` / `_update_selections_ui` /
       `_persist_work_state` の3つを空関数に差し替えていた。
+- [x] ~~**Task 50: 横書き（右→左）の範囲に [横書き? N] の印を付ける**~~ **2026-08-28 完了**（`39db6f8`）
+      判定は OCR 自身の `is_vertical`。縦横比の推定は採らない（2,235行で照合し、
+      不一致50件は全て縦横比側の誤りだった）。自動反転はしない（承認者のご判断）。
+      実データ: 印が付く範囲 39個 / 25ページ / 横書き80行。
 - [ ] Task 43: PDF の一括 OCR
       `ocr_cache` は `page_index` を引数に持ち、`work_state` が初の実利用者。
       現状 `_on_ocr_complete` は `if target_path not in self.pdf_page_map` で
