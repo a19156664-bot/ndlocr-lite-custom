@@ -60,3 +60,37 @@ clone して読める**ためである。どこに欠陥を注入して検査す
 
 台帳は `C:\Users\user\ndlocr-work` を対象に絶対パスで書かれているため、
 リポジトリの外に置いても動作は変わらない。
+
+---
+
+## マーク検出と OCR 精度の道具（2026-08-28 保全）
+
+一時ディレクトリで書いて失うことを繰り返さないため、ここに置いた（知見15）。
+いずれも引数なしで走らせると `jpg/` を見る。第1引数で別のフォルダを指定できる。
+
+| 道具 | 何をするか |
+|---|---|
+| `hue_scan.py` | 手描きの色あいを数える。**3色目が使われていないかを検知する** |
+| `marks_overlay.py` | マーク検出の結果を、承認者が目で見られる画像にする |
+| `extract_regions.py` | 範囲ごとの本文を、**アプリと同じ経路**で抜き出す |
+
+```powershell
+.\.venv\Scripts\python.exe .nightly\verify\hue_scan.py
+.\.venv\Scripts\python.exe .nightly\verify\marks_overlay.py
+.\.venv\Scripts\python.exe .nightly\verify\extract_regions.py
+```
+
+**`extract_regions.py` は先に全面 OCR が要る。**
+
+```powershell
+mkdir jpg\_ocr結果
+.\.venv\Scripts\python.exe src\ocr.py --sourcedir jpg --output jpg\_ocr結果
+```
+
+出力先が存在しないと `Output Directory is not found.` と出て、**何も作らずに終わる**。
+
+**新しい素材を受け取ったら、まず `hue_scan.py` を走らせること。**
+AGENTS.md §8.1 の色の判断は「3色目が使われたら無効」と定めてある。
+第三の帯が立ち上がっていたら、意味を勝手に解釈せず承認者に伺う。
+
+2026-08-28 の実測（52枚）: 囲み68・傍線50・範囲118個・抽出7,040字・横書き80行・広告9ページ。
