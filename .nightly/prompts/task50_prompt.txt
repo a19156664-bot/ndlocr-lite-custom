@@ -1,0 +1,251 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+This order has no number in ROADMAP.md yet. The approver added it on 2026-08-28
+after the commander measured the OCR output of all 52 sample pages.
+
+================================================================================
+Task 50: Mark the regions that contain right-to-left horizontal text
+================================================================================
+
+## 1. Purpose and background
+
+The magazine is from 1933. Its VERTICAL text reads top-to-bottom and the OCR
+gets it right. Its HORIZONTAL text reads RIGHT-TO-LEFT, and the OCR reads it
+left-to-right, so those lines come out reversed:
+
+    局支クーヨーユニ合聯聞新   should be   新聞聯合ニユーヨーク支局
+    要法念記年周十災震大東開   should be   開東大震災十周年記念法要
+    片短スーユニ眞寫國英       should be   英國寫眞ニユース短片
+
+`custom_gui/rtl.py` already fixes this. `convert_right_to_left(text)` reverses
+each line and mirrors brackets, and there is already an RTL button per region.
+**The user has to notice which regions need it.** Measured on the 52 pages:
+**82 of the 625 lines inside marked regions are horizontal, spread over 25
+pages.** Finding them by eye is the work this task removes.
+
+**This task does NOT reverse anything automatically.** The approver decided on
+2026-08-28: mark them, let the human press the existing button. Automatic
+reversal would corrupt lines containing Latin text, and would hide the change
+from the person checking it.
+
+## 2. The signal is already in the data. Do not compute a heuristic.
+
+`custom_gui/ocr_bridge.parse_ocr_json` already returns, for every line:
+
+    {'text': '行資社合瞬間新',
+     'bbox': (291.0, 17.0, 715.0, 50.0),
+     'confidence': 0.869,
+     'is_vertical': False,          <-- THIS
+     'source_image': '...jpg'}
+
+`is_vertical` comes from the OCR's own `isVertical` field, produced by its
+layout model.
+
+**Do NOT judge orientation from the bounding box aspect ratio.** The commander
+tried that first and measured it against `is_vertical` over all 2,235 lines:
+they agree on 97.76% and disagree on 50 lines, and **in every one of those 50
+the aspect ratio is wrong** - they are 1-3 character fragments such as `(一)`,
+`100`, `す。` sitting in vertical text, whose boxes happen to be nearly square.
+
+Use `is_vertical`. Nothing else.
+
+## 3. Definition of Done (verifiable)
+
+### DoD-1 — the predicate, in `custom_gui/rtl.py`
+
+Add to that file, changing nothing already in it:
+
+    RTL_MIN_CHARS = 2
+
+    def needs_rtl(line: dict) -> bool:
+        """True when this OCR line is horizontal text that reads right-to-left."""
+
+Rules, each of which must have a test:
+
+    a. line["is_vertical"] is True  -> False
+    b. line["is_vertical"] is False and len(line["text"]) >= RTL_MIN_CHARS -> True
+    c. line["is_vertical"] is False and len(line["text"]) < RTL_MIN_CHARS -> False
+       (a single character reads the same reversed; flagging it is only noise)
+    d. A line dict missing "is_vertical" -> False. Do not raise.
+    e. A line dict missing "text" -> False. Do not raise.
+
+`rtl.py` must stay free of any import from `custom_gui` and free of flet, cv2
+and numpy. It currently imports nothing at all. Keep it that way: `needs_rtl`
+only reads keys out of a plain dict.
+
+### DoD-2 — the counter, in `custom_gui/rtl.py`
+
+    def count_rtl_lines(lines) -> int:
+        """How many of these OCR lines need right-to-left conversion."""
+
+Returns the number of entries for which `needs_rtl` is True. An empty list
+returns 0. Do not raise on a list containing malformed dicts.
+
+### DoD-3 — the label, in `custom_gui/app.py`
+
+In `_update_selections_ui`, the right-hand panel builds one row per region.
+Inside that loop, line 1367 already computes:
+
+    filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
+
+and line 1423 already computes the label suffix:
+
+    label_suffix = " (edited)" if has_edit else ""
+
+which is used on line 1470:
+
+    ft.Text(f"{rect.label}{label_suffix} [改行 {n_breaks}]:", weight=ft.FontWeight.BOLD),
+
+Append a second suffix when the region contains right-to-left lines. Use
+`count_rtl_lines(filtered_lines)`. When the count is 0, the label must be
+**byte-identical to what it is today**. When it is 1 or more, append exactly:
+
+    " [横書き? N]"
+
+with N the count. Example of the finished label text:
+
+    Region 3 [横書き? 4] [改行 2]:
+    Region 3 (edited) [横書き? 4] [改行 2]:
+
+**The 横書き marker goes after `label_suffix` and before ` [改行`.**
+
+Do not change the RTL button, `rtl_rect`, `convert_right_to_left`, or anything
+else in the row. Do not reverse any text. Do not touch `self.edits`.
+
+## 4. Tests you must write
+
+Two new files. Do not modify any existing test.
+
+### `tests/test_rtl_detect.py` — the predicate (pure, no flet)
+
+    1. is_vertical True, 10 characters      -> needs_rtl is False
+    2. is_vertical False, 10 characters     -> needs_rtl is True
+    3. is_vertical False, 1 character       -> needs_rtl is False
+    4. is_vertical False, 0 characters      -> needs_rtl is False
+    5. dict without "is_vertical"           -> needs_rtl is False, no exception
+    6. dict without "text"                  -> needs_rtl is False, no exception
+    7. count_rtl_lines([]) == 0
+    8. A list of 5 lines, 2 of which qualify -> count_rtl_lines == 2
+    9. count_rtl_lines on a list containing one malformed dict counts the good
+       ones and does not raise.
+    10. A real reversed example: build the dict
+        {"text": "局支クーヨーユニ合聯聞新", "is_vertical": False,
+         "bbox": (0, 0, 400, 20)}
+        assert needs_rtl is True, and assert that
+        `convert_right_to_left(line["text"])` equals "新聞聯合ニユーヨーク支局".
+        **This ties the detector to the existing converter.**
+
+### `tests/test_rtl_label.py` — the label (through the viewer)
+
+Follow the construction pattern of `tests/test_marks_to_rects.py`. Do NOT mock
+`_update_selections_ui`; it is the thing under test. Give the app a real page
+object (`unittest.mock.MagicMock()` is acceptable for flet's renderer only) and
+real layers, exactly as `get_app` in that file now does.
+
+Set `app.ocr_results` directly to a small list of line dicts you build by hand,
+add one rectangle covering them, call `app._update_selections_ui()`, then read
+the label text back out of `app.selections_list.controls`.
+
+    11. A region whose lines are all vertical -> the label contains
+        "[改行" and does NOT contain "横書き".
+    12. A region containing 2 horizontal lines -> the label contains
+        "[横書き? 2]" exactly.
+    13. The 横書き marker appears BEFORE " [改行" in the label string
+        (assert the index order).
+    14. A region with an edit applied -> the label contains "(edited)" AND
+        "[横書き? " and they appear in that order.
+
+If you cannot reach the label text through `app.selections_list.controls`, do
+NOT give up and assert on an internal variable instead. Report exactly what you
+found in that control tree. **Asserting on a variable instead of on what the
+panel shows is the failure this project has hit four times.**
+
+Use exact values. Do not use assertGreater, assertIsNotNone, or "it exists"
+checks where a value can be written.
+
+## 5. Allowed and forbidden scope
+
+ALLOWED - these four files only:
+
+    custom_gui/rtl.py            (ADD; change nothing existing)
+    custom_gui/app.py            (only the label inside _update_selections_ui)
+    tests/test_rtl_detect.py     (new)
+    tests/test_rtl_label.py      (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/ocr_bridge.py  custom_gui/region_filter.py
+    custom_gui/text_assembler.py  custom_gui/mark_detector.py
+    custom_gui/selection.py  custom_gui/viewer.py  custom_gui/page_marks.py
+    and every other file under custom_gui/
+    every existing file under tests/
+    requirements.txt  pyproject.toml     (no new dependency; you need none)
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**
+
+Checks the commander will run on your patch:
+
+    git diff --name-only                        exactly the four files above
+    grep -n "import" custom_gui/rtl.py          must find NOTHING
+    grep -rn "w / h\|width / height\|aspect"  custom_gui/rtl.py   must find nothing
+    grep -c "selections_lock" custom_gui/app.py must be 6 or more
+    git diff requirements.txt pyproject.toml    must be empty
+    no *.injbak, no patch*.diff, no test_*.py at the repository root
+
+## 6. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Not one assertion.
+- The suite is currently **279 passed**. After your change it must be
+  279 + (your new tests), with zero failures.
+- If an existing test fails, do NOT edit it to make it green. Stop and report
+  which test, and the full failure output.
+
+## 7. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+`--collect-only` is not optional. Task 39 was submitted with an IndentationError
+in a test file; collection stopped for the whole suite and seven verification
+items went unrun.
+
+Then prove your tests detect the defects they claim to. For EACH of the four
+below: break the code, show the FAILING output, restore it, show it green.
+
+    (i)   Drop the `not` in front of `is_vertical` in `needs_rtl`.
+          -> cases 1 and 2 must fail.
+    (ii)  Lower RTL_MIN_CHARS to 1.
+          -> case 3 must fail.
+    (iii) Append the 横書き marker even when the count is 0.
+          -> case 11 must fail.
+    (iv)  Put the 横書き marker after " [改行 N]" instead of before.
+          -> case 13 must fail.
+
+If an injected defect does NOT make a test fail, say so plainly. That is a real
+finding and worth more than a green report. It has happened four times on this
+project: a default left unset, a threshold shadowed by a second threshold, a
+status bar never pushed to the screen, and three methods replaced by empty
+functions in a test helper. **When a defect is not detected, ask what else is
+holding the test up.**
+
+## 8. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If the contract above disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- Do not reverse any text automatically. That is deliberate.
+- You start from `master`.
+
+## 9. Your report must contain
+
+    1. git diff --name-only
+    2. the last 20 lines of python -m pytest tests/ -v
+    3. for each of the four injections in section 7: what you broke, the
+       FAILING output, and the passing output after restoring
+    4. how you reached the label text in the control tree, in one sentence
+    5. anything you chose differently from this order, and why
