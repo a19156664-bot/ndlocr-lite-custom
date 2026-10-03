@@ -6,6 +6,7 @@ from custom_gui.ocr_bridge import run_ocr_and_parse
 import custom_gui.work_state as work_state
 from custom_gui.region_filter import filter_lines_by_region
 from custom_gui.text_assembler import assemble_text
+from custom_gui.region_ocr import region_ocr_text
 from custom_gui.exporter import build_export_rows, build_export_rows_multi, rows_to_csv_text, rows_to_txt_text
 from custom_gui.rtl import convert_right_to_left, count_rtl_lines
 import os
@@ -1463,7 +1464,8 @@ class SelectableImageViewer(ImageViewer):
                 
                 buttons = [
                     ft.IconButton(icon=ft.Icons.EDIT, tooltip="Edit", on_click=edit_rect),
-                    ft.IconButton(icon=ft.Icons.SWAP_HORIZ, tooltip="右から変換", on_click=rtl_rect)
+                    ft.IconButton(icon=ft.Icons.SWAP_HORIZ, tooltip="右から変換", on_click=rtl_rect),
+                    ft.IconButton(icon=ft.Icons.DOCUMENT_SCANNER, tooltip="この枠だけOCR", on_click=lambda e, rid=rect.rect_id: self.start_region_ocr(rid))
                 ]
                 if has_edit:
                     buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
@@ -1501,6 +1503,56 @@ class SelectableImageViewer(ImageViewer):
                 _safe_update(self.rects_layer)
                 self.selections_list.update()
 
+
+    def start_region_ocr(self, rid):
+        if rid in self.edits:
+            self.latest_region_info = "編集済みの枠は範囲OCRしません（元に戻してから押してください）"
+            self._update_status()
+            return
+            
+        rect = None
+        for r in self.selection_container.get_all():
+            if r.rect_id == rid:
+                rect = r
+                break
+                
+        if rect is None:
+            return
+            
+        self.latest_region_info = "範囲OCR中…"
+        self._update_status()
+        
+        saved_image_src = self.image_src
+        
+        def _run_region_ocr():
+            try:
+                text = region_ocr_text(saved_image_src, rect.bbox)
+            except Exception as e:
+                self.latest_region_info = f"範囲OCR失敗: {e}"
+                if self.page:
+                    self._update_status()
+                return
+                
+            if text == "":
+                self.latest_region_info = "範囲OCR: 文字が見つかりません"
+                if self.page:
+                    self._update_status()
+                return
+                
+            with self.selections_lock:
+                rect_exists = any(r.rect_id == rid for r in self.selection_container.get_all())
+                if rect_exists and self.image_src == saved_image_src:
+                    self.edits[rid] = text
+                    n = text.count("\n") + 1 if text else 0
+                    self.latest_region_info = f"範囲OCR: {n} 行"
+                    
+            if self.page:
+                self._update_selections_ui()
+                self._persist_work_state()
+                self._update_status()
+                
+        if self.page:
+            self.page.run_thread(_run_region_ocr)
 
     def _update_inline_editor(self):
         with self.selections_lock:
