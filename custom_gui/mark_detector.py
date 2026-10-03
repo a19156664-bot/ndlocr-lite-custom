@@ -8,6 +8,9 @@ from custom_gui.page_marks import MARK_AD
 CYAN_LOWER = (80, 120, 180)      # HSV lower bound, OpenCV convention (H is 0-179)
 CYAN_UPPER = (105, 255, 255)     # HSV upper bound
 
+LIME_LOWER = (35, 60, 140)       # OpenCV HSV, measured 2026-10-03
+LIME_UPPER = (75, 255, 255)
+
 ORANGE_LOWER = (10, 120, 180)     # HSV lower bound, OpenCV convention (H is 0-179)
 ORANGE_UPPER = (35, 255, 255)     # HSV upper bound
 
@@ -21,11 +24,21 @@ def detect_marks(
     min_area: int = 500,
     thin_max: int = 20,
     line_margin: int = 20,
+    color: str = "cyan",
 ) -> List[MarkRegion]:
+    if color == "cyan":
+        lower = CYAN_LOWER
+        upper = CYAN_UPPER
+    elif color == "lime":
+        lower = LIME_LOWER
+        upper = LIME_UPPER
+    else:
+        raise ValueError(f"Invalid color '{color}'. Must be 'cyan' or 'lime'.")
+
     height, width = image_bgr.shape[:2]
     
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, CYAN_LOWER, CYAN_UPPER)
+    mask = cv2.inRange(hsv, lower, upper)
     
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
     closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
