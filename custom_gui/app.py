@@ -20,6 +20,7 @@ from custom_gui.save_paths import export_targets
 from custom_gui.region_stats import count_line_breaks
 from custom_gui.page_marks import MARK_AD, MARK_COVER, mark_line, append_mark_line
 from custom_gui.mark_detector import load_image, detect_marks, detect_page_mark
+from custom_gui.mark_profile import current_mark_color, page_mark_enabled
 
 class OcrState(Enum):
     IDLE = auto()
@@ -157,9 +158,10 @@ class SelectableImageViewer(ImageViewer):
         self.btn_mark_ad = ft.TextButton("広告", tooltip="このページを【広告】として記録", on_click=lambda e: self._on_mark_click(MARK_AD))
         self.btn_mark_cover = ft.TextButton("表紙", tooltip="このページを【表紙】として記録", on_click=lambda e: self._on_mark_click(MARK_COVER))
         
+        tooltip_text = "黄緑のマークから矩形を作る" if current_mark_color() == "lime" else "水色のマークから矩形を作る"
         self.btn_marks_to_rects = ft.TextButton(
             "マーク読取",
-            tooltip="水色のマークから矩形を作る",
+            tooltip=tooltip_text,
             on_click=self._on_marks_to_rects_click,
         )
         
@@ -637,13 +639,13 @@ class SelectableImageViewer(ImageViewer):
             self._update_status()
             return
             
-        page_mark = detect_page_mark(img)
+        page_mark = detect_page_mark(img) if page_mark_enabled() else None
         recorded_advert = False
         if page_mark is not None:
             self._on_mark_click(page_mark)
             recorded_advert = True
             
-        regions = detect_marks(img)
+        regions = detect_marks(img, color=current_mark_color())
         
         existing_rects = self.selection_container.get_all()
         
