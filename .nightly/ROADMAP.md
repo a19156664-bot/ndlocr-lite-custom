@@ -615,3 +615,11 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
 **🔴 お伺い**: 後者2つは、`use_show` と並ぶ診断用の引数 `dump_dir` の中にあり、
 **NDL 由来の「英数字パス前提」という意図された仕様の可能性があります。**
 直す対象でしょうか。（GUI の経路からは呼ばれていないため、**急ぎではありません**）
+
+## 2026-10-03 23:4x 時点の状態（締め）
+
+- 明朝の最初の一手: 承認者の画面確認の結果を受ける（確認ビューア起動.bat → 1 → 141号。「マーク読取」の tooltip が「黄緑のマークから矩形を作る」／p5 で押すと黄緑の見出しに枠／各枠の「この枠だけOCR」）
+- その次: 141号を人が校正し、書き出し（全ページの CSV）を `python -m custom_gui.form_export --csv <CSV> --pages 52 --template work\form0823.xlsx --out <出力>` で納品様式にする（Task 52）
+- 未確認: 142号（68 ページ）が見開きの決まり（35 行）に合うか
+- 片付けの候補（承認を得てから）: 直下の report.txt（Jules が置いた・git 外）、統合ブランチ integration/task-51-52・integration/task-53
+- 経緯は karte_web STATUS §115、日報は DEVELOPMENT_LOG.md の 2026-10-03
