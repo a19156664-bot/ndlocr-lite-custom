@@ -1,0 +1,218 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 53: A per-region "この枠だけOCR" button (OCR the region's crop on demand)
+================================================================================
+
+## 1. Purpose and background
+
+The viewer shows, for every region, the text of the page-wide OCR lines that
+fall inside it (`filter_lines_by_region`, 50 % of a line's area). The commander
+measured five magazine issues on 2026-10-03: of 690 hand-marked regions, 111
+receive NO line at all. In many of them the page-wide OCR failed (decorative
+titles, captions inside drawings were merged into one huge garbage line such
+as "000000…"). Cropping just the region and running the same OCR on the crop
+reads several of them correctly, for example:
+
+    p36 crop -> "先生が轉んだので……"     p36 crop -> "北正夫"
+    p33 crop -> "(文責在記者)-"
+
+But on crops of photographs the OCR invents text with HIGH confidence
+("これにしている。" at 0.875 on a crop that is only photo texture). So this
+must NEVER run automatically. The approver decided (2026-10-03): a button per
+region; the human presses it; the result becomes that region's edited text,
+which the human then checks, corrects or reverts.
+
+## 2. Contract
+
+### DoD-1 — new file `custom_gui/region_ocr.py`
+
+    REGION_OCR_PAD = 16          # pixels added on every side before OCR
+
+    def crop_region(image_bgr, bbox, pad: int = REGION_OCR_PAD):
+        """Return image_bgr[y1-pad:y2+pad, x1-pad:x2+pad], clipped to the image.
+        bbox is (x1, y1, x2, y2) in original pixels; floats are allowed
+        (round down x1/y1, round up x2/y2)."""
+
+    def region_ocr_text(image_path: str, bbox, pad: int = REGION_OCR_PAD) -> str:
+        """Crop the region from the image file, write the crop as PNG into a
+        temporary directory, OCR it, and return the line texts joined with
+        "\n" in the order the OCR returned them. "" when no line has text.
+        The temporary directory is removed before returning, also on error.
+        Exceptions from the OCR propagate unchanged."""
+
+Rules:
+- Read the image with `custom_gui.mark_detector.load_image` and write the
+  crop with `cv2.imencode(".png", crop)[1].tofile(path)`. Do NOT use
+  cv2.imread / cv2.imwrite: they silently fail on Japanese paths, and the
+  real files are named like 国際寫眞新聞_141号_p0036.png.
+- Call the OCR as `ocr_bridge.run_ocr_and_parse(png_path)` through the MODULE
+  (`from custom_gui import ocr_bridge`), looked up at CALL time. Do NOT do
+  `from custom_gui.ocr_bridge import run_ocr_and_parse`. Tests replace
+  `custom_gui.ocr_bridge.run_ocr_and_parse` and that replacement must reach
+  this call.
+- Ignore lines whose "text" is empty or whitespace.
+
+### DoD-2 — `custom_gui/app.py`, only inside `_update_selections_ui`'s per-region row, plus one new method
+
+In the per-region row (around lines 1464-1470) the buttons are built as:
+
+    buttons = [
+        ft.IconButton(icon=ft.Icons.EDIT, tooltip="Edit", on_click=edit_rect),
+        ft.IconButton(icon=ft.Icons.SWAP_HORIZ, tooltip="右から変換", on_click=rtl_rect)
+    ]
+
+Append, right after the "右から変換" button and before RESTORE / DELETE:
+
+    ft.IconButton(icon=ft.Icons.DOCUMENT_SCANNER, tooltip="この枠だけOCR",
+                  on_click=lambda e, rid=rect.rect_id: self.start_region_ocr(rid))
+
+Add the method `start_region_ocr(self, rid)` to `SelectableImageViewer`:
+
+    1. If rid already has an entry in self.edits: do NOT run OCR. Set
+       self.latest_region_info = "編集済みの枠は範囲OCRしません（元に戻してから押してください）",
+       call self._update_status(), return.
+    2. Find the rect by rid in self.selection_container; if missing, return.
+    3. Set self.latest_region_info = "範囲OCR中…", call self._update_status().
+    4. Run the work with self.page.run_thread(target) (OCR takes ~5 s):
+         text = region_ocr_text(self.image_src, rect.bbox)
+       - on exception: latest_region_info = f"範囲OCR失敗: {e}" ; no edit
+       - text == "": latest_region_info = "範囲OCR: 文字が見つかりません" ; no edit
+       - otherwise, under `with self.selections_lock:` and ONLY IF the rect with
+         that rid still exists AND self.image_src is still the same image as when
+         the button was pressed: self.edits[rid] = text ;
+         latest_region_info = f"範囲OCR: {n} 行" (n = number of lines in text)
+       then call self._update_selections_ui(), self._persist_work_state(),
+       self._update_status() (only the first and last when there was no edit).
+
+Nothing else in app.py changes. Do not touch commit_edit, rtl_rect,
+restore_rect, the label text, the export, or any other method.
+
+## 3. Tests you must write (two new files; do not modify any existing test)
+
+NO test may run the real OCR model. Replace the OCR ONLY by
+`monkeypatch.setattr("custom_gui.ocr_bridge.run_ocr_and_parse", fake)`.
+Do not replace region_ocr_text, start_region_ocr, _update_selections_ui,
+_update_status or _persist_work_state: they are the things under test.
+
+### `tests/test_region_ocr.py`
+
+    1. crop_region on a 400x600 image, bbox (100, 200, 150, 300), pad 16
+       -> shape (100 + 32, 50 + 32, 3), and its top-left pixel equals
+       image[184, 84]
+    2. crop_region near the corner, bbox (5, 5, 40, 40), pad 16 -> starts at
+       (0, 0), shape (56, 56, 3)
+    3. crop_region with float bbox (100.4, 200.6, 149.2, 299.1), pad 0
+       -> shape (100, 50, 3) (x: floor 100.4 -> 100, ceil 149.2 -> 150;
+          y: floor 200.6 -> 200, ceil 299.1 -> 300)
+    4. region_ocr_text on an image saved at a tmp path containing
+       "国際寫眞新聞_test.png": the fake runner loads the PNG it is given
+       (np.fromfile + cv2.imdecode) and the test asserts its shape is the crop
+       shape and its pixels equal crop_region(...) exactly; the fake returns
+       [{"text": "先生が"}, {"text": " "}, {"text": "轉んだ"}] -> result
+       "先生が\n轉んだ"
+    5. fake returns [] -> ""
+    6. after the call, the PNG path the fake received no longer exists
+       (also when the fake raises RuntimeError; the error propagates)
+
+### `tests/test_region_ocr_button.py` — through the real viewer
+
+Follow `tests/test_marks_to_rects.py` (its get_app helper and dummy_page
+fixture; that DummyPage.run_thread runs the target synchronously). Build
+app.ocr_results by hand: one line inside region "2", none inside region "3".
+
+    7.  Each region row in app.selections_list.controls has an IconButton with
+        tooltip "この枠だけOCR"
+    8.  start_region_ocr("3") with a fake returning two lines ->
+        app.edits["3"] == "先生が轉んだので……\n北正夫", the label of region 3
+        contains "(edited)", app.status_text.value contains "範囲OCR: 2 行"
+    9.  The same click leaves region "2" untouched: "2" not in app.edits, and
+        its displayed text equals the hand-built line text
+    10. Fake returns [] -> "3" not in app.edits, status contains
+        "範囲OCR: 文字が見つかりません"
+    11. Fake raises RuntimeError("boom") -> "3" not in app.edits, status
+        starts with "範囲OCR失敗" and contains "boom"
+    12. app.edits["3"] = "人が直した" before the click -> the fake is called
+        0 times, the edit is unchanged, status contains "編集済みの枠は範囲OCRしません"
+    13. The rect is deleted inside the fake (simulate the user deleting it
+        while OCR runs) -> no edit is stored for "3"
+    14. Persistence: after test 8's click, reload the saved work state the way
+        tests/test_marks_to_rects.py's persistence test does and assert the
+        edit for "3" is in it
+    15. Pressing the button through the control's on_click (not by calling
+        the method) gives the same result as test 8
+
+Use exact values. If you cannot reach a label or status through the real
+controls, do NOT assert on an internal variable instead: report what you found.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these four files only:
+
+    custom_gui/region_ocr.py            (new)
+    custom_gui/app.py                   (the one button + start_region_ocr)
+    tests/test_region_ocr.py            (new)
+    tests/test_region_ocr_button.py     (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/ocr_bridge.py and every other file under custom_gui/
+    every existing file under tests/
+    requirements.txt  pyproject.toml  custom_gui/requirements-custom.txt
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**  work/**
+    any file at the repository root (no report.txt, no notes: put your report
+    in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short          exactly the four paths above, nothing else
+    grep -n "cv2.imread\|cv2.imwrite" custom_gui/region_ocr.py   must find nothing
+    grep -n "from custom_gui.ocr_bridge import" custom_gui/region_ocr.py  must find nothing
+    grep -c "selections_lock" custom_gui/app.py   must be 7 or more
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. master currently has 324 tests (measured 2026-10-03, all passing).
+  Run the suite on master BEFORE your change and report the count; after it,
+  that count plus your new tests, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the four below: break the code, show the FAILING output,
+restore it, show it green.
+
+    (i)   crop without the pad (pad ignored)                    -> case 4 must fail
+    (ii)  overwrite an existing edit instead of refusing         -> case 12 must fail
+    (iii) import run_ocr_and_parse by name at module import time -> case 8 must fail
+          (the fake no longer reaches the call)
+    (iv)  store "" as the edit when no text is found             -> case 10 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- Never run the OCR automatically. Only the button starts it.
+- You start from `master`.
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the four injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. how you reached the button, the label and the status text
+    5. anything you chose differently from this order, and why
