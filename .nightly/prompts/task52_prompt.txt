@@ -1,0 +1,240 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 52: Convert the viewer's CSV export into the delivery spreadsheet
+================================================================================
+
+## 1. Purpose and background
+
+A human corrects regions and their text in the viewer, then exports ALL pages
+to one CSV (`custom_gui/app.py` `_write_export`, scope "all";
+`custom_gui/exporter.py` `rows_to_csv_text`). The customer does not want that
+CSV. They want a fixed spreadsheet: ONE ROW PER TWO-PAGE SPREAD, with the
+spread's text joined by "｜".
+
+This task writes the converter. It is a pure, deterministic transformation.
+It never reads images and never runs OCR.
+
+The customer's template workbook is NOT in this repository and must never be
+added to it. The converter receives its path at run time. Your tests must
+build their own small template with openpyxl (section 4).
+
+## 2. The input — the viewer's CSV (exists today, do not change it)
+
+UTF-8 with BOM, header row, columns in this order:
+
+    image_name, region_id, x1, y1, x2, y2, line_count, text
+
+    image_name  basename of the page image, e.g. "国際寫眞新聞_141号_p0001.png"
+                (older material uses e.g. "国際寫眞新聞_028号_000001.jpg")
+    region_id   "mark" for a page-level tag row (text is e.g. "【広告】"),
+                otherwise the region number as a string: "1", "2", ...
+    text        the region's text; may contain "\n"; may be empty
+
+Rows are grouped by page in page order, and within a page the "mark" row (if
+any) comes first, then regions in viewer order. A page with no regions and no
+mark has NO rows at all.
+
+**Region "1" on every page is a whole-page frame generated automatically by
+the local launcher. The approver decided (2026-10-03) its text must NEVER
+reach the delivery.** Every other region_id, and "mark", is delivered.
+
+## 3. The output — the delivery workbook
+
+Sheet name "入力フォーム". Rows 1 and 2 are the template's header and
+instructions: copy them through untouched (load the template, write into it,
+save under a new name). Data starts on row 3.
+
+### Spread rows for a PDF of N pages (N even, N >= 6)
+
+    row index i (1-based)  A (str)          B (str)                      PDF pages
+    1                      "01"             "表紙"                        [1]
+    2                      "02"             "表見返し-P.0001"             [2, 3]
+    k, 3 <= k <= N/2 - 1   f"{k:02d}"       f"P.{2k-4:04d}-P.{2k-3:04d}"  [2k-2, 2k-1]
+    N/2                    f"{N/2:02d}"     f"P.{N-4:04d}-裏見返し"        [N-2, N-1]
+    N/2 + 1                f"{N/2+1:02d}"   "裏表紙"                      [N]
+
+    N = 52 -> 27 rows: 表紙, 表見返し-P.0001, P.0002-P.0003, ..., P.0046-P.0047,
+              P.0048-裏見返し, 裏表紙
+    N = 68 -> 35 rows: ..., P.0062-P.0063, P.0064-裏見返し, 裏表紙
+    N odd or N < 6 -> ValueError   (N = 4 would make row 2 both 表見返し and 裏見返し)
+
+Spreadsheet row of spread i is 2 + i. Every spread gets its row with A and B
+filled EVEN WHEN IT HAS NO TEXT (the approver uses the rows to check the page
+count).
+
+### Column C (キーワード) for one spread
+
+For each PDF page of the spread in ASCENDING page order:
+  1. the page's "mark" row text(s), then
+  2. its region rows in CSV order, SKIPPING region_id "1".
+Turn every text into segments exactly like `exporter.rows_to_txt_text` does:
+replace "\r\n" and "\n" with "｜", split on "｜", strip each piece, drop empty
+pieces. Concatenate the segments of the whole spread.
+
+Then, within the spread:
+  - a TAG is a segment matching ^【[^【】]+】$ . Drop a tag segment when the
+    same tag already appeared earlier in this spread (both pages being adverts
+    gives "【広告】" once). Never drop or merge non-tag segments.
+  - spread 1 (表紙): if "【表紙】" is not among its segments, put it first.
+
+C = "｜".join(segments). If there are no segments, leave C empty (None).
+
+### Columns D, F1
+
+    D (row r) = '=IF(LEN(B{r})+LEN(C{r})<>0,LEN(B{r})+LEN(C{r}),"")'
+                (write the formula string; for every data row)
+
+Rows of the template below the last spread row: set A, B and C to None, keep D.
+Leave F1, G1 and every other cell of rows 1-2 exactly as in the template.
+
+### Page number from image_name
+
+    regex r"_p?(\d+)\.[A-Za-z0-9]+$"  -> int(group 1)
+
+No match -> ValueError naming the image. Page < 1 or > N -> ValueError.
+Two different stems (the part before the matched suffix) in one CSV ->
+ValueError (one issue per run).
+
+## 4. Contract — new file `custom_gui/form_export.py`
+
+    def spread_rows(n_pages: int) -> list[tuple[str, str, list[int]]]:
+        """[(A, B, pdf_pages), ...] as in section 3."""
+
+    def read_viewer_csv(path: str) -> list[dict]:
+        """Rows of the viewer CSV as dicts (utf-8-sig)."""
+
+    def build_keywords(csv_rows: list[dict], n_pages: int) -> list[str | None]:
+        """Column C for every spread, same length as spread_rows(n_pages)."""
+
+    def write_form(template_path: str, out_path: str, n_pages: int,
+                   keywords: list[str | None]) -> None:
+        """Load template, fill rows from 3, save to out_path.
+        Raise FileExistsError if out_path exists. Raise ValueError if out_path
+        and template_path are the same file. Never modify the template."""
+
+    def main(argv=None) -> int:
+        """python -m custom_gui.form_export --csv C --pages N --template T --out O"""
+
+Imports allowed: csv, re, os, argparse, typing, openpyxl. No flet, cv2,
+numpy, and nothing from custom_gui.
+
+openpyxl is NOT installed in the project today. Install `openpyxl==3.1.5` in
+your environment, and record it in a NEW file `custom_gui/requirements-custom.txt`
+(one line: openpyxl==3.1.5). Do NOT edit the upstream requirements.txt or
+pyproject.toml.
+
+## 5. Tests — new file `tests/test_form_export.py` (do not modify any existing test)
+
+Build a template in tmp_path with openpyxl: sheet "入力フォーム";
+A1..G1 = "頁","ノンブル","キーワード","Count","備考","=SUM(D3:D143)","←合計文字数";
+A2,B2,C2 = "PDFの頁","原稿記載の頁","(instructions)"; rows 3..143 with only the D
+formula. Write CSVs into tmp_path with the exact header of section 2.
+
+    1.  spread_rows(52): 27 rows; rows 1,2,3 == ("01","表紙",[1]),
+        ("02","表見返し-P.0001",[2,3]), ("03","P.0002-P.0003",[4,5]);
+        row 26 == ("26","P.0048-裏見返し",[50,51]); row 27 == ("27","裏表紙",[52])
+    2.  spread_rows(68): 35 rows; last two B == "P.0064-裏見返し", "裏表紙";
+        row 34 pages == [66, 67]
+    3.  spread_rows(51) and spread_rows(4) raise ValueError; spread_rows(6) ==
+        [("01","表紙",[1]), ("02","表見返し-P.0001",[2,3]),
+         ("03","P.0002-裏見返し",[4,5]), ("04","裏表紙",[6])]
+    4.  Region "1" excluded: page 4 has region 1 "全文の行" and region 2 "見出し"
+        -> spread 3 C == "見出し"
+    5.  Mark first: page 4 rows mark "【広告】", region 2 "見出し"
+        -> spread 3 C == "【広告】｜見出し"
+    6.  Ascending pages: CSV lists page 5 ("後") BEFORE page 4 ("前")
+        -> spread 3 C == "前｜後"
+    7.  Newlines: region text "一行目\n二行目\n\n" -> "一行目｜二行目"
+    8.  Cover: no rows for page 1 -> spread 1 C == "【表紙】";
+        page 1 region 2 "写真説明" -> "【表紙】｜写真説明";
+        page 1 mark "【表紙】" + region 2 "写真説明" -> "【表紙】｜写真説明" (not doubled)
+    9.  Tag dedupe: pages 2 and 3 both mark "【広告】" -> spread 2 C == "【広告】";
+        page 48 mark "【広告】" region 2 "記事", page 49 region 2 "【社告】",
+        region 3 "記事" -> C == "【広告】｜記事｜【社告】｜記事" (the repeated
+        non-tag "記事" is kept)
+    10. Empty spread: a spread with no rows -> C is None, but A and B are filled
+    11. End to end with N=52 through write_form, then reload with openpyxl:
+        sheet name; A3 == "01", B3 == "表紙"; A29 == "27", B29 == "裏表紙";
+        A30 is None and B30 is None; D3 == the exact formula string of row 3;
+        F1, G1, A2, B2, C2 equal the template's values; the template file's
+        bytes are unchanged (compare a hash taken before)
+    12. write_form refuses an existing out_path (FileExistsError) and
+        out_path == template_path (ValueError)
+    13. Page numbers: "国際寫眞新聞_141号_p0004.png" -> 4;
+        "国際寫眞新聞_028号_000004.jpg" -> 4; "cover.png" -> ValueError;
+        a page 53 row with N=52 -> ValueError; two stems in one CSV -> ValueError
+    14. main(): run it on a tmp CSV + template, exit code 0, the output exists
+        and its C of spread 3 equals what build_keywords returned
+
+Use exact values. No assertGreater / "is not None" where a value can be written.
+
+## 6. Allowed and forbidden scope
+
+ALLOWED - these three files only:
+
+    custom_gui/form_export.py              (new)
+    custom_gui/requirements-custom.txt     (new, one line)
+    tests/test_form_export.py              (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    every existing file under custom_gui/, including app.py, exporter.py
+    custom_gui/mark_detector.py, custom_gui/mark_profile.py
+        (ANOTHER TASK IS CHANGING / CREATING THEM IN PARALLEL)
+    every existing file under tests/
+    requirements.txt  pyproject.toml
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**  work/**
+    any .xlsx file anywhere in the repository (templates live outside it)
+
+Checks the commander will run on your patch:
+
+    git diff --name-only     exactly the three files above
+    git ls-files "*.xlsx"    must list nothing new
+    grep -n "^import\|^from" custom_gui/form_export.py   only the allowed modules
+    no *.injbak, no patch*.diff, no test_*.py at the repository root
+
+## 7. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. `python -m pytest tests/ --collect-only -q` on master collected 293
+  tests (measured 2026-10-03). Run the full suite on master BEFORE your change
+  and report the pass count; after it, that count plus your new tests, zero
+  failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 8. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the four below: break the code, show the FAILING output,
+restore it, show it green.
+
+    (i)   Stop skipping region "1"                         -> case 4 must fail
+    (ii)  Order a spread's pages descending                 -> case 6 must fail
+    (iii) Map P.n to PDF page n+1 instead of n+2            -> case 1 must fail
+    (iv)  Drop every repeated segment, not only tags        -> case 9 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 9. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- You start from `master`.
+
+## 10. Your report must contain
+
+    1. git diff --name-only
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the four injections in section 8: what you broke, the
+       FAILING output, and the passing output after restoring
+    4. anything you chose differently from this order, and why

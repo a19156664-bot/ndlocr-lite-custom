@@ -1,0 +1,237 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 51: Let "マーク読取" use a yellow-green (lime) marker instead of cyan
+================================================================================
+
+## 1. Purpose and background
+
+`custom_gui/mark_detector.detect_marks()` finds hand-drawn highlighter marks
+by colour. It only knows CYAN today:
+
+    CYAN_LOWER = (80, 120, 180)      # OpenCV HSV, H is 0-179
+    CYAN_UPPER = (105, 255, 255)
+
+The approver now works on a new set of five magazine issues (276 pages). In
+those, the hand-drawn marker is YELLOW-GREEN, not cyan. The commander measured
+all 276 pages on 2026-10-03:
+
+    lime marker pixels sit at H = 40-50 (OpenCV), on 40 of 52 pages of one issue
+    cyan bounds find ZERO hand marks there; they only hit blue PRINTED ink
+        (adverts and one cover), 128 false regions over the five issues
+    the orange "advert" detector (detect_page_mark) only hits the red PRINTED
+        masthead on each cover; there is no hand-drawn orange in these issues
+
+The approver decided (2026-10-03): for this material, ONLY lime is a range
+mark; cyan and orange must not be detected. The OLD material (cyan + orange)
+must keep working exactly as today. So the colour becomes a setting, and the
+default stays cyan.
+
+The setting is chosen by an environment variable, set by the local launcher
+(not in this repository). You do not write the launcher.
+
+## 2. Contract
+
+### DoD-1 — `custom_gui/mark_detector.py` (ADD; change nothing existing except the one signature)
+
+Add, next to the existing constants:
+
+    LIME_LOWER = (35, 60, 140)       # OpenCV HSV, measured 2026-10-03
+    LIME_UPPER = (75, 255, 255)
+
+Change the signature of `detect_marks` by appending ONE keyword argument with a
+default, keeping every existing argument, its order and its default:
+
+    def detect_marks(image_bgr, min_area=500, thin_max=20, line_margin=20,
+                     color: str = "cyan") -> List[MarkRegion]:
+
+    color == "cyan" -> use CYAN_LOWER / CYAN_UPPER (exactly today's behaviour)
+    color == "lime" -> use LIME_LOWER / LIME_UPPER
+    any other value -> raise ValueError (message must contain the bad value)
+
+Read the bounds from the module-level constants at CALL time (not copied into
+a default argument or a dict built at import), so that the constants remain
+the single source of truth.
+
+Everything after the mask (morphology, contours, box/line, margins, clipping,
+sorting) must be IDENTICAL for both colours. Do not touch it.
+`detect_page_mark` and `load_image` are unchanged.
+
+### DoD-2 — new file `custom_gui/mark_profile.py`
+
+    MARK_COLOR_ENV = "NDLOCR_MARK_COLOR"
+
+    def current_mark_color() -> str:
+        """'lime' when the env var says lime (case-insensitive, surrounding
+        spaces ignored); otherwise 'cyan' (unset, empty, or any other value)."""
+
+    def page_mark_enabled() -> bool:
+        """True when current_mark_color() == 'cyan'; False for 'lime'.
+        (With lime material, the orange detector only hits printed ink.)"""
+
+Read `os.environ` at CALL time, never at import. No other imports from
+custom_gui. No flet, cv2 or numpy in this file.
+
+### DoD-3 — `custom_gui/app.py`, only inside `_on_marks_to_rects_click` and the tooltip
+
+Today (around lines 629-688):
+
+    page_mark = detect_page_mark(img)
+    ...
+    regions = detect_marks(img)
+
+Change to:
+
+    page_mark = detect_page_mark(img) if page_mark_enabled() else None
+    ...
+    regions = detect_marks(img, color=current_mark_color())
+
+Nothing else in that method changes (duplicate check, counts, status
+messages, persistence).
+
+The button is created around line 161 with
+`tooltip="水色のマークから矩形を作る"`. Make the tooltip follow the colour at
+the moment the button is built:
+
+    cyan -> "水色のマークから矩形を作る"   (byte-identical to today)
+    lime -> "黄緑のマークから矩形を作る"
+
+Import the two functions from `custom_gui.mark_profile`. No other change to
+app.py.
+
+## 3. Tests you must write (two new files; do not modify any existing test)
+
+### `tests/test_mark_color.py` — the detector (no flet)
+
+Build pages with numpy like `tests/test_mark_detector.py` does. Produce colours
+from HSV with `cv2.cvtColor(np.uint8([[[h, s, v]]]), cv2.COLOR_HSV2BGR)`.
+
+    1. LIME_LOWER == (35, 60, 140) and LIME_UPPER == (75, 255, 255)
+    2. A lime box (H=45, S=180, V=230, 200x150 px):
+         detect_marks(page, color="lime") -> exactly 1 region, kind "box",
+         bbox within 8 px of the painted box
+         detect_marks(page)               -> 0 regions (default is still cyan)
+    3. A cyan box (BGR 255,235,60 — the colour test_mark_detector.py uses):
+         detect_marks(page)               -> 1 region
+         detect_marks(page, color="lime") -> 0 regions
+    4. A lime vertical stroke 12x300 px with color="lime", line_margin=20
+         -> 1 region, kind "line", width == 12 + 40 within 8 px
+    5. Hue boundaries with S=180, V=230, 100x100 px, color="lime":
+         H=34 -> 0,  H=35 -> 1,  H=75 -> 1,  H=76 -> 0
+    6. Saturation and value floors, color="lime", H=45:
+         S=59,V=230 -> 0;  S=60,V=230 -> 1;  S=180,V=139 -> 0;  S=180,V=140 -> 1
+       HSV -> BGR -> HSV is not always exact (rounding can move H, S or V by 1).
+       For every boundary colour in 5 and 6, convert the BGR you paint BACK to
+       HSV inside the test and assert it equals the intended (h, s, v) first.
+       If a value does not round-trip, pick the other two channels so that it
+       does, and say which ones you picked in your report. Never loosen the
+       boundary to make the test pass.
+    7. detect_marks(page, color="red") raises ValueError and the message
+       contains "red"
+    8. Same page, same color -> identical results twice (determinism)
+
+### `tests/test_mark_profile.py` — the setting, and the button through the viewer
+
+Use pytest's `monkeypatch.setenv` / `monkeypatch.delenv`.
+
+    9.  env unset             -> current_mark_color() == "cyan", page_mark_enabled() is True
+    10. "lime"                -> "lime", False
+    11. " LIME "              -> "lime", False
+    12. "bogus" and ""        -> "cyan", True
+    13. Set the env var AFTER importing the module: the result follows the
+        new value (proves it is read at call time)
+
+Then, through the real viewer, following the construction pattern of
+`tests/test_marks_to_rects.py` (its `get_app` helper and fixtures; do NOT
+mock `_on_marks_to_rects_click`, it is the thing under test):
+
+    14. env "lime"; an image with one lime box AND a large orange blob
+        (H=25, S=159, V=237, 120x120 px). Click the button ->
+        exactly 1 rectangle is added, and app.mark is NOT "【広告】"
+    15. env unset; the same image -> today's behaviour: 0 rectangles from the
+        lime box, and the orange blob records "【広告】"
+    16. env "lime"; image with one CYAN box only -> 0 rectangles, and the
+        status says "マークが見つかりません"
+    17. env "lime" when the viewer is built -> the button tooltip is
+        "黄緑のマークから矩形を作る"; env unset -> "水色のマークから矩形を作る"
+
+Use exact values. No assertGreater / "is not None" where a value can be written.
+If you cannot reach the tooltip or the status text through the real controls,
+do NOT assert on an internal variable instead: report what you found.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these five files only:
+
+    custom_gui/mark_detector.py   (constants + the one keyword + mask selection)
+    custom_gui/mark_profile.py    (new)
+    custom_gui/app.py             (only _on_marks_to_rects_click and that tooltip)
+    tests/test_mark_color.py      (new)
+    tests/test_mark_profile.py    (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    every other file under custom_gui/, including exporter.py, page_marks.py,
+        region_filter.py, selection.py, text_assembler.py, rtl.py
+    custom_gui/form_export.py   (ANOTHER TASK IS CREATING IT IN PARALLEL)
+    every existing file under tests/
+    requirements.txt  pyproject.toml     (no new dependency; you need none)
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**  work/**
+
+Checks the commander will run on your patch:
+
+    git diff --name-only            exactly the five files above
+    grep -n "import" custom_gui/mark_profile.py   only "os" (and typing)
+    git diff requirements.txt pyproject.toml      must be empty
+    no *.injbak, no patch*.diff, no test_*.py at the repository root
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Not one assertion. tests/test_mark_detector.py and
+  tests/test_marks_to_rects.py must pass UNCHANGED: they prove the cyan
+  default did not move.
+- `python -m pytest tests/ --collect-only -q` on master collected 293 tests
+  (measured 2026-10-03). Run the full suite on master BEFORE your change and
+  report the pass count; after your change it must be that count plus your new
+  tests, with zero failures.
+- If an existing test fails, do NOT edit it. Stop and report the test and the
+  full failure output.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then prove your tests detect the defects they claim to. For EACH of the four
+below: break the code, show the FAILING output, restore it, show it green.
+
+    (i)   Make detect_marks ignore `color` (always cyan)   -> case 2 must fail
+    (ii)  Make page_mark_enabled() always return True       -> case 14 must fail
+    (iii) Change LIME_LOWER hue from 35 to 34               -> cases 1 and 5 must fail
+    (iv)  Read the env var once at import time              -> case 13 must fail
+
+If an injected defect does NOT make a test fail, say so plainly. That is a
+real finding and worth more than a green report.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- You start from `master`.
+
+## 8. Your report must contain
+
+    1. git diff --name-only
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the four injections in section 6: what you broke, the
+       FAILING output, and the passing output after restoring
+    4. how you reached the tooltip and the status text, in one sentence each
+    5. anything you chose differently from this order, and why
