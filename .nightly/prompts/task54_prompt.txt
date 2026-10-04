@@ -1,0 +1,310 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 54: Viewer fixes found by the approver on 2026-10-04
+         (zoom keeps the boxes on the image / no yellow fill for Region 1 /
+          buttons on their own row / red line-break marks while editing)
+================================================================================
+
+## 1. Purpose and background
+
+The approver checked issue 141 in the viewer on 2026-10-04 and found four
+problems. The commander read the code; the causes are below. The approver
+approved this plan on 2026-10-04.
+
+(A) Zoom In / Zoom Out / Fit move the image but not the boxes.
+    Boxes are kept in ORIGINAL pixels (SelectionRect.bbox) and converted with
+    original_to_display(x, y, self.zoom_scale, 0.0, 0.0) only inside
+    _update_selections_ui (app.py around lines 1338-1387). zoom_in / zoom_out /
+    fit (custom_gui/viewer.py lines 101-114) change self.zoom_scale and call
+    self._update_viewer(). The override SelectableImageViewer._update_viewer
+    (app.py around line 1639) resizes the layers but never redraws the boxes,
+    so they stay where the OLD scale put them. page resize
+    (update_layout -> _update_viewer) has the same problem.
+
+(B) The automatic "Region 1" covers the whole page, so every OCR line on the
+    page is painted with the 40 % yellow line highlight (app.py lines
+    1374-1387). The approver's hand-drawn yellow-green marks cannot be seen
+    under it. The approver decided: KEEP the Region 1 box, its label and its
+    text in the right panel; only do NOT paint line highlights for Region 1.
+    Region 1 is the region whose rect_id is "1" -- the same rule that
+    custom_gui/form_export.py already uses (`r["region_id"] != "1"`).
+
+(C) In the right panel (ListView width=300, app.py line 219-224) every row puts
+    the bold header text and 4-5 IconButtons in ONE Row, so the last button is
+    cut off at the right edge. The approver decided: keep the width 300; the
+    buttons go to the line under the header.
+
+(D) While a region's text is being edited in the right panel, the approver
+    wants to SEE every line break in red, to delete the extra breaks the OCR
+    produced, and wants the "[改行 N]" count in the header to change while
+    typing. flet 0.27.6 TextField cannot color part of its text, so the
+    approver chose: put a visible red mark character in front of each line
+    break inside the edit field, and remove every mark when saving. The mark
+    must NEVER reach self.edits, the saved work state, or the export.
+
+## 2. Contract
+
+### DoD-1 -- new file `custom_gui/break_marks.py`
+
+    BREAK_MARK = "\U0001F534"     # the red circle emoji; the ONLY place it is written
+
+    def add_break_marks(text) -> str:
+        """None or "" -> "". Replace "\r\n" with "\n", then put BREAK_MARK in
+        front of every "\n"."""
+
+    def strip_break_marks(text) -> str:
+        """None or "" -> "". Remove EVERY BREAK_MARK (also ones that are no
+        longer in front of a "\n" because the user deleted the break).
+        Nothing else changes."""
+
+Write the emoji in break_marks.py with the escape "\U0001F534", not as a
+literal character.
+
+### DoD-2 -- `custom_gui/app.py`: redraw the boxes when the scale changes (A)
+
+1. Add a method `_redraw_overlays(self)` to SelectableImageViewer. It does
+   exactly what _update_selections_ui does today for the IMAGE side, moved
+   out unchanged: clear self.rects_layer.controls and
+   self.highlight_layer.controls, then for every rect draw the blue border
+   Container, the label Container and the yellow line highlights (with the
+   Region 1 rule of DoD-3). At the end set `self._overlay_scale =
+   self.zoom_scale`. It does NOT take self.selections_lock itself (every
+   caller already holds it; in the app it is a threading.RLock, app.py line
+   56, but tests/test_marks_to_rects.py's get_app replaces it with a plain
+   threading.Lock, so taking it again would hang the tests) and does NOT
+   call update().
+2. _update_selections_ui calls `self._redraw_overlays()` at the place where
+   that code was, still inside its `with self.selections_lock:` block. The
+   right-panel part of _update_selections_ui (the list rows, text, buttons)
+   stays in _update_selections_ui.
+3. At the END of the existing override `_update_viewer`, add: if
+   `getattr(self, "_overlay_scale", None)` is not None AND it differs from
+   self.zoom_scale, then, all inside ONE `with self.selections_lock:` block:
+   check the condition again, call self._redraw_overlays(), and update
+   highlight_layer and rects_layer the way _update_selections_ui does (only
+   when they have a page). The update() calls must be inside the lock.
+   Why: flet runs event handlers on parallel threads without serializing
+   them; rebuilding a control list while another thread updates it crashed
+   the viewer on 2026-07-28 ("assert self.__uid is not None", see
+   .nightly/ROADMAP.md "パン中のクラッシュ"). Task 30c fixed it by moving
+   whole layers on pan and by locking every rebuild. Keep both.
+   - _update_viewer must NOT call _update_selections_ui: that rebuilds the
+     right panel and would destroy a TextField the user is typing in.
+   - _update_viewer is also called on every pan-drag event with an unchanged
+     scale (app.py around line 1256). Then nothing is redrawn.
+
+### DoD-3 -- no line highlight for Region 1 (B)
+
+Inside _redraw_overlays: for the rect whose rect_id == "1", draw its border
+and its label, but append NO highlight Container for its lines. All other
+rects are painted exactly as today. The right-panel text of Region 1 is
+unchanged (it is still built from its filtered lines).
+
+### DoD-4 -- buttons on their own row (C)
+
+In each right-panel row, today:
+
+    item_content = ft.Column([
+        ft.Row([ header_text, ft.Row(buttons, spacing=0) ],
+               alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+        content_area
+    ])
+
+The ONLY change: give that outer header Row `wrap=True`, so the buttons go
+to the next line when they do not fit beside the header:
+
+        ft.Row([ header_text, ft.Row(buttons, spacing=0) ],
+               alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+               wrap=True),
+
+Do NOT change the tree shape. Four existing tests (test_rtl_label.py,
+test_region_ocr_button.py, test_save_direct.py, test_edit_enter.py) read
+`row.content.controls[0]` as an ft.Row with exactly 2 controls
+[header ft.Text, ft.Row(buttons)], and existing tests must not be edited.
+The buttons, their order, icons, tooltips and handlers do not change. The
+ListView width stays 300.
+
+### DoD-5 -- red break marks while editing (D)
+
+Only the right-panel editor (the `if is_editing:` branch in
+_update_selections_ui). The editor drawn on the image
+(_update_inline_editor / _commit_inline_edit) is NOT changed.
+
+1. Keep a reference to the header ft.Text of the row (`header_text`).
+2. The TextField's value is `add_break_marks(display_text)`.
+3. Set `tf.on_change` to a handler that ONLY sets
+       header_text.value = f"{rect.label}{label_suffix} [改行 {n}]:"
+   with n = count_line_breaks(strip_break_marks(tf.value)), and calls
+   header_text.update() if header_text.page. It must NOT change tf.value
+   (that can move the cursor) and must NOT call _update_selections_ui.
+   A break the user types with Shift+Enter is counted at once but gets no
+   mark until the editor is opened again. That is intended.
+4. In the METHOD `SelectableImageViewer.commit_edit(self, rid, new_text)`
+   (app.py around line 1626) store `strip_break_marks(new_text)` instead of
+   `new_text`. This is the single place the marks are removed; both Save
+   (button) and Enter (on_submit) reach it. Do not add a second strip in the
+   closures.
+5. The non-editing display (`content_area = ft.Text(display_text, ...)`) and
+   the header count when not editing are unchanged (no marks).
+
+Nothing else in app.py changes. Do not touch rtl_rect, restore_rect,
+delete_rect, start_region_ocr, the export, the label text format, or the
+inline editor. Do not change custom_gui/region_stats.py.
+
+## 3. Tests you must write (two new files; do not modify any existing test)
+
+Follow tests/test_marks_to_rects.py: its get_app helper and dummy_page
+fixture (copy them into your file; do not import from another test file).
+Build app.ocr_results by hand like tests/test_region_ocr_button.py does.
+Do not replace _redraw_overlays, _update_selections_ui, _update_viewer,
+commit_edit or the break_marks functions with fakes: they are under test.
+Find controls through the real control tree (rects_layer.controls,
+highlight_layer.controls, selections_list.controls[i].content.controls ...).
+
+### `tests/test_break_marks.py`
+
+    1. add_break_marks("a\nb\nc") == "a" + M + "\nb" + M + "\nc"   (M = BREAK_MARK)
+    2. add_break_marks("a\r\nb") == "a" + M + "\nb"
+    3. strip_break_marks(add_break_marks(x)) == x for
+       x in ["", "abc", "a\nb", "a\n\nb\n", "先生が\n轉んだ"]
+    4. strip_break_marks("a" + M + "b" + M + "\nc") == "ab\nc"
+    5. add_break_marks(None) == "" and strip_break_marks(None) == ""
+    6. BREAK_MARK == "\U0001F534"
+
+### `tests/test_viewer_task54.py` -- through the real viewer
+
+Zoom (A). Rect "2" with bbox (100, 200, 300, 400) (add a dummy rect "1"
+first, or restore() both), app.ocr_results = [] , call
+_update_selections_ui(); s0 = app.zoom_scale.
+
+    7.  app.zoom_in(None): the blue border Container of rect "2" in
+        rects_layer.controls has left == approx(100*s0*1.2),
+        top == approx(200*s0*1.2), width == approx(200*s0*1.2)
+    8.  then app.zoom_out(None): back to approx(100*s0) etc.;
+        then app.fit(None): equals 100*app.zoom_scale etc.
+    9.  rect "2" is being edited (app.editing_region_id = "2",
+        _update_selections_ui()); take the TextField object from the row;
+        app.zoom_in(None); the SAME TextField object (identity) is still in
+        that row and selections_list.controls are the same objects
+    10. app._update_viewer() with an UNCHANGED zoom_scale: rects_layer.controls[0]
+        is the same object as before (nothing redrawn)
+
+Region 1 (B). ocr_results: line P inside rect "1" only, line Q inside both
+rect "1" (whole page) and rect "2".
+
+    11. highlight_layer.controls has exactly 1 control, at Q's display
+        position; rects_layer still has rect "1"'s border Container and a
+        label whose text is "Region 1"; the right-panel row of Region 1
+        still shows P's and Q's text
+    12. with rects "2" and "3" only (no rect "1"), every filtered line of
+        both is highlighted (count equals the number of their lines)
+
+Layout (C).
+
+    13. for every row: row.content.controls[0] is an ft.Row with wrap True
+        and exactly 2 controls; controls[0] is an ft.Text starting with the
+        rect's label; controls[1] is an ft.Row whose controls are all
+        IconButtons and whose tooltips include "Edit", "右から変換",
+        "この枠だけOCR", "Delete"
+
+Break marks (D). app.edits["2"] = "あ\nい\nう", app.editing_region_id = "2",
+_update_selections_ui().
+
+    14. the TextField value == "あ" + M + "\nい" + M + "\nう" and the header
+        text contains "[改行 2]"
+    15. set tf.value = "あ" + M + "\nいう" and call tf.on_change(e) (e: a
+        simple object with control=tf and data=tf.value) -> header contains
+        "[改行 1]"; then tf.value = "あ" + M + "\nい\nう\nえ", on_change ->
+        "[改行 3]"; the TextField object is still the same one in the row
+        and tf.value was not changed by the handler
+    16. tf.value = "あ" + M + "\nい" + M + "うえ"; press Save through the
+        Save IconButton's on_click -> app.edits["2"] == "あ\nいうえ";
+        M is in no value of app.edits; reload the saved work state the way
+        tests/test_region_ocr_button.py test_14_persistence does and assert
+        M appears nowhere in it
+    17. the same through tf.on_submit(e) -> same result as 16
+    18. change tf.value, press Cancel -> app.edits["2"] is still "あ\nい\nう"
+    19. after saving, the non-editing ft.Text of row "2" shows "あ\nいうえ"
+        (no M) and the header contains "[改行 1]"
+
+Use exact values. If you cannot reach a control through the real tree, do
+NOT assert on an internal variable instead: report what you found.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these four files only:
+
+    custom_gui/break_marks.py           (new)
+    custom_gui/app.py                   (DoD-2 to DoD-5 only)
+    tests/test_break_marks.py           (new)
+    tests/test_viewer_task54.py         (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/viewer.py  custom_gui/region_stats.py  custom_gui/form_export.py
+    and every other file under custom_gui/
+    every existing file under tests/
+    requirements.txt  pyproject.toml  custom_gui/requirements-custom.txt
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**  work/**
+    any file at the repository root (no report.txt, no notes: put your report
+    in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short          exactly the four paths above, nothing else
+    grep -n "1F534" custom_gui/app.py      must find nothing (the mark lives
+                                           only in break_marks.py)
+    grep -c "selections_lock" custom_gui/app.py   must be 8 or more (7 today)
+    grep -n "_update_selections_ui" inside _update_viewer   must find nothing
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. master currently has 339 tests (collected 2026-10-04). Run the suite
+  on master BEFORE your change and report the count; after it, that count
+  plus your new tests, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the seven below: break the code, show the FAILING output,
+restore it, show it green.
+
+    (i)    remove the redraw from _update_viewer             -> case 7 must fail
+    (ii)   call _update_selections_ui there instead          -> case 9 must fail
+    (iii)  redraw even when the scale did not change         -> case 10 must fail
+    (iv)   drop the rect_id "1" rule                         -> case 11 must fail
+    (v)    remove wrap=True from the header Row              -> case 13 must fail
+    (vi)   store new_text without strip_break_marks          -> case 16 must fail
+    (vii)  do not set tf.on_change                           -> case 15 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+  Moving the image-side drawing code into _redraw_overlays (DoD-2) is the
+  only move allowed; keep that code otherwise identical.
+- You start from `master`.
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the seven injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. how you reached the border Container, the highlights, the header text,
+       the TextField and the Save button
+    5. anything you chose differently from this order, and why
