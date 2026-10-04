@@ -531,7 +531,7 @@ cd C:\Users\user\ndlocr-lite-custom
       （2026-10-03 承認者のご判断・案A）。結果は「編集済み」の文字になり、人が確かめる。
       効いた条件: 既存の試験全通・行の入る枠の文字は不変／141号 p36 の2枠で「先生が轉んだので……」
       「北正夫」／押していない枠の書き出しは今と同じ（空）。
-- [ ] **Task 54: 確認ビューアの直し（ズームで枠がずれる／Region 1 の塗り／ボタンの行／改行の赤い印）** 2026-10-04 発注
+- [ ] **Task 54: 確認ビューアの直し（ズームで枠がずれる／Region 1 の塗り／ボタンの行／改行の赤い印）** 2026-10-04 発注・検収済み（a19c76a・350 本全通・破壊 9/9）・マージ待ち
       AGENTS §8.7。承認者が 141号の画面確認で挙げた 4 点と追加 1 点（10-04 計画をご承認・改行は案乙）。
       効いた条件: Zoom In・Zoom Out・Fit の後に枠が「元座標×新倍率」／Region 1 の行は塗らず枠と文字は残る／
       編集欄を保存した文字と保存ファイルに印 🔴 が 0 件。試験 339 本＋新規、破壊試験 7/7。
@@ -627,3 +627,10 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
 - 未確認: 142号（68 ページ）が見開きの決まり（35 行）に合うか
 - 片付けの候補（承認を得てから）: 直下の report.txt（Jules が置いた・git 外）、統合ブランチ integration/task-51-52・integration/task-53
 - 経緯は karte_web STATUS §115、日報は DEVELOPMENT_LOG.md の 2026-10-03
+
+## 2026-10-04 17:xx 時点の状態（締め）
+
+- 明朝の最初の一手: Task 54 のご判断（案甲＝画面で確かめてから master へ／案乙＝先に master）。画面で見る所: Zoom In 2 回で枠が黄緑に重なったまま／右の一覧でボタンが見出しの下の行／編集を開くと改行の前に 🔴、改行を消すと [改行 N] が減る
+- 画面で試すには `git checkout integration/task-54b` してからビューアを起動する（いまは master）
+- 片付けの候補（承認を得てから）: 直下の fix_app_revised.py・patch_app_proper.py・patch_test_task54.py・report.txt、統合ブランチ integration/task-51-52・task-53・task-54
+- 経緯は karte_web STATUS §116、日報は DEVELOPMENT_LOG.md の 2026-10-04
