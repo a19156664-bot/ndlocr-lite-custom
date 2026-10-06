@@ -61,6 +61,7 @@ class SelectableImageViewer(ImageViewer):
 
         # New state variables for per-image state
         self.image_states = {}
+        self.hidden_regions = {}
         
         container, edits, mark = self._load_persisted_state(image_src)
         
@@ -291,6 +292,9 @@ class SelectableImageViewer(ImageViewer):
         ], expand=True)
 
 
+
+    def _hidden_ids(self):
+        return self.hidden_regions.setdefault(self.image_src, set())
 
     def did_mount(self):
         super().did_mount()
@@ -1295,8 +1299,9 @@ class SelectableImageViewer(ImageViewer):
         if self.mode_state.current != "SELECT":
             return
             
+        visible_rects = [r for r in self.selection_container.get_all() if str(r.rect_id) not in self._hidden_ids()]
         rid = find_region_at_point(e.local_x, e.local_y, 
-                                   self.selection_container.get_all(),
+                                   visible_rects,
                                    self.zoom_scale, self.offset_x, self.offset_y)
         if rid is None:
             return
@@ -1315,6 +1320,8 @@ class SelectableImageViewer(ImageViewer):
         all_rects = self.selection_container.get_all()
 
         for rect in all_rects:
+            if str(rect.rect_id) in self._hidden_ids():
+                continue
             x1, y1, x2, y2 = rect.bbox
             dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, 0.0, 0.0)
             dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, 0.0, 0.0)
@@ -1361,6 +1368,29 @@ class SelectableImageViewer(ImageViewer):
                     )
                     self.highlight_layer.controls.append(highlight)
         self._overlay_scale = self.zoom_scale
+
+    def toggle_region_visible(self, rid, button=None):
+        with self.selections_lock:
+            srid = str(rid)
+            hidden = self._hidden_ids()
+            if srid in hidden:
+                hidden.remove(srid)
+            else:
+                hidden.add(srid)
+            
+            self._redraw_overlays()
+            
+            if self.highlight_layer.page:
+                self.highlight_layer.update()
+            if self.rects_layer.page:
+                self.rects_layer.update()
+                
+            if button is not None:
+                is_hidden = srid in hidden
+                button.icon = ft.Icons.VISIBILITY_OFF if is_hidden else ft.Icons.VISIBILITY
+                button.tooltip = "画像の枠を表示" if is_hidden else "画像の枠を隠す"
+                if button.page:
+                    button.update()
 
     def _update_selections_ui(self):
         with self.selections_lock:
@@ -1479,10 +1509,17 @@ class SelectableImageViewer(ImageViewer):
                 else:
                     content_area = ft.Text(display_text, selectable=True)
                 
+                is_hidden = str(rect.rect_id) in self._hidden_ids()
+                
                 buttons = [
                     ft.IconButton(icon=ft.Icons.EDIT, tooltip="Edit", on_click=edit_rect),
                     ft.IconButton(icon=ft.Icons.SWAP_HORIZ, tooltip="右から変換", on_click=rtl_rect),
-                    ft.IconButton(icon=ft.Icons.DOCUMENT_SCANNER, tooltip="この枠だけOCR", on_click=lambda e, rid=rect.rect_id: self.start_region_ocr(rid))
+                    ft.IconButton(icon=ft.Icons.DOCUMENT_SCANNER, tooltip="この枠だけOCR", on_click=lambda e, rid=rect.rect_id: self.start_region_ocr(rid)),
+                    ft.IconButton(
+                        icon=ft.Icons.VISIBILITY_OFF if is_hidden else ft.Icons.VISIBILITY,
+                        tooltip="画像の枠を表示" if is_hidden else "画像の枠を隠す",
+                        on_click=lambda e, rid=rect.rect_id: self.toggle_region_visible(rid, e.control)
+                    )
                 ]
                 if has_edit:
                     buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
