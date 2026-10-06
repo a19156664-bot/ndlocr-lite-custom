@@ -22,6 +22,7 @@ from custom_gui.region_stats import count_line_breaks
 from custom_gui.page_marks import MARK_AD, MARK_COVER, mark_line, append_mark_line
 from custom_gui.mark_detector import load_image, detect_marks, detect_page_mark
 from custom_gui.mark_profile import current_mark_color, page_mark_enabled
+from custom_gui.break_marks import add_break_marks, strip_break_marks
 
 class OcrState(Enum):
     IDLE = auto()
@@ -1307,6 +1308,60 @@ class SelectableImageViewer(ImageViewer):
         self._update_selections_ui()
         self._update_inline_editor()
 
+    def _redraw_overlays(self):
+        self.rects_layer.controls.clear()
+        self.highlight_layer.controls.clear()
+
+        all_rects = self.selection_container.get_all()
+
+        for rect in all_rects:
+            x1, y1, x2, y2 = rect.bbox
+            dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, 0.0, 0.0)
+            dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, 0.0, 0.0)
+
+            w = dx2 - dx1
+            h = dy2 - dy1
+
+            drawn_rect = ft.Container(
+                border=ft.border.all(2, ft.Colors.BLUE),
+                bgcolor=ft.Colors.TRANSPARENT,
+                left=dx1,
+                top=dy1,
+                width=w,
+                height=h
+            )
+            self.rects_layer.controls.append(drawn_rect)
+
+            label_height = 20.0  # Estimated height of the label
+            label_left, label_top = calculate_label_position(dx1, dy1, label_height)
+
+            label_container = ft.Container(
+                content=ft.Text(rect.label, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, size=14),
+                bgcolor=ft.Colors.with_opacity(0.7, ft.Colors.BLUE),
+                padding=ft.padding.symmetric(horizontal=4, vertical=2),
+                border_radius=2,
+                left=label_left,
+                top=label_top,
+            )
+            self.rects_layer.controls.append(label_container)
+
+            if str(rect.rect_id) != "1" or current_mark_color() != "lime":
+                filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
+                for line in filtered_lines:
+                    lx1, ly1, lx2, ly2 = line["bbox"]
+                    ldx1, ldy1 = original_to_display(lx1, ly1, self.zoom_scale, 0.0, 0.0)
+                    ldx2, ldy2 = original_to_display(lx2, ly2, self.zoom_scale, 0.0, 0.0)
+                
+                    highlight = ft.Container(
+                        bgcolor=ft.Colors.with_opacity(0.4, ft.Colors.YELLOW),
+                        left=ldx1,
+                        top=ldy1,
+                        width=ldx2 - ldx1,
+                        height=ldy2 - ldy1
+                    )
+                    self.highlight_layer.controls.append(highlight)
+        self._overlay_scale = self.zoom_scale
+
     def _update_selections_ui(self):
         with self.selections_lock:
             if hasattr(self, 'mark_label'):
@@ -1324,9 +1379,7 @@ class SelectableImageViewer(ImageViewer):
             self.inline_editor_layer.left = self.offset_x
             self.inline_editor_layer.top = self.offset_y
             
-            # Update drawn rectangles
-            self.rects_layer.controls.clear()
-            self.highlight_layer.controls.clear()
+            self._redraw_overlays()
             self.selections_list.controls.clear()
         
             all_rects = self.selection_container.get_all()
@@ -1337,54 +1390,8 @@ class SelectableImageViewer(ImageViewer):
             
             for rect in all_rects:
                 x1, y1, x2, y2 = rect.bbox
-                dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, 0.0, 0.0)
-                dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, 0.0, 0.0)
-            
-                w = dx2 - dx1
-                h = dy2 - dy1
-            
-                drawn_rect = ft.Container(
-                    border=ft.border.all(2, ft.Colors.BLUE),
-                    bgcolor=ft.Colors.TRANSPARENT,
-                    left=dx1,
-                    top=dy1,
-                    width=w,
-                    height=h
-                )
-                self.rects_layer.controls.append(drawn_rect)
-            
-                label_height = 20.0  # Estimated height of the label
-                label_left, label_top = calculate_label_position(dx1, dy1, label_height)
-            
-                label_container = ft.Container(
-                    content=ft.Text(rect.label, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, size=14),
-                    bgcolor=ft.Colors.with_opacity(0.7, ft.Colors.BLUE),
-                    padding=ft.padding.symmetric(horizontal=4, vertical=2),
-                    border_radius=2,
-                    left=label_left,
-                    top=label_top,
-                )
-                self.rects_layer.controls.append(label_container)
-            
-                # 抽出対象の行をフィルタリングしてハイライト & テキスト生成
                 filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
                 extracted_text = assemble_text(filtered_lines)
-            
-                # ハイライト層に抽出行の矩形を描画
-                for line in filtered_lines:
-                    lx1, ly1, lx2, ly2 = line["bbox"]
-                    ldx1, ldy1 = original_to_display(lx1, ly1, self.zoom_scale, 0.0, 0.0)
-                    ldx2, ldy2 = original_to_display(lx2, ly2, self.zoom_scale, 0.0, 0.0)
-                
-                    # Selection Rectと区別するため黄色系の半透明塗りつぶし (borderなし)
-                    highlight = ft.Container(
-                        bgcolor=ft.Colors.with_opacity(0.4, ft.Colors.YELLOW),
-                        left=ldx1,
-                        top=ldy1,
-                        width=ldx2 - ldx1,
-                        height=ldy2 - ldy1
-                    )
-                    self.highlight_layer.controls.append(highlight)
             
                 # Update list (結果パネル)
                 def delete_rect(e, rid=rect.rect_id):
@@ -1443,12 +1450,22 @@ class SelectableImageViewer(ImageViewer):
                 is_active = (self.active_region_id == rect.rect_id)
                 is_editing = (self.editing_region_id == rect.rect_id)
 
+                n_breaks = count_line_breaks(display_text)
+                header_text = ft.Text(f"{rect.label}{label_suffix} [改行 {n_breaks}]:", weight=ft.FontWeight.BOLD)
+
                 if is_editing:
+                    def on_change_handler(e, ht=header_text, label=rect.label, suffix=label_suffix):
+                        n = count_line_breaks(strip_break_marks(e.control.value))
+                        ht.value = f"{label}{suffix} [改行 {n}]:"
+                        if ht.page:
+                            ht.update()
+
                     tf = ft.TextField(
-                        value=display_text,
+                        value=add_break_marks(display_text),
                         multiline=True,
                         shift_enter=True,
-                        autofocus=True
+                        autofocus=True,
+                        on_change=on_change_handler
                     )
                     tf.on_submit = lambda e, rid=rect.rect_id, t=tf: commit_edit(e, rid, t)
                     
@@ -1471,12 +1488,11 @@ class SelectableImageViewer(ImageViewer):
                     buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
                 buttons.append(ft.IconButton(icon=ft.Icons.DELETE, tooltip="Delete", on_click=delete_rect))
 
-                n_breaks = count_line_breaks(display_text)
                 item_content = ft.Column([
                     ft.Row([
-                        ft.Text(f"{rect.label}{label_suffix} [改行 {n_breaks}]:", weight=ft.FontWeight.BOLD),
+                        header_text,
                         ft.Row(buttons, spacing=0)
-                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True),
                     content_area
                 ])
             
@@ -1625,7 +1641,7 @@ class SelectableImageViewer(ImageViewer):
 
     def commit_edit(self, rid, new_text):
         with self.selections_lock:
-            self.edits[rid] = new_text
+            self.edits[rid] = strip_break_marks(new_text)
             if self.editing_region_id == rid:
                 self.editing_region_id = None
         self._update_selections_ui()
@@ -1661,6 +1677,16 @@ class SelectableImageViewer(ImageViewer):
                 self.rects_layer.update()
             if getattr(self.inline_editor_layer, 'page', None):
                 self.inline_editor_layer.update()
+
+        if getattr(self, "_overlay_scale", None) is not None and getattr(self, "_overlay_scale") != self.zoom_scale:
+            with self.selections_lock:
+                if getattr(self, "_overlay_scale", None) is not None and getattr(self, "_overlay_scale") != self.zoom_scale:
+                    self._redraw_overlays()
+                    if getattr(self, 'page', None):
+                        if getattr(self.highlight_layer, 'page', None):
+                            self.highlight_layer.update()
+                        if getattr(self.rects_layer, 'page', None):
+                            self.rects_layer.update()
 
 def main(page: ft.Page):
     from PIL import Image
