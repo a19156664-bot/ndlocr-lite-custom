@@ -639,3 +639,12 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
 - 画面で試すには `git checkout integration/task-54b` してからビューアを起動する（いまは master）
 - 片付けの候補（承認を得てから）: 直下の fix_app_revised.py・patch_app_proper.py・patch_test_task54.py・report.txt、統合ブランチ integration/task-51-52・task-53・task-54
 - 経緯は karte_web STATUS §116、日報は DEVELOPMENT_LOG.md の 2026-10-04
+
+## 2026-10-06 23:xx 時点の状態（締め）
+
+- Task 54 は画面の 4 点を承認者が確認し、master へ（53a651f）・push 済み
+- Task 55（目のボタン）は integration/task-55（1393e1d）。試験 351 本全通・破壊 6/6・検算係 7/7。画面確認とマージは承認待ち
+- 明朝の最初の一手: `git checkout integration/task-55` → ビューアを起動（141号）→ 承認者に p5 で確かめていただく（Region 4 の行の目を押すと枠・札・塗りが消え Region 8 が読める／次のページへ行って戻っても消えたまま／もう一度押すと戻る）→「マージ可」でマージと push
+- 試験の穴（直していない）: test_viewer_task55.py の場合 3 は id(リスト) を比べており作り直しを見分けない（同じ壊し方は場合 10 が捕まえる）。既存の試験が直下の .ndlocr_cache/dummy.work.json に保存状態を残し、別の試験に漏れる（Jules の「8 個」の原因）
+- 片付けの候補（承認を得てから）: 上の 10-04 の候補に integration/task-54b を足す
+- 経緯は karte_web STATUS §117
