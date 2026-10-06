@@ -1,0 +1,224 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 55: Show / hide one region's box on the image (an eye button per row)
+================================================================================
+
+## 1. Purpose and background
+
+The approver checked issue 141 page 5 in the viewer on 2026-10-06. Region 4
+(a heading) was found by the mark reader. Region 8 had been missed, so the
+approver drew it by hand. Region 8 sits just above-left of Region 4, and the
+blue "Region 4" label (drawn above the top-left corner of every box, 70 %
+opaque blue, app.py _redraw_overlays) and Region 4's yellow line highlights
+lie on top of Region 8's text. The approver cannot proof-read Region 8.
+
+The approver decided (2026-10-06):
+
+  - Each row of the right panel gets one eye button. Pressing it hides THAT
+    region's blue border, its label and its yellow line highlights on the
+    image. Pressing it again shows them again.
+  - Hiding is DISPLAY ONLY. The region still exists: its row stays in the
+    right panel with its text, it is still saved, and it is still exported
+    (Excel / CSV) exactly as today.
+  - The hidden state is NOT saved. It is remembered per page while the viewer
+    runs (go to another page and come back: still hidden). A new viewer
+    (restart) starts with everything shown.
+
+## 2. Contract
+
+### DoD-1 -- per-page hidden set (app.py, SelectableImageViewer)
+
+1. In __init__, right after `self.image_states = {}`, add
+       self.hidden_regions = {}      # image path -> set of rect_id (str)
+   Do NOT add a key to the image_states dicts: a launcher outside this
+   repository builds image_states entries itself with exactly the six keys
+   selections / ocr_state / ocr_results / ocr_error / edits / mark.
+2. Add a method
+       def _hidden_ids(self):
+           return self.hidden_regions.setdefault(self.image_src, set())
+   The key is the current page's image path (self.image_src).
+3. The hidden set is never written to disk. _persist_work_state,
+   _load_persisted_state, custom_gui/work_state.py and the export are NOT
+   changed.
+
+### DoD-2 -- the image side skips hidden regions (app.py, _redraw_overlays)
+
+At the top of the `for rect in all_rects:` loop in _redraw_overlays:
+if str(rect.rect_id) is in self._hidden_ids(), `continue` (no border, no
+label, no highlight for that rect). Everything else in _redraw_overlays stays
+exactly as it is (including the Region 1 / lime rule from Task 54).
+Because zoom (_update_viewer), page switch and every rebuild go through
+_redraw_overlays, a hidden region stays hidden through all of them.
+
+### DoD-3 -- the eye button (app.py, _update_selections_ui, right panel)
+
+1. In the `buttons = [...]` list of each row, insert ONE IconButton right
+   after the "この枠だけOCR" button and before the optional RESTORE button and
+   the DELETE button. So the order is:
+       Edit, 右から変換, この枠だけOCR, <eye>, [Revert to OCR], Delete
+2. When the rect is shown:  icon=ft.Icons.VISIBILITY,
+                            tooltip="画像の枠を隠す"
+   When the rect is hidden: icon=ft.Icons.VISIBILITY_OFF,
+                            tooltip="画像の枠を表示"
+3. on_click calls a new method
+       def toggle_region_visible(self, rid, button=None):
+   which does, all inside ONE `with self.selections_lock:` block:
+     - add rid to self._hidden_ids() if absent, remove it if present
+     - self._redraw_overlays()
+     - update self.highlight_layer and self.rects_layer the way
+       _update_selections_ui does (only when they have a page)
+     - if button is not None: set button.icon and button.tooltip to the new
+       state (DoD-3.2) and call button.update() if button.page
+   It must NOT call _update_selections_ui (that rebuilds the right panel and
+   would destroy a TextField the user is typing in another row), and must NOT
+   call _persist_work_state.
+   The on_click lambda passes the clicked button: e.g.
+       on_click=lambda e, rid=rect.rect_id: self.toggle_region_visible(rid, e.control)
+4. Do NOT change the tree shape of the row. Existing tests read
+   row.content.controls[0] as an ft.Row with exactly 2 controls
+   [header ft.Text, ft.Row(buttons)] (wrap=True from Task 54). The new button
+   goes INSIDE the buttons Row. The ListView width stays 300.
+
+### DoD-4 -- a hidden region cannot be tapped on the image (app.py, _on_tap_up)
+
+In _on_tap_up, pass find_region_at_point only the rects that are NOT in
+self._hidden_ids() (instead of self.selection_container.get_all()). Nothing
+else in _on_tap_up changes. Reason: the approver hides Region 4 to work on
+Region 8 underneath; a tap there must not open the invisible Region 4.
+
+Nothing else in app.py changes. Do not touch delete_rect, rtl_rect,
+restore_rect, start_region_ocr, commit_edit, _update_viewer, the inline
+editor, the export, the label text format, or custom_gui/selection.py.
+
+## 3. Tests you must write (one new file; do not modify any existing test)
+
+New file `tests/test_viewer_task55.py`. Copy the dummy_page fixture and the
+get_app helper from tests/test_viewer_task54.py into your file (do not import
+from another test file). Build app.ocr_results by hand. Do not replace
+_redraw_overlays, _update_selections_ui, toggle_region_visible, _hidden_ids,
+_on_tap_up or find_region_at_point with fakes: they are under test. Reach
+controls through the real tree (rects_layer.controls, highlight_layer.controls,
+selections_list.controls[i].content.controls[0].controls[1].controls ...).
+Find the eye button by its tooltip, not by its index.
+
+Setup S: restore rects "2" bbox (100, 200, 300, 400) and "3" bbox
+(500, 600, 700, 800); ocr_results = one line inside rect "2" and one line
+inside rect "3"; call _update_selections_ui(); s = app.zoom_scale.
+Baseline under S: rects_layer has 4 controls (2 borders + 2 labels),
+highlight_layer has 2.
+
+    1. Under S, in row "2" the buttons' tooltips are, in order,
+       ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "Delete"];
+       the eye button's icon is ft.Icons.VISIBILITY.
+    2. Press row "2"'s eye button through its on_click (e: a simple object
+       with control=<that button>). Then: rects_layer has exactly 2 controls,
+       the border at left == approx(500*s), top == approx(600*s) and a label
+       whose text is "Region 3"; highlight_layer has exactly 1 control, at
+       rect "3"'s line; the same button object now has icon
+       ft.Icons.VISIBILITY_OFF and tooltip "画像の枠を表示"; row "2" still
+       shows its line's text.
+    3. After 2, selections_list.controls are the SAME objects (identity, `is`)
+       as before the press (the panel was not rebuilt).
+    4. Press it again: back to 4 and 2 controls, icon VISIBILITY, tooltip
+       "画像の枠を隠す".
+    5. Hide "2", then app.zoom_in(None): rects_layer still has only rect "3"'s
+       border (at approx(500*s*1.2)) and label.
+    6. Not saved: call app._persist_work_state() and read the saved work state
+       the way tests/test_region_ocr_button.py test_14_persistence does,
+       BEFORE hiding and AFTER hiding "2" (call _persist_work_state again);
+       the two loaded results are equal, and app.edits is unchanged.
+    7. Per page: make two small PNG files in tmp_path (PIL, e.g. 50x50),
+       open the viewer on the first (or _switch_image to it), apply S, hide
+       "2". _switch_image to the second, restore a rect "2" there, call
+       _update_selections_ui(): rect "2"'s border IS drawn on page two.
+       _switch_image back to the first: rect "2" is still hidden there.
+    8. Restart: a NEW viewer instance on the same image path after 7 has
+       app.hidden_regions == {} after construction, and rect "2" is drawn.
+    9. Tap: restore rects "2" (100, 200, 300, 400) and "4" (0, 0, 900, 900)
+       ("4" contains "2"). Tap the display point of the centre of "2"
+       (use original_to_display with app.zoom_scale, app.offset_x,
+       app.offset_y; app.mode_state.current must be "SELECT"; call
+       app._on_tap_up(e) with e having local_x, local_y). Shown: active
+       region becomes "2". With "2" hidden: active region becomes "4".
+    10. Typing is kept: app.editing_region_id = "3", _update_selections_ui();
+        take row "3"'s TextField, set tf.value = "途中の入力"; press row "2"'s
+        eye button. The SAME TextField object is still in row "3" and its
+        value is still "途中の入力".
+
+Use exact values. If you cannot reach a control through the real tree, do
+NOT assert on an internal variable instead: report what you found.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these two files only:
+
+    custom_gui/app.py                   (DoD-1 to DoD-4 only)
+    tests/test_viewer_task55.py         (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/work_state.py  custom_gui/selection.py  custom_gui/viewer.py
+    custom_gui/form_export.py  custom_gui/break_marks.py
+    and every other file under custom_gui/
+    every existing file under tests/
+    requirements.txt  pyproject.toml  custom_gui/requirements-custom.txt
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**  work/**
+    any file at the repository root (no report.txt, no fix_*.py, no patch_*.py,
+    no notes: put your report in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the two paths above, nothing else
+    grep -c "selections_lock" custom_gui/app.py   must be 9 or more (8 today)
+    inside toggle_region_visible: no "_update_selections_ui" and no
+                                  "_persist_work_state"
+    grep -n "hidden" custom_gui/work_state.py     must find nothing
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. master currently has 350 tests (2026-10-06, `pytest tests`). Run the
+  suite on master BEFORE your change and report the count; after it, that
+  count plus your new tests, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the six below: break the code, show the FAILING output,
+restore it, show it green.
+
+    (i)    remove the `continue` for hidden rects in _redraw_overlays -> case 2 must fail
+    (ii)   call _update_selections_ui inside toggle_region_visible    -> case 3 or 10 must fail
+    (iii)  key the hidden set by nothing (one set for all pages)      -> case 7 must fail
+    (iv)   make hidden_regions a class attribute shared by instances  -> case 8 must fail
+    (v)    pass all rects to find_region_at_point in _on_tap_up        -> case 9 must fail
+    (vi)   do not change the button's icon/tooltip in the toggle       -> case 2 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- You start from `master` (it contains Task 54: _redraw_overlays exists).
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the six injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. how you reached the eye button, the border Container, the label, the
+       highlights and the TextField
+    5. anything you chose differently from this order, and why
