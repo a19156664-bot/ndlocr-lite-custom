@@ -1,0 +1,159 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 57: After a page switch, put the image back at 0 like the box layers
+================================================================================
+
+This order is Task 57 in .nightly/ROADMAP.md (AGENTS.md section 8.10).
+
+## 1. Purpose and background
+
+In the check viewer, after the user drags the page in Pan mode and then goes
+to another page, the new page's image is drawn shifted while the blue boxes
+are drawn at the normal place. The approver saw it on issue 141 pages 11 and
+12 on 2026-10-07. It also happens on code from before Task 56.
+
+Cause (custom_gui/app.py, SelectableImageViewer):
+
+  - _on_pan_update (PAN branch) moves self.offset_x / self.offset_y and writes
+    them to self.image_control.left/top AND to highlight_layer, rects_layer
+    and inline_editor_layer .left/.top. Image and layers move together.
+  - _switch_image sets `self.offset_x = 0.0` and `self.offset_y = 0.0`
+    (about line 854), and _update_selections_ui later writes the offsets to
+    the three layers. But nothing writes them to self.image_control.left/top.
+    So the image keeps the old Pan position and the layers go back to 0.
+
+The commander measured it on master (2026-10-07, inside a pytest test, using
+the harness of tests/test_persistence.py): Pan from (50,50) to (10,20), then
+_switch_image to a second image:
+
+    image_control.left/top   -40.0 / -30.0
+    offset_x / offset_y        0.0 /   0.0
+    rects_layer.left/top       0.0 /   0.0
+    highlight_layer.left/top   0.0 /   0.0
+
+A box drawn in this state is computed with offset 0, while the user sees the
+image shifted, so it would be saved over different text. The approver decided
+(2026-10-07) to fix it.
+
+## 2. Contract
+
+### DoD-1 -- the only code change (custom_gui/app.py, _switch_image)
+
+Right after the two existing lines
+
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+
+add exactly these two lines:
+
+        self.image_control.left = self.offset_x
+        self.image_control.top = self.offset_y
+
+Nothing else changes. Do NOT change fit / zoom_in / zoom_out (custom_gui/
+viewer.py), _on_pan_update, _update_selections_ui, _update_viewer,
+_redraw_overlays, launch_viewer.py, or how Pan works. Do not call update()
+in the new lines (the existing code already updates after them).
+
+## 3. Tests you must write (one new file; do not modify any existing test)
+
+New file `tests/test_viewer_task57.py`. Copy the `real_images` and
+`dummy_page` fixtures, the `create_app` helper and the event style of
+`draw_rect` from tests/test_persistence.py into your file (do not import
+from another test file). Write your own `pan(app, x1, y1, x2, y2)` helper in
+the same style: app.mode_state.set_mode("PAN"), then _on_pan_start with
+{"lx": x1, "ly": y1}, _on_pan_update with {"lx": x2, "ly": y2, "dx": x2-x1,
+"dy": y2-y1}, _on_pan_end with "{}". Do not replace _switch_image,
+_on_pan_update or _update_selections_ui with fakes: they are under test.
+
+    1. Precondition: create_app on image 1, pan(app, 50, 50, 10, 20). Then
+       image_control.left == -40.0, image_control.top == -30.0,
+       offset_x == -40.0, offset_y == -30.0, rects_layer.left == -40.0,
+       rects_layer.top == -30.0.
+    2. After 1, app._switch_image(image 2). Then ALL of these are exactly 0.0:
+       image_control.left, image_control.top, offset_x, offset_y,
+       highlight_layer.left, highlight_layer.top, rects_layer.left,
+       rects_layer.top, inline_editor_layer.left, inline_editor_layer.top.
+    3. After 2, app._switch_image(image 1) (back to the first page):
+       image_control.left == 0.0 and image_control.top == 0.0 and
+       rects_layer.left == 0.0 (the old Pan position is not restored).
+    4. After 2, pan(app, 50, 50, 30, 40) on image 2: image_control.left ==
+       -20.0, image_control.top == -10.0, and image_control.left ==
+       rects_layer.left, image_control.top == rects_layer.top.
+    5. After 2 (a fresh app is fine: repeat 1 and 2), draw a box with the
+       draw_rect style from (10, 10) to (60, 60) in SELECT mode. The new
+       rect's bbox equals the one you get when you do the same draw_rect on
+       a fresh app that never panned (compare the two bboxes, approx 1e-6).
+       Also at that moment image_control.left == app.offset_x.
+
+Use exact values.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these two files only:
+
+    custom_gui/app.py             (DoD-1 only: two added lines)
+    tests/test_viewer_task57.py   (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/viewer.py  custom_gui/selection.py  custom_gui/web_image.py
+    and every other file under custom_gui/
+    launch_viewer.py
+    every existing file under tests/
+    requirements.txt  pyproject.toml  custom_gui/requirements-custom.txt
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**  work/**
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no notes: put your report in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the two paths above, nothing else
+    git diff custom_gui/app.py   exactly 2 added lines, 0 removed lines
+    grep -c "self.image_control.left = self.offset_x" custom_gui/app.py
+                              must be 2 (the existing one in _on_pan_update
+                              plus the new one)
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. master currently has 354 tests (2026-10-07, `pytest tests`). Run the
+  suite on master BEFORE your change and report the count; after it, that
+  count plus your new tests, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the three below: break the code, show the FAILING output
+(with --tb=line so the failing line number shows), restore it, show it green.
+
+    (i)   remove the two new lines                                -> case 2 must fail
+    (ii)  keep only the .left line (remove the .top line)          -> case 2 must fail
+    (iii) move the two new lines ABOVE `self.offset_x = 0.0`       -> case 2 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- You start from `master` (it contains Task 56).
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the three injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. the full diff of custom_gui/app.py
+    5. anything you chose differently from this order, and why
