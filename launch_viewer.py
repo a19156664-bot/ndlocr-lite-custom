@@ -7,7 +7,6 @@ Antigravity Universal Historical Document Viewer
 import os
 import sys
 import json
-import base64
 from pathlib import Path
 from PIL import Image
 
@@ -21,6 +20,7 @@ import pypdfium2
 from custom_gui.app import SelectableImageViewer, OcrState
 from custom_gui.image_sequence import ImageSequence
 from custom_gui.pdf_loader import ensure_page_rendered
+from custom_gui.web_image import show_web_image
 
 # 引数またはデフォルトから号数を決定
 target_num = "141"
@@ -60,12 +60,6 @@ for i in range(page_count):
 # Pre-render page 1
 print(f"Ensuring Page 1 is rendered at 300 DPI for {ISSUE_NAME}...", flush=True)
 ensure_page_rendered(png_paths[0], PDF_PATH, 0)
-
-def encode_base64(path):
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
-    return None
 
 def normalize_page_ocr(page_lines, source_name):
     results = []
@@ -147,10 +141,7 @@ class BrowserImageViewer(SelectableImageViewer):
 
         super()._switch_image(path)
         
-        b64 = encode_base64(path)
-        if b64:
-            self.image_control.src_base64 = b64
-            self.image_control.src = None
+        show_web_image(self.image_control, path, CACHE_DIR)
             
         self.update_layout(self.frame_w, self.frame_h)
         self._update_selections_ui()
@@ -176,10 +167,7 @@ def main(page: ft.Page):
         expand=True
     )
     
-    b64 = encode_base64(p0)
-    if b64:
-        viewer.image_control.src_base64 = b64
-        viewer.image_control.src = None
+    show_web_image(viewer.image_control, p0, CACHE_DIR)
 
     def on_resize(e):
         viewer.update_layout(page.width, page.height)
@@ -206,4 +194,4 @@ if __name__ == "__main__":
     print(f"  ブラウザ (Edge / Chrome) で自動的に開きます。", flush=True)
     print(f"  URL: http://127.0.0.1:8555")
     print("=" * 65, flush=True)
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8555)
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8555, assets_dir=CACHE_DIR)
