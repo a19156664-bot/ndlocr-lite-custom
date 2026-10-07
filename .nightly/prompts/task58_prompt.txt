@@ -1,0 +1,231 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 58: A batch tool that runs "mark reading + region OCR" on pages nobody
+         has touched yet, before the human inspection
+================================================================================
+
+This order is Task 58 in .nightly/ROADMAP.md (AGENTS.md section 8.11).
+
+## 1. Purpose and background
+
+The approver inspects issue 141 in the check viewer (launch_viewer.py). On
+each page they press "マーク読取" (custom_gui/app.py _on_marks_to_rects_click:
+it adds one box per lime marker found by custom_gui.mark_detector.detect_marks)
+and then, for each of those boxes, "この枠だけOCR" (app.py start_region_ocr:
+custom_gui.region_ocr.region_ocr_text crops the box from the page PNG and
+OCRs only the crop; the result is stored in the page's edits under the
+box id). The region OCR reads much better than the full-page OCR, but one box
+takes about 2 minutes (measured 104-150 s for 3 boxes on 2026-10-07).
+
+The approver decided (2026-10-07) to do this in advance with a batch tool
+that runs at night while the viewer is closed. It must never touch a page the
+human has already worked on, and must not run while the viewer is open
+(the viewer keeps every page's state in memory and would overwrite the
+batch's files later).
+
+## 2. Contract
+
+### DoD-1 -- new module custom_gui/batch_region_ocr.py
+
+Command line (argparse):
+
+    python -m custom_gui.batch_region_ocr --issue 141
+        [--pages 18-52]          # 1-based, inclusive; "N" or "N-M"; default all
+        [--base <dir>]           # repository root; default: the parent folder
+                                 #   of the custom_gui package
+        [--viewer-port 8555]     # default 8555
+
+Paths, all under --base, exactly as launch_viewer.py builds them:
+
+    PDF       work/国際寫眞新聞_{issue}号.pdf
+    RAW JSON  work/output/01_raw_ocr/国際寫眞新聞_{issue}号.json
+    PNG dir   work/cache_images/{issue}号/
+    PNG name  国際寫眞新聞_{issue}号_p{n:04d}.png   (n = 1-based page number)
+
+Expose `def main(argv=None) -> int` and call it under
+`if __name__ == "__main__": sys.exit(main())`.
+
+Steps of main, in this order:
+
+1. Viewer guard. Try to open a TCP connection to 127.0.0.1:<viewer-port>
+   (socket.create_connection with timeout 1.0). If it connects, print
+   "ビューアが開いています（127.0.0.1:<port>）。閉じてから走らせてください。"
+   and return 2 WITHOUT writing anything. Put this check in a function
+   `viewer_is_open(port: int) -> bool`.
+2. If the PDF or the RAW JSON does not exist: print which, return 1.
+3. Page count = len(json["contents"]) of the RAW JSON. --pages outside
+   1..count: print and return 1.
+4. For each selected page n (1-based; page_index = n - 1), in ascending order:
+   a. If os.path.exists(work_state.work_path_for(PDF, page_index)): print
+      "p{n}: 保存あり → 飛ばす" and continue. (Never read or rewrite it.)
+   b. png = PNG dir / PNG name. Call
+      pdf_loader.ensure_page_rendered(png, PDF, page_index).
+   c. regions = mark_detector.detect_marks(mark_detector.load_image(png),
+      color="lime"). (Section 8.3: issues 141-145 use lime only; no page mark,
+      no orange.)
+   d. If regions is empty: print "p{n}: マーク 0 → 書かない" and continue
+      (no file is written; the viewer will make its Region 1 as today).
+   e. Build the boxes with a real custom_gui.selection.SelectionContainer:
+      - first, Region 1 exactly as launch_viewer.py does when a page has no
+        saved state: from that page's RAW JSON lines (normalized the same
+        way as launch_viewer.normalize_page_ocr), bbox =
+        (max(0.0, min_x - 15.0), max(0.0, min_y - 15.0), max_x + 15.0,
+        max_y + 15.0) over all lines' x1/x2/y1/y2. If the page has no lines,
+        do not add Region 1.
+      - then container.add(region.bbox) for each region, in the order
+        detect_marks returned them.
+      (So with lines, the ids are "1" for Region 1 and "2".."k+1" for marks.)
+   f. For each MARK box (not Region 1), in id order:
+      text = region_ocr.region_ocr_text(png, box.bbox)
+      If text is non-empty: edits[box.rect_id] = text. If it is "" (no
+      text found): no entry. If it raises: print the error for that box,
+      leave no entry, and continue with the next box.
+      Print one line per box as it finishes:
+      "p{n} 枠{rect_id}: {seconds:.0f} 秒 {lines} 行" (flush=True).
+   g. Just before saving, check os.path.exists(work_path_for(PDF,
+      page_index)) AGAIN. If it now exists (someone saved meanwhile): print
+      "p{n}: 途中で保存された → 書かない" and continue without writing.
+   h. work_state.save_work_state(PDF, container.get_all(), edits, None,
+      page_index=page_index).
+5. Print a summary line: pages written / skipped (saved) / no marks /
+   boxes OCR'd / boxes with no text / errors. Return 0.
+
+Rules:
+- Call the dependencies through their modules (mark_detector.detect_marks,
+  region_ocr.region_ocr_text, pdf_loader.ensure_page_rendered,
+  work_state.save_work_state), i.e. `from custom_gui import region_ocr` and
+  `region_ocr.region_ocr_text(...)`, so a test can replace the attribute on
+  the module.
+- region_ocr_text runs src/ocr.py with a relative path, so the tool must be
+  started from the repository root. At the start of main (after the viewer
+  guard), if os.path.exists("src/ocr.py") is False, print that and return 3.
+- Do not import flet. Do not import launch_viewer (it runs at import time).
+- Do not change any other file.
+
+## 3. Tests you must write (one new file; do not modify any existing test)
+
+New file `tests/test_batch_region_ocr.py`. Build a fake repository layout in
+tmp_path (--base tmp_path):
+
+    work/国際寫眞新聞_141号.pdf           any bytes (work_state only stats it)
+    work/output/01_raw_ocr/国際寫眞新聞_141号.json
+        {"contents": [page1_lines, page2_lines, page3_lines, page4_lines]}
+        each line like {"boundingBox": [[x1,y1],[x2,y1],[x2,y2],[x1,y2]],
+        "text": "...", "isVertical": "true", "confidence": 0.9}
+    work/cache_images/141号/国際寫眞新聞_141号_p0001.png .. p0004.png
+        small real PNGs (PIL), so ensure_page_rendered returns early
+
+Replace ONLY these module attributes with fakes (monkeypatch.setattr on the
+module object): mark_detector.detect_marks (return MarkRegion lists you
+choose per PNG path), region_ocr.region_ocr_text (return text you choose,
+record the calls), and batch_region_ocr.viewer_is_open where a case says so.
+Do not replace work_state, SelectionContainer or save_work_state. Read the
+results back with work_state.load_work_state(PDF, page_index) and by reading
+the JSON file.
+
+    1. Saved page untouched: before running, save a state for page 2 with
+       work_state.save_work_state; remember the file bytes. After main():
+       the bytes are identical, and region_ocr_text was never called with
+       page 2's PNG.
+    2. New page with marks (page 1, lines spanning x 100..300, y 50..400;
+       detect_marks returns two regions (500,600,700,800) "box" and
+       (10,20,90,880) "line"; region_ocr_text returns "A\nB" then "C"):
+       load_work_state(PDF, 0) has rects with ids ["1","2","3"], rect "1"
+       bbox == (85.0, 35.0, 315.0, 415.0), rect "2" bbox == (500,600,700,800),
+       rect "3" bbox == (10,20,90,880); edits == {"2": "A\nB", "3": "C"};
+       mark is None.
+    3. Empty OCR text: like 2 but region_ocr_text returns "" for the second
+       region: edits has key "2" only.
+    4. OCR error: region_ocr_text raises RuntimeError for the first region:
+       edits has key "3" only, main() returns 0.
+    5. No marks (page 3): detect_marks returns []: no state file exists for
+       page 3 after main().
+    6. Viewer open: open a real listening socket on 127.0.0.1 port 0, pass
+       its port as --viewer-port: main() returns 2, no state file was
+       created for any page, and region_ocr_text was never called.
+    7. --pages: with --pages 3-4 only pages 3 and 4 are looked at
+       (detect_marks is never called with page 1's PNG).
+    8. Saved meanwhile: the fake region_ocr_text, on its first call for
+       page 4, writes page 4's state with work_state.save_work_state
+       (simulating the viewer). After main(): page 4's file is exactly what
+       the fake wrote (bytes), i.e. the tool did not overwrite it.
+    9. Region 1 rule: a page whose RAW JSON line list is empty but with one
+       mark: ids are ["1"] for the mark (no Region 1), and edits key is "1".
+
+Run main with argv lists (no subprocess). Use monkeypatch.chdir to the real
+repository root if needed so that "src/ocr.py" exists. Use exact values.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these two files only:
+
+    custom_gui/batch_region_ocr.py      (new)
+    tests/test_batch_region_ocr.py      (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/app.py  custom_gui/region_ocr.py  custom_gui/mark_detector.py
+    custom_gui/work_state.py  custom_gui/selection.py  custom_gui/pdf_loader.py
+    custom_gui/batch_ocr.py  and every other existing file under custom_gui/
+    launch_viewer.py
+    every existing file under tests/
+    requirements.txt  pyproject.toml  custom_gui/requirements-custom.txt
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**  work/**
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no notes: put your report in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short     exactly the two paths above, nothing else
+    grep -n "import flet" custom_gui/batch_region_ocr.py      nothing
+    grep -n "launch_viewer" custom_gui/batch_region_ocr.py    nothing
+    grep -c "work_path_for" custom_gui/batch_region_ocr.py    2 or more
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. master currently has 354 tests (2026-10-07, `pytest tests`). Run the
+  suite on master BEFORE your change and report the count; after it, that
+  count plus your new tests, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+- Do NOT run the real OCR (src/ocr.py) in the tests.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the five below: break the code, show the FAILING output
+(with --tb=line so the failing line number shows), restore it, show it green.
+
+    (i)   remove the "保存あり → 飛ばす" check (step 4a)        -> case 1 must fail
+    (ii)  do not add Region 1 (step 4e)                        -> case 2 must fail
+    (iii) store edits[rid] = text also when text is ""         -> case 3 must fail
+    (iv)  skip the viewer guard (step 1)                       -> case 6 must fail
+    (v)   remove the second existence check (step 4g)          -> case 8 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option (the one that writes less), write down why in your report, and keep
+  going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- You start from `master`.
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the five injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. the full text of custom_gui/batch_region_ocr.py
+    5. anything you chose differently from this order, and why

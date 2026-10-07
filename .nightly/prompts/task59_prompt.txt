@@ -1,0 +1,241 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 59: While "この枠だけOCR" runs, colour that row; when it finishes,
+         rebuild ONLY that row (do not rebuild the whole right panel)
+================================================================================
+
+This order is Task 59 in .nightly/ROADMAP.md (AGENTS.md section 8.12).
+
+## 1. Purpose and background
+
+custom_gui/app.py, SelectableImageViewer. Each row of the right panel
+(self.selections_list) is an ft.Container built in _update_selections_ui
+(item = ft.Container(content=ft.Column([ft.Row([header_text,
+ft.Row(buttons)]), content_area]), border=..., on_click=make_active)).
+
+The "この枠だけOCR" button calls start_region_ocr(rid). It runs
+region_ocr_text in a thread (self.page.run_thread(_run_region_ocr)). When the
+thread finishes with text, it sets self.edits[rid] and calls
+self._update_selections_ui(), which CLEARS and REBUILDS every row.
+
+Two problems found by the approver on 2026-10-07:
+
+  A. If the user is typing in ANOTHER row's edit field (editing_region_id),
+     the rebuild throws that TextField away and builds a new one from the
+     saved text: what the user was typing is lost and the edit looks closed.
+  B. While OCR runs, the only sign is the status text "範囲OCR中…", which
+     shows only the latest one. The user cannot see which rows are running.
+
+The approver decided (2026-10-07):
+
+  - While a row's region OCR runs, that row's Container has
+    bgcolor = ft.Colors.ORANGE_100 (only the right-panel row; the blue box
+    on the image does not change). The green active border stays as it is.
+  - When the OCR ends in ANY way (text, no text, error, the page was
+    switched, the rect was deleted), the colour goes away.
+  - When it finishes with text, rebuild ONLY that row and put it in place of
+    the old row object in self.selections_list.controls. The other rows stay
+    the SAME objects (so a TextField being typed in survives).
+  - If that same row is being edited (editing_region_id == rid) when the OCR
+    finishes, do NOT apply the OCR text (protect what the user types); set
+    the status to "編集中の枠なので範囲OCRの結果を入れませんでした".
+
+## 2. Contract
+
+### DoD-1 -- one row builder (pure extraction)
+
+Move the body of the `for rect in all_rects:` loop of _update_selections_ui
+into a new method
+
+    def _build_row(self, rect) -> ft.Container
+
+that returns the row Container, and make the loop call it and append the
+result. The row must be built EXACTLY as today (same tree shape, same
+buttons in the same order, same tooltips, same closures). Existing tests read
+row.content.controls[0] as an ft.Row with exactly 2 controls
+[header ft.Text, ft.Row(buttons)]; keep that. The only addition in
+_build_row is DoD-2.3.
+
+### DoD-2 -- running set and colour
+
+1. In __init__, next to self.hidden_regions, add
+       self.region_ocr_running = {}   # image path -> set of rect_id (str)
+   and a helper
+       def _running_ids(self, path=None):
+           return self.region_ocr_running.setdefault(path or self.image_src, set())
+   It is never saved to disk.
+2. In start_region_ocr, after the existing early returns (edited row, rect
+   not found) and before starting the thread: add str(rid) to
+   self._running_ids(saved_image_src), and colour the CURRENT row object for
+   rid (find it in self.selections_list.controls; see DoD-3.1) with
+   bgcolor = ft.Colors.ORANGE_100 and call .update() on it if it has a page.
+   Do NOT call _update_selections_ui here.
+3. In _build_row: bgcolor = ft.Colors.ORANGE_100 if str(rect.rect_id) is in
+   self._running_ids() else None. (So a rebuild for any other reason keeps
+   the colour.)
+
+### DoD-3 -- finishing touches only one row
+
+1. Add
+       def _row_index(self, rid) -> int | None
+   that returns the index in self.selections_list.controls of the row built
+   for rid. Keep a dict self._row_by_id = {rect_id: row_container} filled by
+   _update_selections_ui (cleared at the start of each rebuild) and by the
+   new _refresh_row; _row_index looks the object up with `is`.
+2. Add
+       def _refresh_row(self, rid)
+   which, inside `with self.selections_lock:`, builds a new row with
+   _build_row(rect) for the current rect with that id, replaces the old
+   object at _row_index(rid) in self.selections_list.controls, updates
+   self._row_by_id, and calls self.selections_list.update() if it has a page.
+   If the rect no longer exists or no row is found, do nothing.
+3. Rewrite the inner function _run_region_ocr in start_region_ocr so that:
+   - everything after starting is inside try/finally; the finally removes
+     str(rid) from self._running_ids(saved_image_src) (discard), and if
+     self.image_src == saved_image_src it repaints that row's colour
+     (find the row with _row_index; set bgcolor None; update if it has a page).
+   - On success (text non-empty, rect still exists, same page):
+       if self.editing_region_id == rid: do not set edits; status
+         "編集中の枠なので範囲OCRの結果を入れませんでした".
+       else: self.edits[rid] = text; status "範囲OCR: {n} 行" as today;
+         then self._refresh_row(rid) (NOT _update_selections_ui),
+         self._persist_work_state(), self._update_status().
+   - "" (no text), exception, page switched, rect deleted: same messages and
+     behaviour as today, except that _update_selections_ui is NOT called.
+   Note the order: the colour is cleared in finally, AFTER _refresh_row, and
+   _refresh_row builds the row while rid is still in the running set; so the
+   finally must set bgcolor None on the NEW row object.
+
+Nothing else changes: not commit_edit, delete_rect, rtl_rect, restore_rect,
+toggle_region_visible, _redraw_overlays, the export, work_state, the eye
+button, the Region 1 rules, launch_viewer.py.
+
+## 3. Tests you must write (one new file; do not modify any existing test)
+
+New file `tests/test_viewer_task59.py`. Copy the harness of
+tests/test_region_ocr_button.py (the dummy_page fixture and
+get_prepared_app, and what they import from tests/test_marks_to_rects.py)
+into your file, BUT give your dummy page a run_thread that STORES the target
+instead of running it:
+
+    self.pending = []
+    def run_thread(self, target, *args, **kwargs):
+        self.pending.append((target, args, kwargs))
+
+and run it in the test with `t, a, k = page.pending.pop(0); t(*a, **k)`.
+Replace region_ocr_text where app.py reads it:
+monkeypatch.setattr("custom_gui.app.region_ocr_text", fake). Do not replace
+_update_selections_ui, _build_row, _refresh_row, start_region_ocr or the
+ft controls. Reach rows through app.selections_list.controls and find a row
+by its header text (it starts with "Region 2" / "Region 3"). Find buttons by
+tooltip.
+
+Setup S: get_prepared_app (rows "2" (0,0,60,30) and "3" (80,80,200,200)).
+
+    1. Press row "3"'s この枠だけOCR (call app.start_region_ocr("3")). Before
+       running the thread: row "3".bgcolor == ft.Colors.ORANGE_100, row
+       "2".bgcolor is None, and selections_list.controls are the SAME
+       objects (is) as before the press.
+    2. Run the thread (fake returns "X\nY"): edits["3"] == "X\nY"; the row
+       now at row "3"'s index shows "X\nY", its header contains "(edited)"
+       and "[改行 1]", it has a button with tooltip "Revert to OCR", and its
+       bgcolor is None; row "2" is the SAME object as before.
+    3. Typing kept: app.editing_region_id = "2"; app._update_selections_ui();
+       take row "2"'s TextField; tf.value = "途中の入力"; start_region_ocr("3");
+       run the thread (fake returns "Z"). The SAME TextField object is still
+       in row "2" with value "途中の入力", app.editing_region_id == "2",
+       edits["3"] == "Z".
+    4. No text: fake returns "": row "3".bgcolor is None afterwards, "3" not
+       in edits, status contains "文字が見つかりません", rows are the same
+       objects as before the press.
+    5. Error: fake raises RuntimeError("boom"): row "3".bgcolor is None,
+       status contains "範囲OCR失敗", app.region_ocr_running[path] == set().
+    6. Page switched: make a second PNG (PIL) and press on page one, then
+       app._switch_image(<second>), run the thread: no edits on page one's
+       state for "3"; app.region_ocr_running[<page one path>] == set();
+       _switch_image back to page one: row "3".bgcolor is None.
+    7. Rebuild while running: press "3", then app._update_selections_ui()
+       (new row objects) -> the new row "3".bgcolor == ft.Colors.ORANGE_100.
+       Then run the thread -> bgcolor None.
+    8. Same row being edited: app.editing_region_id = "3";
+       _update_selections_ui(); tf = row "3"'s TextField; tf.value = "途中";
+       start_region_ocr("3"); run the thread (fake returns "Q"): "3" not in
+       edits, the SAME tf object still in row "3" with value "途中", status
+       contains "編集中の枠", row "3".bgcolor is None.
+
+Use exact values. If you cannot reach a control through the real tree, do
+NOT assert on an internal variable instead: report what you found.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these two files only:
+
+    custom_gui/app.py               (DoD-1 to DoD-3 only)
+    tests/test_viewer_task59.py     (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/region_ocr.py  custom_gui/work_state.py  custom_gui/viewer.py
+    custom_gui/selection.py  and every other file under custom_gui/
+    launch_viewer.py
+    every existing file under tests/
+    requirements.txt  pyproject.toml  custom_gui/requirements-custom.txt
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**  work/**
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no notes: put your report in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the two paths above, nothing else
+    inside start_region_ocr (including _run_region_ocr): no call to
+                              _update_selections_ui
+    grep -c "ORANGE_100" custom_gui/app.py     2 or more
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Run the suite on master BEFORE your change and report the count
+  (it is 355 or more on 2026-10-07); after it, that count plus your new
+  tests, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the five below: break the code, show the FAILING output
+(with --tb=line so the failing line number shows), restore it, show it green.
+
+    (i)   call self._update_selections_ui() instead of self._refresh_row(rid)
+          on success                                         -> case 3 must fail
+    (ii)  remove the discard from the finally                -> case 5 must fail
+    (iii) in _build_row always use bgcolor None              -> case 7 must fail
+    (iv)  apply the OCR text even when editing_region_id == rid -> case 8 must fail
+    (v)   do not colour the row in start_region_ocr          -> case 1 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for
+  (DoD-1 is the only extraction allowed).
+- You start from `master`.
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the five injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. the full diff of custom_gui/app.py
+    5. anything you chose differently from this order, and why
