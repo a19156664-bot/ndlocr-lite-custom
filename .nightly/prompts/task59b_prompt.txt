@@ -212,9 +212,12 @@ Checks the commander will run on your patch:
     grep -c "def _row_index" custom_gui/app.py      exactly 1
     grep -c "header_text = ft.Text" custom_gui/app.py   exactly 1 (it moved
                               into _build_row; it is not copied)
-    git diff --stat custom_gui/app.py   at most 220 insertions in total
-                              (moving the loop body shows as removed +
-                              added lines; the new code is small)
+    git diff --stat custom_gui/app.py   at most 260 insertions in total
+                              (the loop body is 125 lines on master; moving
+                              it with less indentation shows as removed +
+                              added lines; the new code is about 80 lines)
+                              [corrected from 220 by a message to the
+                              session after the order was sent]
     grep -c "^def test_" tests/test_viewer_task59.py   8 or more
     inside start_region_ocr (including _run_region_ocr): no call to
                               _update_selections_ui
