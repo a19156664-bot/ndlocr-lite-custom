@@ -5,6 +5,8 @@ management files. Deleting or editing them is an immediate rejection.
 Task 56: Give the page image to the browser as a URL, not as base64
 ================================================================================
 
+This order is Task 56 in .nightly/ROADMAP.md (AGENTS.md section 8.9).
+
 ## 1. Purpose and background
 
 The approver runs the check viewer with `launch_viewer.py` (repository root,
