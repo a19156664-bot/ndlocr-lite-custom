@@ -1,0 +1,200 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 56: Give the page image to the browser as a URL, not as base64
+================================================================================
+
+## 1. Purpose and background
+
+The approver runs the check viewer with `launch_viewer.py` (repository root,
+added to git on 2026-10-07 in commit e600426; before that it was outside git).
+It opens the viewer in a web browser (ft.AppView.WEB_BROWSER, port 8555).
+
+Zoom In / Zoom Out and dragging the page in Pan mode are very slow. The
+commander measured it on 2026-10-07 (issue 141 page 1, Edge, width 1920,
+3 runs each, Playwright):
+
+    Zoom In/Out (18 clicks)  the browser freezes 617-750 ms per click
+    Pan, 40 mouse moves      52-56 seconds (each move freezes 1.1-1.25 s)
+
+Cause: launch_viewer.py reads each page PNG (2253x3074, 5-12 MB) and puts it
+into ft.Image as base64 (7-16 MB of text). Every time the image's position or
+size changes, the browser decodes the whole picture again.
+
+The commander tried, outside the repository, a copy of launch_viewer.py that
+sets `image_control.src = "/" + <file name>` and `src_base64 = None`, and
+passes `assets_dir=CACHE_DIR` to ft.app. Same measurement:
+
+    Zoom In/Out (18 clicks)  freezes 17-114 ms
+    Pan, 40 mouse moves      2.0-2.4 seconds (freezes 18-33 ms)
+
+and the boxes still follow the image after zoom and pan. The file names
+contain Japanese (e.g. 国際寫眞新聞_141号_p0001.png); the raw, NOT
+percent-encoded name worked. This task makes that change properly, with tests.
+
+## 2. Contract
+
+### DoD-1 -- new module custom_gui/web_image.py
+
+    import os
+
+    def web_image_src(image_path: str, assets_dir: str) -> str:
+        """URL path of image_path inside assets_dir, for ft.Image.src in the
+        web viewer: "/" + the relative path with "/" separators.
+        Raises ValueError if image_path is not inside assets_dir."""
+
+    def show_web_image(image_control, image_path: str, assets_dir: str) -> None:
+        """Show image_path in image_control through the URL:
+        image_control.src = web_image_src(image_path, assets_dir)
+        image_control.src_base64 = None"""
+
+Rules:
+- Use os.path.abspath on both arguments, then os.path.relpath; replace
+  os.sep with "/". If the relative path is "." or ".." or starts with ".." + os.sep,
+  or the two paths are on different drives (relpath raises ValueError),
+  raise ValueError.
+- Do NOT percent-encode (urllib.parse.quote). Keep the characters as they are
+  (this is what was measured to work).
+- show_web_image does not call update(); the caller already does.
+- No other functions, no flet import needed.
+
+### DoD-2 -- launch_viewer.py uses it (only these changes)
+
+1. Add `from custom_gui.web_image import show_web_image` next to the other
+   custom_gui imports.
+2. In BrowserImageViewer._switch_image, replace the 4 lines
+
+        b64 = encode_base64(path)
+        if b64:
+            self.image_control.src_base64 = b64
+            self.image_control.src = None
+
+   with
+
+        show_web_image(self.image_control, path, CACHE_DIR)
+
+   It must stay AFTER `super()._switch_image(path)` and AFTER the
+   ensure_page_rendered call at the top of the method (the PNG of a page
+   opened for the first time is drawn there; the URL must point to a file
+   that exists).
+3. In main(), replace the 4 lines
+
+        b64 = encode_base64(p0)
+        if b64:
+            viewer.image_control.src_base64 = b64
+            viewer.image_control.src = None
+
+   with
+
+        show_web_image(viewer.image_control, p0, CACHE_DIR)
+
+4. The last line becomes
+
+        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8555, assets_dir=CACHE_DIR)
+
+   (port and view unchanged).
+5. Delete the now unused `def encode_base64(path)` and `import base64`.
+6. Nothing else in launch_viewer.py changes: not BASE_DIR, not the Region 1
+   auto box, not normalize_page_ocr, not the printed messages, not the window
+   size, not the keyboard handler.
+
+## 3. Tests you must write (one new file; do not modify any existing test)
+
+New file `tests/test_web_image.py`. Do NOT import launch_viewer.py: it runs
+at import time and exits when work/ is missing (it is missing in your
+environment). Read it as text and parse it with the `ast` module instead.
+
+    1. web_image_src(os.path.join(d, "国際寫眞新聞_141号_p0005.png"), d)
+       == "/国際寫眞新聞_141号_p0005.png"   (d = str(tmp_path))
+    2. web_image_src(os.path.join(d, "sub", "x.png"), d) == "/sub/x.png"
+    3. web_image_src(os.path.join(d, "..", "y.png"), d) raises ValueError;
+       web_image_src(d, d) raises ValueError (the folder itself is not a file
+       inside it: relpath is ".")
+    4. img = ft.Image(src_base64="AAAA"); show_web_image(img, os.path.join(d,
+       "a.png"), d): img.src == "/a.png" and img.src_base64 in (None, "")
+       (flet 0.27.6 returns "" when src_base64 was set to None; measured)
+    5. launch_viewer.py (ast): the names `base64` and `encode_base64` do not
+       appear anywhere (no Import of base64, no FunctionDef, no Name, no Call);
+       no assignment target is an attribute named `src_base64`.
+    6. launch_viewer.py (ast): show_web_image is called exactly 2 times, once
+       inside the method _switch_image of class BrowserImageViewer and once
+       inside the function main; in both calls the third argument is the Name
+       CACHE_DIR.
+    7. launch_viewer.py (ast): inside BrowserImageViewer._switch_image, the
+       call to ensure_page_rendered and the call super()._switch_image come
+       BEFORE the call to show_web_image (compare line numbers).
+    8. launch_viewer.py (ast): the ft.app call has keywords port=8555,
+       view=ft.AppView.WEB_BROWSER and assets_dir=Name("CACHE_DIR").
+
+Use exact values.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these three files only:
+
+    custom_gui/web_image.py      (new)
+    tests/test_web_image.py      (new)
+    launch_viewer.py             (DoD-2 only)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/app.py  custom_gui/viewer.py  custom_gui/pdf_loader.py
+    and every other existing file under custom_gui/
+    every existing file under tests/
+    requirements.txt  pyproject.toml  custom_gui/requirements-custom.txt
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  src/**  scripts/**  resource/**  jpg/**  work/**
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no notes: put your report in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short                       exactly the three paths above
+    grep -c "base64" launch_viewer.py        must be 0
+    grep -c "show_web_image" launch_viewer.py  must be 3 (import + 2 calls)
+    grep -n "assets_dir=CACHE_DIR" launch_viewer.py   one line, the ft.app call
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. master currently has 351 tests (2026-10-07, `pytest tests`). Run the
+  suite on master BEFORE your change and report the count; after it, that
+  count plus your new tests, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the five below: break the code, show the FAILING output
+(with --tb=line so the failing line number shows), restore it, show it green.
+
+    (i)   show_web_image does not set src_base64 to None      -> case 4 must fail
+    (ii)  web_image_src returns the absolute file path         -> case 1 must fail
+    (iii) put the old base64 lines back into _switch_image     -> case 5 must fail
+    (iv)  remove assets_dir=CACHE_DIR from ft.app              -> case 8 must fail
+    (v)   move show_web_image above ensure_page_rendered       -> case 7 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do not refactor, reformat, or "improve" anything the task did not ask for.
+- You start from `master` (it contains launch_viewer.py since e600426).
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the five injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. the full diff of launch_viewer.py
+    5. anything you chose differently from this order, and why
