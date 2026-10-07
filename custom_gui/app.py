@@ -853,6 +853,8 @@ class SelectableImageViewer(ImageViewer):
         
         self.offset_x = 0.0
         self.offset_y = 0.0
+        self.image_control.left = self.offset_x
+        self.image_control.top = self.offset_y
         
         if self.ocr_error:
             self.image_container.content = ft.Text(self.ocr_error, color=ft.Colors.RED, weight=ft.FontWeight.BOLD)
