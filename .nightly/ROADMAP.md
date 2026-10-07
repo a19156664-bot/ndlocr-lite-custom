@@ -545,6 +545,9 @@ cd C:\Users\user\ndlocr-lite-custom
       AGENTS §8.9。launch_viewer.py を git に入れて（e600426）Jules に直させる（案甲）。
       効いた条件（141号 p1・Edge・幅 1920・Playwright で測る）: Zoom In/Out 18 回で 1 回ごとの固まりが 150 ms 以下（今 617〜750）／
       Pan 40 歩が 5 秒以下（今 52〜56 秒）／既存 351 本全通・拡大と Pan のあとも枠が付いてくる・未描画のページも画像が出る。
+      15:29 Completed。検収（integration/task-56・848f0f8）: 3 ファイルのみ・354 本全通・破壊 5/5・検算係 6/6。
+      測定（3 回ずつ）: ズームの固まり 17〜83 ms／Pan 40 歩 1.75〜1.90 秒／拡大で枠が付いてくる・未描画の p12 も画像が出る。
+      試験の穴（直していない）: _switch_image から ensure_page_rendered を丸ごと消しても鳴らない（test_web_image.py 90 行の if で比べ自体が飛ぶ）。
 - [ ] ~~Ctrl+ホイールのズーム~~ — flet 0.27.6 では実現不可を確認済み（採用しない）
 
 ## 📐 実地試験素材の実測（2026-08-27・指揮官が計測）
