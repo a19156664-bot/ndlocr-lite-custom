@@ -7,6 +7,7 @@ import custom_gui.work_state as work_state
 from custom_gui.region_filter import filter_lines_by_region
 from custom_gui.text_assembler import assemble_text
 from custom_gui.region_ocr import region_ocr_text
+from custom_gui.vertical_ocr import vertical_ocr_text
 from custom_gui.exporter import build_export_rows, build_export_rows_multi, rows_to_csv_text, rows_to_txt_text
 from custom_gui.rtl import convert_right_to_left, count_rtl_lines
 import os
@@ -1575,6 +1576,10 @@ class SelectableImageViewer(ImageViewer):
                 icon=ft.Icons.VISIBILITY_OFF if is_hidden else ft.Icons.VISIBILITY,
                 tooltip="画像の枠を表示" if is_hidden else "画像の枠を隠す",
                 on_click=lambda e, rid=rect.rect_id: self.toggle_region_visible(rid, e.control)
+            ),
+            ft.IconButton(
+                icon=ft.Icons.TEXT_ROTATION_DOWN, tooltip="縦で読む",
+                on_click=lambda e, rid=rect.rect_id: self.start_region_ocr(rid, vertical=True)
             )
         ]
         if has_edit:
@@ -1602,7 +1607,7 @@ class SelectableImageViewer(ImageViewer):
         )
         return item
 
-    def start_region_ocr(self, rid):
+    def start_region_ocr(self, rid, vertical: bool = False):
         if rid in self.edits:
             self.latest_region_info = "編集済みの枠は範囲OCRしません（元に戻してから押してください）"
             self._update_status()
@@ -1634,7 +1639,10 @@ class SelectableImageViewer(ImageViewer):
 
         def _run_region_ocr():
             try:
-                text = region_ocr_text(saved_image_src, rect.bbox)
+                if vertical:
+                    text = vertical_ocr_text(saved_image_src, rect.bbox)
+                else:
+                    text = region_ocr_text(saved_image_src, rect.bbox)
                 
                 if text == "":
                     self.latest_region_info = "範囲OCR: 文字が見つかりません"
