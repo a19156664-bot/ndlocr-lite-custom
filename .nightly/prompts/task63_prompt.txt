@@ -1,0 +1,239 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 63: "縦で読む" -- remove photos by tiles, measure the column width by
+         autocorrelation, and cut merged columns at the valleys
+================================================================================
+
+This order is Task 63 in .nightly/ROADMAP.md (AGENTS.md section 8.13).
+Only custom_gui/vertical_ocr.py changes, plus ONE NEW test file.
+
+## 1. Purpose and background
+
+custom_gui/vertical_ocr.py (Task 60, on master) reads a frame as vertical
+text: ink_mask -> text_band (drop rows whose ink ratio > PHOTO_ROW_RATIO,
+keep the longest remaining run of rows) -> split_columns (runs of x where
+the column profile is non-zero; a run wider than the "pitch" is cut into
+EQUAL parts) -> each column, right to left, to PARSEQ.
+
+It failed on 141号 p42 (2026-10-08, measured by the commander, one frame):
+  A. A photo strip at the LEFT side of the frame raised every row's ink
+     ratio above 0.35, so text_band kept only the bottom quarter of the
+     frame and each column was read only partly.
+  B. The 8 body columns are about 950 px tall; because of a slight skew and
+     punctuation, the white gaps between them are never fully empty, so the
+     8 columns were one run 233 px wide.
+The commander tried three changes in a scratch script and on p42 the whole
+article was then read correctly, while 141号 p41 stayed the same quality:
+  1. remove photos per 48x48 tile (ink ratio > 0.5) before anything else;
+  2. measure the column width (pitch) from the autocorrelation of the column
+     profile inside the WIDEST run, taking the SHORTEST strong period;
+  3. cut a merged run at the valleys (minima) of the smoothed profile near
+     the ideal cut positions, instead of equal parts.
+You implement exactly these, as below.
+
+## 2. Contract (custom_gui/vertical_ocr.py)
+
+Keep everything that exists (ink_mask, text_band, get_recognizer,
+vertical_ocr_text, PHOTO_ROW_RATIO, MIN_RUN, MARGIN) and their behaviour,
+except where this section changes it.
+
+### DoD-1 -- new constants (names and values exactly)
+
+    TILE = 48              # px, side of a photo tile
+    TILE_RATIO = 0.5       # a tile with a larger ink ratio is "photo"
+    PITCH_MIN = 15         # px, shortest column width searched
+    PITCH_MAX = 80         # px, longest column width searched (exclusive)
+    PEAK_RATIO = 0.7       # a peak at least this fraction of the top peak is "strong"
+    SMOOTH = 5             # px, moving-average window for the column profile
+    MIN_WIDTH_RATIO = 0.4  # runs narrower than pitch * this are dropped
+
+### DoD-2 -- new function
+
+    def remove_photo_tiles(mask) -> numpy.ndarray:
+        """Return a COPY of mask where every TILE x TILE tile (from the top
+        left; the last row/column of tiles may be smaller) whose mean is
+        > TILE_RATIO is set to 0. The input is not modified."""
+
+### DoD-3 -- new function
+
+    def estimate_pitch(profile, runs) -> int:
+        """profile: 1-D float array (the smoothed column profile).
+        runs: list of (x1, x2), x2 exclusive, non-empty.
+        1. (s, e) = the widest run (first one on a tie).
+        2. If e - s < 40: return int(numpy.median([x2 - x1 for x1, x2 in runs])).
+        3. v = profile[s:e] - profile[s:e].mean()
+           lags = range(PITCH_MIN, min(PITCH_MAX, len(v) // 2))
+           If lags is empty: return e - s.
+           ac[lag] = dot(v[:-lag], v[lag:]) / (len(v) - lag)
+           top = max(ac). If top <= 0: return e - s   (no periodicity: do not split)
+        4. Return the SMALLEST lag that is a local peak
+           (ac[lag] >= ac[lag-1] and ac[lag] >= ac[lag+1], both neighbours
+           inside lags) with ac[lag] >= PEAK_RATIO * top.
+           If there is none, return the lag of top (smallest on a tie)."""
+
+### DoD-4 -- split_columns(mask) is rewritten (same signature, same return:
+list of (x1, x2), left to right)
+
+    H = mask.shape[0]; if H == 0: return []
+    prof = mask.sum(axis=0).astype(float)
+    sm = numpy.convolve(prof, numpy.ones(SMOOTH) / SMOOTH, mode="same")
+    runs = maximal runs of prof > max(2, H * 0.01), as (x1, x2) x2 exclusive,
+           keeping only runs with x2 - x1 >= MIN_RUN
+    if not runs: return []
+    p = estimate_pitch(sm, runs)
+    for each run (s, e) left to right:
+        w = e - s
+        if w < MIN_WIDTH_RATIO * p: drop it
+        n = max(1, int(round(w / p)))
+        cuts = [s]; prev = s
+        for i in 1 .. n-1:
+            ideal = s + i * w / n
+            lo = max(int(ideal - p / 3), prev + 1)
+            hi = min(int(ideal + p / 3), e - 1)
+            if hi > lo:
+                c = the x in [lo, hi] with the smallest sm[x]; on a tie, the
+                    one closest to ideal; on a further tie, the smaller x
+            else:
+                c = int(ideal)
+            cuts.append(c); prev = c
+        cuts.append(e)
+        columns += consecutive pairs of cuts
+    return columns
+
+### DoD-5 -- vertical_ocr_text
+Replace `mask = ink_mask(crop)` with
+
+    mask = remove_photo_tiles(ink_mask(crop))
+
+Everything after it stays as it is (text_band, band/img slicing,
+split_columns, right-to-left reading, MARGIN, the "taller than wide" skip,
+whitespace dropping, "\n" join).
+
+## 3. Tests
+
+The 11 tests in tests/test_vertical_ocr.py MUST still pass unchanged (in
+particular case 4: runs (0,10),(15,25),(30,60) must still give
+(30,40),(40,50),(50,60): the profile there is flat, so the tie rule picks
+the ideal positions; and case 8: a 60x20 bar has no periodicity, so it is
+not split and is skipped).
+
+New file `tests/test_vertical_ocr_task63.py` (synthetic data only; never
+load the real model, never read work/, never touch port 8555). Use the
+FakeRecognizer idea of the existing file (record crops; read a grey level
+back from the crop to know which bar it came from).
+
+    A. remove_photo_tiles: a 96x96 uint8 mask whose top-left 48x48 tile is
+       all 1 and whose bottom-left tile has exactly 25% ones -> the first
+       tile becomes all 0, the second is unchanged, every other pixel is
+       unchanged, and the input array is unchanged (compare with a copy
+       taken before the call).
+    B. Side photo: a white 300 (w) x 600 (h) BGR PNG; a black strip over
+       x 0..95, all rows (the photo); four vertical bars 12 px wide over
+       rows 50..549 at x = 120, 160, 200, 240 with grey levels 90, 60, 30, 0
+       (left to right). vertical_ocr_text(path, (0,0,300,600), pad=0,
+       recognizer=fake) calls the recognizer exactly 4 times, from the bar
+       at x=240 to the one at x=120 (right to left), and every crop is at
+       least 500 px tall.
+    C. Merged columns: a 600-row uint8 mask, width 360. Ink over all rows
+       0..599 in x 100..119 (a narrow first column, 20 px) and then five
+       30 px columns 123..152, 156..185, 189..218, 222..251, 255..284.
+       In the five 3 px gaps x 120..122, 153..155, 186..188, 219..221,
+       252..254 put ink only in rows 0..19 (low but not empty, so all six
+       columns form ONE run 100..285). split_columns returns exactly 6
+       columns, the first starts at 100, the last ends at 285, and each of
+       the 5 inner cuts lies inside its gap (cut k inside gap k).
+       (The commander checked this with a reference implementation of this
+       contract: cuts 122, 155, 188, 221, 254. Equal parts would give
+       130, 161, 192, 223, 254: four of five outside the gaps.)
+    D. estimate_pitch, shortest strong period: build a profile of length
+       400: pulses of width 26 starting every 32 px (x = 0, 32, 64, ...),
+       with heights alternating 100 and 90; runs = [(0, 400)]. The result
+       is 32 (allow 31..33). (Reference: shortest strong peak 32; the top
+       peak is 64, so injection (iii) fails this case.)
+    E. estimate_pitch, no periodicity: a flat profile (all 50.0) of length
+       120, runs = [(0, 120)] -> 120.
+    F. estimate_pitch, no wide run: runs [(0,10),(20,32),(40,54)] (all
+       narrower than 40) -> 12 (the median width).
+    G. Sliver dropped: a 600-row mask with full-height ink at x 10..16 (a
+       7 px sliver) and at x 40..69, 73..102, 106..135 (three 30 px columns
+       with fully empty 3 px gaps). split_columns does not return any column
+       inside 10..16, and returns exactly the three columns.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these two files only:
+
+    custom_gui/vertical_ocr.py           (DoD-1 to DoD-5 only)
+    tests/test_vertical_ocr_task63.py    (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    tests/test_vertical_ocr.py and every other existing file under tests/
+    custom_gui/app.py  custom_gui/region_ocr.py  custom_gui/page_states.py
+    and every other file under custom_gui/ except vertical_ocr.py
+    launch_viewer.py  src/**  requirements.txt  pyproject.toml
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  scripts/**  resource/**  jpg/**  work/**  any *.bat file
+    venv/ .venv/ or any virtual environment directory (do NOT commit one)
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no notes: put your report in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the two paths above, nothing else
+    grep -c "^def " custom_gui/vertical_ocr.py     exactly 7
+    grep -n "TILE_RATIO = 0.5" custom_gui/vertical_ocr.py   1 line
+    grep -n "PEAK_RATIO = 0.7" custom_gui/vertical_ocr.py   1 line
+    grep -c "^def test_" tests/test_vertical_ocr_task63.py  7 or more
+    git diff tests/test_vertical_ocr.py      empty
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Run the suite on master BEFORE your change and report the count
+  (it is 399 on 2026-10-08); after it, that count plus your new tests,
+  zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the five below: break the code, show the FAILING output
+(with --tb=line so the failing line number shows), restore it, show it green.
+
+    (i)   vertical_ocr_text uses ink_mask(crop) without remove_photo_tiles -> case B must fail
+    (ii)  split_columns cuts at the ideal positions (no valley search)      -> case C must fail
+    (iii) estimate_pitch returns the lag of the TOP peak                     -> case D must fail
+    (iv)  estimate_pitch without the `top <= 0` return                       -> case E or the existing case 8 must fail
+    (v)   split_columns without the MIN_WIDTH_RATIO drop                     -> case G must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Edit the files directly with your editor. Do NOT write helper or patch
+  scripts. Do NOT create a virtual environment inside the repository. If you
+  created any other file, delete it before you submit, and show
+  `git status --short` with exactly two lines.
+- tests/test_vertical_ocr_task63.py is required. A submission without it is
+  rejected.
+- You start from `master`.
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the five injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. the full diff of custom_gui/vertical_ocr.py
+    5. anything you chose differently from this order, and why
