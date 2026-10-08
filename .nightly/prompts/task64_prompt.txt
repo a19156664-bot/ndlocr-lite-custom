@@ -1,0 +1,350 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 64: Up / down buttons that move a frame one place in the right-hand
+         list of the confirmation viewer (ids and labels never change)
+================================================================================
+
+This order is Task 64 in .nightly/ROADMAP.md.
+
+## 1. Purpose and background
+
+In the confirmation viewer the right-hand list ("Selections:") shows one card
+per frame, in the order of SelectionContainer._rects. That same order is the
+order of the CSV export and of the Excel keywords (custom_gui/exporter.py
+loops over the rects in list order; custom_gui/form_export.py keeps the CSV
+order). Nothing sorts by rect_id. Today the only way to change the order is to
+delete frames and draw them again. The approver asked (2026-10-09) for an up
+and a down button on each card.
+
+Rules that must keep working:
+  - rect_id and label NEVER change when a frame moves. Corrected texts
+    (self.edits) are keyed by rect_id, and region_id "1" is dropped by the
+    Excel conversion (AGENTS.md 8.5). Only the position in the list changes.
+  - The existing title row of each card is used by many existing tests:
+    card.content is a Column; card.content.controls[0] is a Row with EXACTLY
+    two controls [header Text, Row(buttons)]; the tooltips of that button Row
+    are asserted as a whole list (tests/test_viewer_task55.py line 84,
+    tests/test_viewer_task61.py line 52, tests/test_edit_enter.py line 127);
+    card.content.controls[1] is the text / edit area. DO NOT add anything to
+    the title row or to the button Row, and do not change controls[0] or [1].
+  - The button Row is already full: 300 px list, up to 7 icons of 40 px,
+    the delete icon touches the right border. So the new buttons go on a
+    THIRD line of the card (card.content.controls[2]), small, right-aligned.
+
+## 2. Contract
+
+### DoD-1 -- custom_gui/selection.py: one new method on SelectionContainer,
+placed just before delete_by_id. Exactly this:
+
+    def move_by(self, rect_id: str, delta: int) -> bool:
+        """Move one place up (-1) or down (+1) in the list. ids and labels do not change."""
+        if delta not in (-1, 1):
+            return False
+        for i, rect in enumerate(self._rects):
+            if rect.rect_id == rect_id:
+                j = i + delta
+                if j < 0 or j >= len(self._rects):
+                    return False
+                self._rects[i], self._rects[j] = self._rects[j], self._rects[i]
+                return True
+        return False
+
+Nothing else in selection.py changes (_next_id is not touched).
+
+### DoD-2 -- custom_gui/app.py, SelectableImageViewer
+
+(a) New method, placed just before `def start_region_ocr(`. Exactly this:
+
+    def move_region(self, rid, delta: int) -> None:
+        if self.editing_region_id is not None:
+            self.latest_region_info = "編集中は順番を動かせません（保存か取消をしてから）"
+            self._update_status()
+            return
+        if not self.selection_container.move_by(rid, delta):
+            return
+        self.active_region_id = rid
+        self._update_selections_ui()
+        self._persist_work_state()
+
+(b) In _build_row, the item_content Column gets a third control. Today:
+
+        item_content = ft.Column([
+            ft.Row([
+                header_text,
+                ft.Row(buttons, spacing=0)
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True),
+            content_area
+        ])
+
+becomes:
+
+        item_content = ft.Column([
+            ft.Row([
+                header_text,
+                ft.Row(buttons, spacing=0)
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True),
+            content_area,
+            ft.Row([
+                ft.IconButton(icon=ft.Icons.ARROW_UPWARD, tooltip="上へ", icon_size=18, width=32, height=32, padding=0,
+                              on_click=lambda e, rid=rect.rect_id: self.move_region(rid, -1)),
+                ft.IconButton(icon=ft.Icons.ARROW_DOWNWARD, tooltip="下へ", icon_size=18, width=32, height=32, padding=0,
+                              on_click=lambda e, rid=rect.rect_id: self.move_region(rid, 1)),
+            ], spacing=0, alignment=ft.MainAxisAlignment.END)
+        ])
+
+Nothing else in app.py changes. Keep the file's line endings as they are.
+
+## 3. Tests you must write (one new file; do not modify any existing test)
+
+Create tests/test_viewer_task64.py with EXACTLY the content between the two
+marker lines below (the markers are not part of the file):
+
+----- BEGIN tests/test_viewer_task64.py -----
+import pytest
+import flet as ft
+from custom_gui.selection import SelectionContainer
+from custom_gui.exporter import build_export_rows
+from custom_gui.form_export import build_keywords
+from custom_gui import work_state
+from tests.test_marks_to_rects import get_app, make_clean_page
+
+
+@pytest.fixture
+def dummy_page():
+    class DummyPage:
+        def __init__(self):
+            self.controls = []
+            self.overlay = []
+            self.pending = []
+        def add(self, *args):
+            pass
+        def update(self, *args):
+            pass
+        def run_thread(self, target, *args, **kwargs):
+            self.pending.append((target, args, kwargs))
+        window_width = 800
+        window_height = 600
+        session_id = "test"
+    return DummyPage()
+
+
+def get_prepared_app(dummy_page, tmp_path):
+    app, path = get_app(dummy_page, tmp_path, make_clean_page)
+    app.ocr_results = []
+    app.selection_container.restore([])
+    for bbox in [(0, 0, 60, 30), (80, 80, 200, 200), (10, 300, 90, 400)]:
+        app.selection_container.add(bbox)
+    # ids "1","2","3"; drop "1" so the rows are Region 2, 3, 4 as in the viewer
+    app.selection_container.delete_by_id("1")
+    app.selection_container.add((5, 500, 50, 550))
+    app.edits = {"2": "二", "3": "三", "4": "四"}
+    app.image_states[str(path)]["edits"] = app.edits
+    app.editing_region_id = None
+    app._update_selections_ui()
+    return app, str(path)
+
+
+def ids(app):
+    return [r.rect_id for r in app.selection_container.get_all()]
+
+
+def move_buttons(row):
+    move_row = row.content.controls[2]
+    return move_row.controls[0], move_row.controls[1]
+
+
+def click(btn):
+    class E:
+        control = btn
+    btn.on_click(E())
+
+
+def test_1_move_by_contract():
+    c = SelectionContainer()
+    for i in range(3):
+        c.add((i, i, i + 1, i + 1))
+    before_next = c.add((9, 9, 10, 10)).rect_id   # "4"
+    c.delete_by_id("4")
+    assert [r.rect_id for r in c.get_all()] == ["1", "2", "3"]
+
+    assert c.move_by("2", -1) is True
+    assert [r.rect_id for r in c.get_all()] == ["2", "1", "3"]
+    assert [r.label for r in c.get_all()] == ["Region 2", "Region 1", "Region 3"]
+
+    assert c.move_by("2", -1) is False          # already first
+    assert c.move_by("3", 1) is False           # already last
+    assert c.move_by("9", 1) is False           # unknown id
+    assert c.move_by("1", 2) is False           # only -1 / +1
+    assert c.move_by("1", 0) is False
+    assert [r.rect_id for r in c.get_all()] == ["2", "1", "3"]
+
+    assert c.move_by("1", 1) is True
+    assert [r.rect_id for r in c.get_all()] == ["2", "3", "1"]
+    assert c.add((0, 0, 1, 1)).rect_id == str(int(before_next) + 1)   # numbering untouched
+
+
+def test_2_buttons_place_and_size(dummy_page, tmp_path):
+    app, _ = get_prepared_app(dummy_page, tmp_path)
+    for row in app.selections_list.controls:
+        col = row.content
+        assert len(col.controls) == 3
+        assert len(col.controls[0].controls) == 2               # title row unchanged
+        assert [b.tooltip for b in col.controls[0].controls[1].controls] == \
+            ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "Revert to OCR", "Delete"]
+        move_row = col.controls[2]
+        assert isinstance(move_row, ft.Row)
+        assert len(move_row.controls) == 2
+        up, down = move_row.controls
+        assert (up.icon, up.tooltip) == (ft.Icons.ARROW_UPWARD, "上へ")
+        assert (down.icon, down.tooltip) == (ft.Icons.ARROW_DOWNWARD, "下へ")
+        for b in (up, down):
+            assert b.icon_size == 18 and b.width == 32 and b.height == 32
+        assert move_row.alignment == ft.MainAxisAlignment.END
+
+
+def test_3_down_moves_row_and_keeps_text(dummy_page, tmp_path):
+    app, _ = get_prepared_app(dummy_page, tmp_path)
+    assert ids(app) == ["2", "3", "4"]
+    _, down = move_buttons(app.selections_list.controls[0])
+    click(down)
+    assert ids(app) == ["3", "2", "4"]
+    assert [r.label for r in app.selection_container.get_all()] == ["Region 3", "Region 2", "Region 4"]
+    assert app.edits == {"2": "二", "3": "三", "4": "四"}
+    row1 = app.selections_list.controls[1]
+    assert row1.content.controls[0].controls[0].value.startswith("Region 2 (edited)")
+    assert row1.content.controls[1].value == "二"
+    assert app.active_region_id == "2"
+
+
+def test_4_up_moves_row(dummy_page, tmp_path):
+    app, _ = get_prepared_app(dummy_page, tmp_path)
+    up, _ = move_buttons(app.selections_list.controls[2])
+    click(up)
+    assert ids(app) == ["2", "4", "3"]
+    assert app.active_region_id == "4"
+
+
+def test_5_move_is_saved(dummy_page, tmp_path):
+    app, path = get_prepared_app(dummy_page, tmp_path)
+    _, down = move_buttons(app.selections_list.controls[0])
+    click(down)
+    st = work_state.load_work_state(path)
+    assert st is not None
+    assert [r["rect_id"] for r in st["rects"]] == ["3", "2", "4"]
+    assert st["edits"] == {"2": "二", "3": "三", "4": "四"}
+
+
+def test_6_ends_do_nothing(dummy_page, tmp_path):
+    app, path = get_prepared_app(dummy_page, tmp_path)
+    up, _ = move_buttons(app.selections_list.controls[0])
+    click(up)
+    _, down = move_buttons(app.selections_list.controls[2])
+    click(down)
+    assert ids(app) == ["2", "3", "4"]
+    assert work_state.load_work_state(path) is None     # nothing was written
+
+
+def test_7_no_move_while_editing(dummy_page, tmp_path):
+    app, _ = get_prepared_app(dummy_page, tmp_path)
+    app.editing_region_id = "3"
+    _, down = move_buttons(app.selections_list.controls[0])
+    click(down)
+    assert ids(app) == ["2", "3", "4"]
+    assert "編集中" in app.latest_region_info
+
+
+def test_8_export_follows_list_order(dummy_page, tmp_path):
+    app, _ = get_prepared_app(dummy_page, tmp_path)
+    _, down = move_buttons(app.selections_list.controls[0])
+    click(down)
+    rows = build_export_rows("doc_p0001.png", app.selection_container.get_all(), [], edited_texts=app.edits)
+    assert [r["region_id"] for r in rows] == ["3", "2", "4"]
+    assert build_keywords(rows, 6)[0] == "【表紙】｜三｜二｜四"
+----- END tests/test_viewer_task64.py -----
+
+The file is UTF-8. If a case fails with the code of section 2, do NOT weaken
+or edit the test: stop and report what you found.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these three files only:
+
+    custom_gui/selection.py        (DoD-1 only)
+    custom_gui/app.py              (DoD-2 only)
+    tests/test_viewer_task64.py    (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    every other file under custom_gui/
+    every existing file under tests/
+    launch_viewer.py  src/**  requirements.txt  pyproject.toml
+    custom_gui/requirements-custom.txt  .nightly/**  .claude/**
+    AGENTS.md  CLAUDE.md  README.md  LICENCE  LICENCE_DEPENDENCEIES
+    and every NDL credit header
+    train/**  scripts/**  resource/**  jpg/**  work/**  any *.bat file
+    venv/ .venv/ or any virtual environment (do not commit one)
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no notes: put your report in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the three paths above, nothing else
+    git diff --stat custom_gui/selection.py   13 insertions, 0 deletions
+    git diff --stat custom_gui/app.py         at most 20 insertions, at most 1 deletion
+    grep -c "def move_by" custom_gui/selection.py        exactly 1
+    grep -c "def move_region" custom_gui/app.py          exactly 1
+    grep -c "ARROW_UPWARD" custom_gui/app.py             exactly 1
+    grep -c "ARROW_DOWNWARD" custom_gui/app.py           exactly 1
+    grep -c "^def test_" tests/test_viewer_task64.py     exactly 8
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Run the suite on master BEFORE your change and report the count
+  (it is 406 passed on 2026-10-09); after it, 414 passed, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the five below: break the code, run
+`python -m pytest tests/test_viewer_task64.py -q --tb=line`, show the FAILING
+output, restore it, show it green.
+
+    (i)   in move_by, after the swap also swap the two rect_id values back
+                                                        -> case 1 and 3 must fail
+    (ii)  in move_region, remove self._persist_work_state()  -> case 5 must fail
+    (iii) in move_region, replace the editing check with `if False:`
+                                                        -> case 7 must fail
+    (iv)  the down button calls self.move_region(rid, -1) -> case 3 must fail
+    (v)   in move_by, replace the end check by `j = j % len(self._rects)`
+                                                        -> case 1 and 6 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Edit the files directly with your editor. Do NOT write helper or patch
+  scripts. If you created any other file, delete it before you submit, and
+  show `git status --short` with exactly three lines.
+- tests/test_viewer_task64.py is required. A submission without it is
+  rejected.
+- You start from `master`.
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the five injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. the full diff of custom_gui/selection.py and custom_gui/app.py
+    5. anything you chose differently from this order, and why
