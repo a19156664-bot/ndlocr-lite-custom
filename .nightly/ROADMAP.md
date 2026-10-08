@@ -782,5 +782,10 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
   - COMPLETED → 検収（ndlocr-work3・integration/task-63 c2fd2dd）: 注文どおりの 2 ファイル（venv なし）／406 passed（399＋7）／指揮官の破壊 5/5。
     本物のモデル: p42 R2 は見出し＋本文 8 列がほぼ読めた／p41 旧 R8 は 196 字中 184 字（Task 60 版 186）
   - 承認者「マージ可」→ master へ（853787e）・406 passed（1 回）・push。使うにはビューアを開き直す
+  - 承認者「縦で読みの精度は大きく向上」（10-08）
+- 141号 検品完了 → 納品の Excel `work\国際寫眞新聞_141号_p01-52_20261008_検品完了.xlsx`（10-08 18:1x・案A の割り振り・28 行）
+  - Region 1 に人が文字を入れて落ちる頁 0／52 頁すべてに文字あり／C4（表見返し-P.0001）だけ空
+  - C3〜C30 の文字 12,338 字・■ 25 個（うち C24＝P.0040-P.0041 に 16）。検算係 5/5
+  - 作り方は scratchpad の make141_final.py（make141_all.py と同じ組み立て・出力名だけ引数）。form_export.py は号ごとの割り振りにまだ直していない
 - 保留（承認者「保留として進めて。朝の点検で」）: 一覧の枠の順番をマウスで動かす件（案甲＝つかんで引っ張る／案乙＝↑↓ボタン）。
   順番＝一覧の並び＝Excel の順。番号は付け替えない（Region 1 の決まり・直した文字は番号に結び付く）。flet 0.27.6 に ReorderableListView あり
