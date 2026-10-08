@@ -81,7 +81,7 @@ def test_task55(tmp_path, monkeypatch):
     tooltips = [c.tooltip for c in buttons_row2.controls]
     
     # 1. Check tooltips and icon
-    assert tooltips == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "Delete"]
+    assert tooltips == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "Delete"]
     eye_button_2 = buttons_row2.controls[3]
     assert eye_button_2.icon == ft.Icons.VISIBILITY
     
