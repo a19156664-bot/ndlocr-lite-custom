@@ -16,9 +16,15 @@ def main():
     num, stage, a, b = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
     assert stage in ("orient", "proof")
     src = os.path.join(BASE, "work", "proofread", f"{num}号_校正の入力.csv")
-    out = os.path.join(BASE, "work", "proofread", "sonnet", f"{num}_{stage}_p{a:03d}-{b:03d}")
+    # 5 つ目の引数（頁,枠 の CSV）があれば、その枠だけにする（③で書いた枠の④など）
+    only = None
+    if len(sys.argv) > 5:
+        only = {(int(r["頁"]), str(r["枠"])) for r in csv.DictReader(open(sys.argv[5], encoding="utf-8-sig", newline=""))}
+    tag = "" if only is None else "_" + os.path.splitext(os.path.basename(sys.argv[5]))[0]
+    out = os.path.join(BASE, "work", "proofread", "sonnet", f"{num}_{stage}_p{a:03d}-{b:03d}{tag}")
     os.makedirs(out, exist_ok=True)
-    rows = [r for r in csv.DictReader(open(src, encoding="utf-8-sig", newline="")) if a <= int(r["頁"]) <= b]
+    rows = [r for r in csv.DictReader(open(src, encoding="utf-8-sig", newline="")) if a <= int(r["頁"]) <= b
+            and (only is None or (int(r["頁"]), str(r["枠"])) in only)]
     imgs, qs = {}, []
     cap = 1000 if stage == "orient" else 2000
     for r in rows:

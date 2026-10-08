@@ -6,7 +6,7 @@
   .venv\\Scripts\\python.exe .nightly\\verify\\apply_fixes.py <号> <確認の CSV> --write    … 書く
 
 確認の CSV の列: 番号,頁,枠,入力値,正しくは（Antigravity）,確からしさ,指揮官の判定,メモ
-  置き換えるのは「指揮官の判定」が「当たり」の行だけ。
+  置き換えるのは「指揮官の判定」が「当たり」の行だけ。正しくは が「（空）」「(削除)」なら、入力値を消す。
 決まり:
   - 枠に人の直した文字（edits）が無いときは置き換えない（承認者に回す）
   - 「入力値」が枠の文字に、ちょうど 1 回あるときだけ置き換える（0 回・2 回以上は回す）
@@ -42,6 +42,9 @@ def main():
         # 指揮官が画像で決めた置き換え（重なりをまとめた・案を画像どおりに直した）があれば、そちらを使う
         old = (r.get("置き換え元") or "").strip() or r["入力値"]
         new = (r.get("置き換える文字") or "").strip() or r["正しくは（Antigravity）"]
+        # 混入を消す指摘（10-09・Sonnet の指摘で多い）: 「（空）」「(空)」「(削除)」は空に置き換える
+        if new.strip() in ("（空）", "(空)", "(削除)", "（削除）"):
+            new = ""
         if pg not in states:
             states[pg] = work_state.load_work_state(pdf, page_index=pg - 1)
         st = states[pg]
