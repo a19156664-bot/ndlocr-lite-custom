@@ -756,5 +756,11 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
 - Task 61 第1版は不採用（integration/task-61 53472cc に保存）: 既存の test_viewer_task55.py 84 行目がボタンの並び全体を確かめていて、
   足すと必ず落ちる（1 failed, 389 passed）。発注書の見落とし（目の位置 controls[3] だけを調べた）。
   → Task 61b を出し直し（Jules 16312117741246378758・task61b_prompt.txt）。84 行目の期待値に「縦で読む」を足すことだけを名指しで許した
+- 承認者「マージ：承認」（62 のマージ／61b は検収が通ればマージ／両方の後に push と bat）:
+  - Task 62 を master へ（2d8d8bd）・392 passed（1 回）。画面を立てない起動の試し（1 回ずつ）: off＝52/52 頁 DONE・結果 0・Region 1 0・次の番号 2／
+    on＝52/52・結果 52・Region 1 12（広告の頁）。本体のフォルダには何も書かれない
+  - `確認ビューア起動.bat`（git 外・控え scratchpad）: 号の後に「全体OCRを使いますか [1] 使う（既定）[2] 使わない」を足した。
+    UTF-8・CRLF のまま。分かれ道は set /p を代入に替えた写しで 4 通り確認（3,2→143 off／1,空→141 on／5,1→145 on／空,x→141 on）。
+    set /p は流し込んだ入力を受け取れない（元の bat でも同じ）ので、本物の入力の画面は承認者が次に開くときに見る
 - 保留（承認者「保留として進めて。朝の点検で」）: 一覧の枠の順番をマウスで動かす件（案甲＝つかんで引っ張る／案乙＝↑↓ボタン）。
   順番＝一覧の並び＝Excel の順。番号は付け替えない（Region 1 の決まり・直した文字は番号に結び付く）。flet 0.27.6 に ReorderableListView あり
