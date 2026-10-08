@@ -737,5 +737,8 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
 - Task 60「縦で読む」の部品 custom_gui/vertical_ocr.py を発注（承認者「発注：承認」・Jules 18289751574744511404・発注書 .nightly/prompts/task60_prompt.txt・AGENTS §8.13）
   - 新しい 2 ファイルだけ。GitHub の master が 59b の前（6540dfb）でも当たらない形にした
   - 次: Task 61 ボタンをつなぐ（push の後。59b の _build_row に足すため）
+  - 13:25 COMPLETED → 検収（ndlocr-work3・integration/task-60 7f45b8b）: 新しい 2 ファイルだけ／試験 383 passed（372＋11）／
+    指揮官の破壊 5/5／検算係 6/6。本物のモデルで p41 旧 Region 8 は、承認者が手で打った全文の ■ 以外 196 字のうち 186 字が同じ順で一致。
+    p37 の 3 枠は写真の縁を列として拾ったゴミ（〃〃〃・}}}}）が混ざる → 縦で読むは字だけを囲んだ枠に使う。master へのマージは承認待ち
 - 保留（承認者「保留として進めて。朝の点検で」）: 一覧の枠の順番をマウスで動かす件（案甲＝つかんで引っ張る／案乙＝↑↓ボタン）。
   順番＝一覧の並び＝Excel の順。番号は付け替えない（Region 1 の決まり・直した文字は番号に結び付く）。flet 0.27.6 に ReorderableListView あり
