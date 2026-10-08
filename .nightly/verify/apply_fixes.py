@@ -39,7 +39,9 @@ def main():
         if r["指揮官の判定"] != "当たり":
             continue
         pg, fr = int(r["頁"]), str(r["枠"]).replace("region", "").replace("Region", "").strip()
-        old, new = r["入力値"], r["正しくは（Antigravity）"]
+        # 指揮官が画像で決めた置き換え（重なりをまとめた・案を画像どおりに直した）があれば、そちらを使う
+        old = (r.get("置き換え元") or "").strip() or r["入力値"]
+        new = (r.get("置き換える文字") or "").strip() or r["正しくは（Antigravity）"]
         if pg not in states:
             states[pg] = work_state.load_work_state(pdf, page_index=pg - 1)
         st = states[pg]
