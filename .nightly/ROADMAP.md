@@ -780,6 +780,7 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
   task63_prompt.txt・AGENTS §8.13 の見直し）。発注前に、発注書どおりの見本（scratchpad ref63_check.py）で既存 11 本と新しい A〜G・
   壊し方 (ii)(iii) を確かめた。最初に書いた C（3 列・幅ばらばら）と D（高さ 100/60）は見本で外れたので、数値を直してから出した
   - COMPLETED → 検収（ndlocr-work3・integration/task-63 c2fd2dd）: 注文どおりの 2 ファイル（venv なし）／406 passed（399＋7）／指揮官の破壊 5/5。
-    本物のモデル: p42 R2 は見出し＋本文 8 列がほぼ読めた／p41 旧 R8 は 196 字中 184 字（Task 60 版 186）。master へのマージは承認待ち
+    本物のモデル: p42 R2 は見出し＋本文 8 列がほぼ読めた／p41 旧 R8 は 196 字中 184 字（Task 60 版 186）
+  - 承認者「マージ可」→ master へ（853787e）・406 passed（1 回）・push。使うにはビューアを開き直す
 - 保留（承認者「保留として進めて。朝の点検で」）: 一覧の枠の順番をマウスで動かす件（案甲＝つかんで引っ張る／案乙＝↑↓ボタン）。
   順番＝一覧の並び＝Excel の順。番号は付け替えない（Region 1 の決まり・直した文字は番号に結び付く）。flet 0.27.6 に ReorderableListView あり
