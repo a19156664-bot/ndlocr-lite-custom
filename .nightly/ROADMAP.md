@@ -739,6 +739,11 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
   - 次: Task 61 ボタンをつなぐ（push の後。59b の _build_row に足すため）
   - 13:25 COMPLETED → 検収（ndlocr-work3・integration/task-60 7f45b8b）: 新しい 2 ファイルだけ／試験 383 passed（372＋11）／
     指揮官の破壊 5/5／検算係 6/6。本物のモデルで p41 旧 Region 8 は、承認者が手で打った全文の ■ 以外 196 字のうち 186 字が同じ順で一致。
-    p37 の 3 枠は写真の縁を列として拾ったゴミ（〃〃〃・}}}}）が混ざる → 縦で読むは字だけを囲んだ枠に使う。master へのマージは承認待ち
+    p37 の 3 枠は写真の縁を列として拾ったゴミ（〃〃〃・}}}}）が混ざる → 縦で読むは字だけを囲んだ枠に使う
+  - 承認者「52 ページまで仮の検品が完了。マージ・push を」→ master へマージ（9e4f5e2）・383 passed（1 回）・push（6540dfb..9e4f5e2・13 本）
+- Task 61「縦で読む」ボタンを発注（Jules 3311623096571065351・発注書 .nightly/prompts/task61_prompt.txt）。
+  start_region_ocr に vertical を足し、目のボタンの後ろ（index 4）に置く（test_viewer_task55 が目を controls[3] で読むため）。
+  編集済みの枠は押しても読まない（この枠だけOCR と同じ）
+- 未決（141号）: 52 頁の仮の検品が済んだ。全頁の Excel には末尾 PDF 48〜52 の割り振りが要る
 - 保留（承認者「保留として進めて。朝の点検で」）: 一覧の枠の順番をマウスで動かす件（案甲＝つかんで引っ張る／案乙＝↑↓ボタン）。
   順番＝一覧の並び＝Excel の順。番号は付け替えない（Region 1 の決まり・直した文字は番号に結び付く）。flet 0.27.6 に ReorderableListView あり
