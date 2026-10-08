@@ -734,3 +734,8 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
   - ご指示: PDF 1 → C3（表紙）／PDF 2-3 → C5（P.0002-P.0003）／PDF 4-5 → C6（P.0004-P.0005）。C4（表見返し-P.0001）は空
   - form_export.py は変えていない（作り直しのスクリプトの中で割り振りだけ差し替えた）。第28号は印刷の頁番号で PDF n → P.(n−2) が正しい（PDF 7 に「5」）ので、直すなら号ごとに選べる形
   - 未決: 末尾の PDF 48〜52 の割り振り／form_export の修正を今発注するか（案A＝末尾が決まってから・推奨）
+- Task 60「縦で読む」の部品 custom_gui/vertical_ocr.py を発注（承認者「発注：承認」・Jules 18289751574744511404・発注書 .nightly/prompts/task60_prompt.txt・AGENTS §8.13）
+  - 新しい 2 ファイルだけ。GitHub の master が 59b の前（6540dfb）でも当たらない形にした
+  - 次: Task 61 ボタンをつなぐ（push の後。59b の _build_row に足すため）
+- 保留（承認者「保留として進めて。朝の点検で」）: 一覧の枠の順番をマウスで動かす件（案甲＝つかんで引っ張る／案乙＝↑↓ボタン）。
+  順番＝一覧の並び＝Excel の順。番号は付け替えない（Region 1 の決まり・直した文字は番号に結び付く）。flet 0.27.6 に ReorderableListView あり

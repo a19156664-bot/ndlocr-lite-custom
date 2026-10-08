@@ -1,0 +1,217 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 60: "Read this frame as vertical text" -- a new module that cuts a frame
+         into columns (no line detection) and reads each column vertically
+================================================================================
+
+This order is Task 60 in .nightly/ROADMAP.md (AGENTS.md section 8.13).
+This order adds ONE NEW MODULE and ONE NEW TEST FILE. It does NOT touch the
+viewer (custom_gui/app.py). The button will be wired in a later order.
+
+## 1. Purpose and background
+
+The approver proofreads the magazine 『國際寫眞新聞』 in the confirmation viewer.
+"この枠だけOCR" (custom_gui/region_ocr.py, region_ocr_text) crops a frame and
+runs the upstream NDLOCR (src/ocr.py) on the crop. NDLOCR first DETECTS text
+lines, then reads each line; a line crop that is taller than wide is rotated
+90 degrees counter-clockwise and read as vertical text (src/parseq.py,
+PARSEQ.preprocess: `if h>w: img=cv2.rotate(img,cv2.ROTATE_90_COUNTERCLOCKWISE)`).
+
+Problem found on 2026-10-08 (141号 p41, Region 8). An article of 24 short
+vertical columns (8 characters each, characters aligned in a grid) is detected
+as 7 HORIZONTAL lines across the columns, so the text is nonsense. Rotating the
+crop by 90 degrees either way did not help (the detector found the same rows).
+
+The commander measured a method that works (one frame, one run):
+cut the frame into columns by the vertical white gaps, WITHOUT line detection,
+and give each column crop directly to PARSEQ (which rotates it because it is
+taller than wide). All 24 body columns and the 4 heading columns were read as
+correct vertical text, right to left, in 16.9 s on CPU.
+
+You implement exactly that method as a pure, testable module.
+
+## 2. Contract
+
+### DoD-1 -- new file custom_gui/vertical_ocr.py
+
+Module constants (names and values exactly):
+
+    PHOTO_ROW_RATIO = 0.35   # a crop row with a larger ink ratio is "photo"
+    MIN_RUN = 5              # ink runs narrower than this (px) are ignored
+    MARGIN = 3               # px added around each column crop
+
+Imports allowed: os, sys, threading, numpy, cv2, yaml (safe_load),
+custom_gui.mark_detector (load_image), custom_gui.region_ocr (crop_region,
+REGION_OCR_PAD). PARSEQ is imported lazily inside get_recognizer (below).
+
+Functions (names and signatures exactly):
+
+1. `def ink_mask(image_bgr) -> numpy.ndarray`
+   Grayscale (cv2.COLOR_BGR2GRAY), then
+   cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU).
+   Returns a uint8 array of 0/1 with 1 = ink. Same height/width as the input.
+
+2. `def text_band(mask) -> tuple[int, int]`
+   ratio[y] = mask[y].mean(). A row is "text-like" when ratio[y] <=
+   PHOTO_ROW_RATIO. Return (y1, y2) = the LONGEST run of consecutive
+   text-like rows (y2 exclusive). On a tie, the FIRST (topmost) run.
+   If there is no text-like row, return (0, 0).
+
+3. `def split_columns(mask) -> list[tuple[int, int]]`
+   H = mask.shape[0]. on[x] = mask[:, x].sum() > max(2, H * 0.01).
+   runs = maximal runs of consecutive on[x], as (x1, x2) with x2 exclusive;
+   drop runs with x2 - x1 < MIN_RUN.
+   If no run is left, return [].
+   widths = the run widths (float). q = numpy.percentile(widths, 25).
+   pitch = numpy.median(widths[widths <= 1.5 * q]).
+   Every run is split into n = max(1, int(round(width / pitch))) equal parts:
+   part i = (int(round(x1 + i*step)), int(round(x1 + (i+1)*step))),
+   step = width / n. Return all parts, LEFT to RIGHT.
+
+4. `def get_recognizer()`
+   Lazily builds ONE PARSEQ and caches it in a module variable (guarded by a
+   threading.Lock). It loads, exactly as src/ocr.py does by default:
+     model   = <repo>/src/model/parseq-ndl-24x768-100-tiny-153epoch-tegaki3-r8data-202604.onnx
+     classes = <repo>/src/config/NDLmoji.yaml
+     charlist = list(safe_load(f)["model"]["charset_train"])  (utf-8)
+     PARSEQ(model_path=model, charlist=charlist, device="cpu")
+   <repo> = the parent of the custom_gui directory. To import PARSEQ, put
+   <repo>/src on sys.path (only if it is not there) and `from parseq import
+   PARSEQ`. Do NOT modify anything under src/.
+
+5. `def vertical_ocr_text(image_path: str, bbox, pad: int = REGION_OCR_PAD,
+                          recognizer=None) -> str`
+   a. crop = crop_region(mark_detector.load_image(image_path), bbox, pad)
+   b. mask = ink_mask(crop); (y1, y2) = text_band(mask);
+      if y2 <= y1: return "".
+      band = mask[y1:y2]; img = crop[y1:y2]
+   c. cols = split_columns(band)
+   d. For each (x1, x2) in cols from RIGHT to LEFT:
+        ys = rows of band[:, x1:x2] that contain ink; skip if none.
+        a = max(0, ys[0] - MARGIN); b = min(band height, ys[-1] + 1 + MARGIN)
+        c = img[a:b, max(0, x1 - MARGIN):min(band width, x2 + MARGIN)]
+        skip c if c.shape[0] <= c.shape[1]   (not taller than wide)
+        t = rec.read(c)   where rec = recognizer or get_recognizer()
+        keep t if it is non-empty and not only whitespace
+   e. return "\n".join(kept texts)   ("" if none)
+   get_recognizer() must NOT be called when `recognizer` is given.
+   Exceptions from load_image or rec.read propagate unchanged.
+
+Nothing else. Do not change region_ocr.py, ocr_bridge.py, app.py or src/.
+
+## 3. Tests you must write (one new file; do not modify any existing test)
+
+New file `tests/test_vertical_ocr.py`. Use synthetic arrays and PNGs you make
+with numpy/cv2 in tmp_path. Never load the real model, never touch the
+network or port 8555, never read work/. For vertical_ocr_text use a fake
+recognizer object with a `read(img)` method that records each crop it gets
+(shape and the x-centre you can recover from a marker, see case 6).
+
+    1. text_band: a 100x50 mask whose rows 0..39 have ratio 0.9 and rows
+       40..99 have ratio 0.2 -> (40, 100).
+    2. text_band: two text-like runs of length 10 and 30 separated by dense
+       rows -> the run of length 30. Tie (two runs of 20) -> the topmost.
+       All rows dense -> (0, 0).
+    3. split_columns: height 60, three ink columns at x 10..20, 25..35,
+       40..50 (full height), nothing else -> [(10,20),(25,35),(40,50)].
+    4. split_columns: runs (0,10),(15,25),(30,60) -> pitch 10, the last run
+       is split into (30,40),(40,50),(50,60); 5 parts in total, left to right.
+    5. split_columns: a run of width 3 plus (10,20) -> only [(10,20)].
+    6. vertical_ocr_text end to end: a white 400x300 (w x h) BGR PNG with a
+       black "photo" block over rows 0..99 (all columns), and below it four
+       black vertical bars (each 12 px wide, rows 120..280) at x = 40, 120,
+       200, 280. bbox = the whole image, pad 0. The fake recognizer returns
+       "C<k>" for the k-th call. Assert: exactly 4 calls; every crop is
+       taller than wide and its height is <= 180 (photo excluded); the crops
+       come from x = 280, 200, 120, 40 in that order (recover the order from
+       the crop's position: give each bar a different grey level 0, 30, 60,
+       90 and read it back from the crop); the result is "C1\nC2\nC3\nC4".
+    7. A blank white PNG -> "" and the recognizer is never called.
+    8. A bar wider than tall (60 x 20) as the only ink -> "" (skipped).
+    9. Recognizer returns "  " for one column -> that column is dropped from
+       the joined text.
+   10. get_recognizer is not called when recognizer is given: monkeypatch
+       custom_gui.vertical_ocr.get_recognizer to raise; vertical_ocr_text
+       with a fake recognizer still works.
+   11. A file name with Japanese characters (tmp_path / "国際_p0001.png",
+       written with cv2.imencode(".png", img)[1].tofile(path)) works.
+
+Use exact values. If a case cannot be built as written, do NOT weaken it:
+report what you found.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these two NEW files only:
+
+    custom_gui/vertical_ocr.py      (new)
+    tests/test_vertical_ocr.py      (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/app.py  custom_gui/region_ocr.py  custom_gui/ocr_bridge.py
+    and every other existing file under custom_gui/
+    launch_viewer.py   every existing file under tests/
+    src/**  (upstream NDLOCR: read-only)
+    requirements.txt  pyproject.toml  custom_gui/requirements-custom.txt
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  scripts/**  resource/**  jpg/**  work/**
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no notes: put your report in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the two paths above, nothing else
+    git diff --stat           no existing file changed
+    grep -c "^def " custom_gui/vertical_ocr.py        exactly 5
+    grep -c "^def test_" tests/test_vertical_ocr.py   11 or more
+    grep -n "PHOTO_ROW_RATIO = 0.35" custom_gui/vertical_ocr.py   1 line
+    no file under src/ changed
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Run the suite on master BEFORE your change and report the count
+  (it is 364 or more); after it, that count plus your new tests, zero
+  failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the five below: break the code, show the FAILING output
+(with --tb=line so the failing line number shows), restore it, show it green.
+
+    (i)   read the columns LEFT to RIGHT in vertical_ocr_text   -> case 6 must fail
+    (ii)  use the whole crop instead of text_band               -> case 6 must fail
+    (iii) never split a run (n = 1 always)                      -> case 4 must fail
+    (iv)  drop the MIN_RUN filter                               -> case 5 must fail
+    (v)   remove the "taller than wide" skip                    -> case 8 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Write the two files directly with your editor. Do NOT write helper or patch
+  scripts. If you created any other file, delete it before you submit, and
+  show `git status --short` with exactly two lines.
+- tests/test_vertical_ocr.py is required. A submission without it is rejected.
+- You start from `master`.
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the five injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. the full content of custom_gui/vertical_ocr.py
+    5. anything you chose differently from this order, and why
