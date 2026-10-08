@@ -1,0 +1,209 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 61b: Add the "縦で読む" button to each row of the right panel
+          (it runs the same flow as "この枠だけOCR", reading with vertical_ocr_text)
+          (second order)
+================================================================================
+
+This order is Task 61 in .nightly/ROADMAP.md (AGENTS.md section 8.13).
+
+WHY A SECOND ORDER. The first session did exactly what its order said, but
+the order missed one existing test: tests/test_viewer_task55.py line 84
+asserts the WHOLE list of button tooltips
+
+    assert tooltips == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "Delete"]
+
+so adding the button necessarily fails it (1 failed, 389 passed). That was
+the commander's mistake, not yours. This order is the same as the first one
+PLUS one permitted change to that line (section 4). You start from master
+again.
+
+## 1. Purpose and background
+
+Task 60 (on master) added custom_gui/vertical_ocr.py with
+
+    vertical_ocr_text(image_path, bbox, pad=REGION_OCR_PAD, recognizer=None) -> str
+
+which reads a frame as vertical text without line detection. The approver
+wants it as a button in each row of the right panel, next to the existing
+buttons.
+
+On master, custom_gui/app.py, SelectableImageViewer:
+  - _build_row(self, rect) builds `buttons = [Edit, 右から変換, この枠だけOCR,
+    eye (画像の枠を隠す / 画像の枠を表示)]`, then appends "Revert to OCR"
+    (only when edited) and "Delete".
+  - The "この枠だけOCR" button calls self.start_region_ocr(rid).
+  - start_region_ocr(self, rid) refuses an edited row, colours the row
+    ORANGE_100, and runs _run_region_ocr in a thread, which calls
+    `text = region_ocr_text(saved_image_src, rect.bbox)` and then applies the
+    text to ONLY that row (_refresh_row), protects a row being edited, and
+    clears the colour in `finally` (AGENTS.md 8.12, Task 59b).
+
+The new button must use EXACTLY that flow; only the reading function differs.
+
+## 2. Contract
+
+### DoD-1 -- import
+Near `from custom_gui.region_ocr import region_ocr_text` add
+
+    from custom_gui.vertical_ocr import vertical_ocr_text
+
+(module level, so tests can replace custom_gui.app.vertical_ocr_text).
+
+### DoD-2 -- one flag on start_region_ocr
+Change the signature to
+
+    def start_region_ocr(self, rid, vertical: bool = False):
+
+and in _run_region_ocr replace the one line that reads the text with
+
+    if vertical:
+        text = vertical_ocr_text(saved_image_src, rect.bbox)
+    else:
+        text = region_ocr_text(saved_image_src, rect.bbox)
+
+Nothing else in start_region_ocr / _run_region_ocr changes (same early
+returns, same colour, same status messages, same _refresh_row, same finally).
+
+### DoD-3 -- the button
+In _build_row, in the `buttons = [...]` list, insert AFTER the eye button
+(so it becomes the 5th element, index 4; the eye button stays at index 3
+because tests/test_viewer_task55.py reads it as controls[3]):
+
+    ft.IconButton(icon=ft.Icons.TEXT_ROTATION_DOWN, tooltip="縦で読む",
+                  on_click=lambda e, rid=rect.rect_id: self.start_region_ocr(rid, vertical=True)),
+
+"Revert to OCR" and "Delete" stay after it, appended as today.
+
+Nothing else. Do not change vertical_ocr.py, region_ocr.py, the batch tool,
+the export, work_state, launch_viewer.py.
+
+## 3. Tests you must write (one new file; do not modify any existing test)
+
+New file `tests/test_viewer_task61.py`. Copy the harness of
+tests/test_viewer_task59.py (its dummy page whose run_thread STORES the
+target in page.pending, and its get_prepared_app setup with rows "2"
+(0,0,60,30) and "3" (80,80,200,200)). Run a stored thread with
+`t, a, k = page.pending.pop(0); t(*a, **k)`.
+Replace BOTH readers where app.py reads them:
+  monkeypatch.setattr("custom_gui.app.vertical_ocr_text", fake_v)
+  monkeypatch.setattr("custom_gui.app.region_ocr_text", fake_r)
+Do not replace start_region_ocr, _build_row, _refresh_row or ft controls.
+Find rows through app.selections_list.controls by header text, and buttons
+by tooltip inside row.content.controls[0].controls[1].controls.
+
+    1. Button place: in row "3" the buttons' tooltips are, in order,
+       ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む",
+        "Delete"]; the 縦で読む button's icon is ft.Icons.TEXT_ROTATION_DOWN.
+    2. 縦で読む uses vertical_ocr_text: fake_v returns "縦\n書", fake_r raises
+       AssertionError. Call the 縦で読む button's on_click(None). Before the
+       thread runs, row "3".bgcolor == ft.Colors.ORANGE_100. Run the thread:
+       edits["3"] == "縦\n書", fake_v was called once with
+       (path of the page, the bbox of rect "3"), row "3" shows "縦\n書",
+       its bgcolor is None, row "2" is the SAME object as before the press.
+    3. この枠だけOCR still uses region_ocr_text: fake_r returns "横",
+       fake_v raises AssertionError. on_click(None) of この枠だけOCR, run the
+       thread: edits["3"] == "横".
+    4. Edited row: app.edits["3"] = "既に直した"; _update_selections_ui();
+       on_click(None) of 縦で読む: page.pending is empty, fake_v not called,
+       status contains "編集済みの枠は範囲OCRしません", edits["3"] unchanged.
+    5. No text: fake_v returns "": status contains "文字が見つかりません",
+       "3" not in edits, row "3".bgcolor is None,
+       app.region_ocr_running[<page path>] == set().
+    6. Error: fake_v raises RuntimeError("boom"): status contains
+       "範囲OCR失敗", row "3".bgcolor is None,
+       app.region_ocr_running[<page path>] == set().
+    7. Same row being edited: app.editing_region_id = "3";
+       _update_selections_ui(); tf = row "3"'s TextField; tf.value = "途中";
+       on_click(None) of 縦で読む; run the thread (fake_v returns "Q"):
+       "3" not in edits, the SAME tf object is still in row "3" with value
+       "途中", status contains "編集中の枠".
+
+Use exact values. If you cannot reach a control through the real tree, do
+NOT assert on an internal variable instead: report what you found.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these three files only:
+
+    custom_gui/app.py               (DoD-1 to DoD-3 only)
+    tests/test_viewer_task61.py     (new)
+    tests/test_viewer_task55.py     (ONE line only: line 84, the expected
+                                     tooltip list becomes
+                                     ["Edit", "右から変換", "この枠だけOCR",
+                                      "画像の枠を隠す", "縦で読む", "Delete"]
+                                     Nothing else in this file changes.)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/vertical_ocr.py  custom_gui/region_ocr.py  custom_gui/ocr_bridge.py
+    and every other file under custom_gui/ except app.py
+    launch_viewer.py   every other existing file under tests/
+    src/**  requirements.txt  pyproject.toml  custom_gui/requirements-custom.txt
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  scripts/**  resource/**  jpg/**  work/**
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no notes: put your report in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the three paths above, nothing else
+    git diff tests/test_viewer_task55.py   exactly 1 line removed and 1 line
+                              added (line 84), nothing else
+    git diff --stat custom_gui/app.py   at most 20 insertions, at most 5 deletions
+    grep -c "縦で読む" custom_gui/app.py               exactly 1
+    grep -c "vertical_ocr_text" custom_gui/app.py      exactly 2 (import + call)
+    grep -c "def start_region_ocr" custom_gui/app.py   exactly 1
+    grep -c "^def test_" tests/test_viewer_task61.py   7 or more
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test, EXCEPT the single permitted line 84 of tests/test_viewer_task55.py.
+  Run the suite on master BEFORE your change and report the count
+  (it is 383 on 2026-10-08); after it, that count plus your new tests,
+  zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the five below: break the code, show the FAILING output
+(with --tb=line so the failing line number shows), restore it, show it green.
+
+    (i)   the button calls self.start_region_ocr(rid) (no vertical=True)  -> case 2 must fail
+    (ii)  _run_region_ocr always calls region_ocr_text                    -> case 2 must fail
+    (iii) _run_region_ocr always calls vertical_ocr_text                  -> case 3 must fail
+    (iv)  insert the button BEFORE the eye button                         -> case 1 must fail
+    (v)   remove the `if rid in self.edits:` early return                 -> case 4 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Edit custom_gui/app.py DIRECTLY with your editor. Do NOT write helper or
+  patch scripts. If you created any file other than the two allowed ones,
+  delete it before you submit, and show `git status --short` with exactly
+  three lines.
+- tests/test_viewer_task61.py is required. A submission without it is
+  rejected.
+- You start from `master`.
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the five injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. the full diff of custom_gui/app.py and of tests/test_viewer_task55.py
+    5. anything you chose differently from this order, and why

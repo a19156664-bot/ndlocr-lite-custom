@@ -751,5 +751,10 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
 - Task 62 全体OCRを使わずに起動する切り替え（承認者 案甲・Jules 13277173054218706739・発注書 .nightly/prompts/task62_prompt.txt・AGENTS §8.14）。
   app.py には触れない（Task 61 と当たらない）。新しい page_states.py・selection.py に 1 関数・launch_viewer.py。
   入った後に `確認ビューア起動.bat`（git 外）へ「全体OCRなし」で開く選び方を足す
+  - 検収（ndlocr-work3・integration/task-62 5a84972）: 注文どおりの 4 ファイル／392 passed（383＋9）／指揮官の破壊 5/5。
+    本物の起動の試しは master に入れた後（launch_viewer.py が本体のフォルダを決め打ちで読む・8555 は承認者が使用中なので画面は立てない）
+- Task 61 第1版は不採用（integration/task-61 53472cc に保存）: 既存の test_viewer_task55.py 84 行目がボタンの並び全体を確かめていて、
+  足すと必ず落ちる（1 failed, 389 passed）。発注書の見落とし（目の位置 controls[3] だけを調べた）。
+  → Task 61b を出し直し（Jules 16312117741246378758・task61b_prompt.txt）。84 行目の期待値に「縦で読む」を足すことだけを名指しで許した
 - 保留（承認者「保留として進めて。朝の点検で」）: 一覧の枠の順番をマウスで動かす件（案甲＝つかんで引っ張る／案乙＝↑↓ボタン）。
   順番＝一覧の並び＝Excel の順。番号は付け替えない（Region 1 の決まり・直した文字は番号に結び付く）。flet 0.27.6 に ReorderableListView あり
