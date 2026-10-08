@@ -762,5 +762,9 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
   - `確認ビューア起動.bat`（git 外・控え scratchpad）: 号の後に「全体OCRを使いますか [1] 使う（既定）[2] 使わない」を足した。
     UTF-8・CRLF のまま。分かれ道は set /p を代入に替えた写しで 4 通り確認（3,2→143 off／1,空→141 on／5,1→145 on／空,x→141 on）。
     set /p は流し込んだ入力を受け取れない（元の bat でも同じ）ので、本物の入力の画面は承認者が次に開くときに見る
+  - Task 61b: Jules は FAILED（「Jules encountered an error」UTC 06:09）。成果は約 200MB で、注文外の venv/ 4,440 ファイル入り
+    → 注文の 3 ファイルだけを抜き出して検収（integration/task-61b b1dd3e8）: 399 passed（392＋7）／指揮官の破壊 5/5 → master へ（bc7f352）・399 passed（1 回）
+    試験の小さな穴: 場合 6・7 は横の読み取りを差し替えていない（壊したときだけ本物の OCR が走り 1 回 3 分）。直していない
+  - 縦で読むボタンを使うには、ビューアを開き直す
 - 保留（承認者「保留として進めて。朝の点検で」）: 一覧の枠の順番をマウスで動かす件（案甲＝つかんで引っ張る／案乙＝↑↓ボタン）。
   順番＝一覧の並び＝Excel の順。番号は付け替えない（Region 1 の決まり・直した文字は番号に結び付く）。flet 0.27.6 に ReorderableListView あり
