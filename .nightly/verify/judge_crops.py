@@ -2,13 +2,15 @@
 """⑤ で指揮官が判定するための拡大（読むだけ）。確認の CSV の行ごとに、枠の中の全体 OCR の行から
 「入力値」「正しくは」に近い行を上位 2 つ選び、一致した字の前後 6 字を拡大して並べる（verify_ag1b.py と同じ考え）。
 縦の行は縦のまま、横の行は横のまま。1 枚に 6 件ずつ。
-使い方: .venv\\Scripts\\python.exe .nightly\\verify\\judge_crops.py <号> <確認の CSV> <書き先フォルダ> [番号 …]"""
+使い方: .venv\\Scripts\\python.exe .nightly\\verify\\judge_crops.py <号> <確認の CSV> <書き先フォルダ> [--one] [番号 …]
+  --one … 行の候補を 1 つだけ出す（指摘が多いとき、見る量を半分にする）"""
 import os, sys, csv, json, difflib
 sys.stdout.reconfigure(encoding="utf-8")
 from PIL import Image, ImageDraw
 BASE = r"C:\Users\user\ndlocr-lite-custom"
 num, src, out = sys.argv[1], sys.argv[2], sys.argv[3]
-ONLY = set(sys.argv[4:])
+ONE = "--one" in sys.argv[4:]
+ONLY = set(a for a in sys.argv[4:] if a != "--one")
 os.makedirs(out, exist_ok=True)
 raw = json.load(open(os.path.join(BASE, "work", "output", "01_raw_ocr", f"国際寫眞新聞_{num}号.json"), encoding="utf-8"))["contents"]
 frames = {}
@@ -46,7 +48,7 @@ for r in rows:
     cands.sort(key=lambda c: -c[0][0])
     if pg not in imgs:
         imgs[pg] = Image.open(os.path.join(BASE, "work", "cache_images", f"{num}号", f"国際寫眞新聞_{num}号_p{pg:04d}.png")).convert("RGB")
-    for k, ((sc, s, e), (x1, y1, x2, y2), t) in enumerate(cands[:2]):
+    for k, ((sc, s, e), (x1, y1, x2, y2), t) in enumerate(cands[:1 if ONE else 2]):
         L = max(1, len(t)); vertical = (y2 - y1) >= (x2 - x1)
         a, z = max(0, s - 6) / L, min(L, e + 6) / L
         if vertical:

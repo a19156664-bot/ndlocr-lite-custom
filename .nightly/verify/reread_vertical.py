@@ -8,7 +8,8 @@
 
 読み方の点検 CSV の列: 頁,枠,分類,… （分類が「縦で読み直す」「拾い落とし」の行だけを読み直す）
 決まり:
-  - 縦で読んだ結果が空、または屑（ASCII 英数字が 2 割超・同じ字が 6 つ以上続く）なら書かない（回す）
+  - 縦で読んだ結果から、ASCII 英数字が半分を超える行を先に取り除く（取り除いた行は画面に出す）
+  - 残りが空、または屑（ASCII 英数字が 2 割超・同じ字が 6 つ以上続く）なら書かない（回す）
   - 「拾い落とし」は、縦で読んだ字数が今の字数より多いときだけ書く（少なければ回す）
   - 「縦で読み直す」は、縦で読んだ字数が今の MIN_KEEP（7 割）以上のときだけ書く（下回れば回す）
   - 書いた枠の、前の文字と後の文字を <CSV と同じ所>\\<CSV の名前>_縦で読み直し_結果.csv に残す（判定と承認者の確認のため）
@@ -41,6 +42,19 @@ def junk(t):
         if run >= JUNK_RUN: return True
     return False
 
+# 縦の結果の行ごとの屑（10-09・144号 p39 R3 の先頭「TOTAL TO TO…」・p44 R2 の「19,-1」）: 行の中で ASCII 英数字が半分を超える行は先に取り除く
+LINE_ASCII = 0.5
+
+def drop_junk_lines(t):
+    keep, drop = [], []
+    for line in str(t).split("\n"):
+        s = "".join(line.split())
+        if s and sum(c.isascii() and c.isalnum() for c in s) / len(s) > LINE_ASCII:
+            drop.append(line)
+        else:
+            keep.append(line)
+    return "\n".join(keep), drop
+
 def viewer_open():
     with socket.socket() as s:
         s.settimeout(1)
@@ -66,7 +80,9 @@ def main():
         if rect is None:
             skipped.append((pg, fr, kind, "枠が保存に無い")); continue
         cur = st["edits"].get(fr, "")
-        new = vertical_ocr_text(png.format(pg), tuple(rect["bbox"]))
+        new, dropped = drop_junk_lines(vertical_ocr_text(png.format(pg), tuple(rect["bbox"])))
+        if dropped:
+            print(f"  p{pg} R{fr}: 屑の行を {len(dropped)} 行取り除いた: {[d[:20] for d in dropped]}")
         a, b = len(flat(cur)), len(flat(new))
         if b == 0:
             skipped.append((pg, fr, kind, "縦で読んだ結果が空")); continue
