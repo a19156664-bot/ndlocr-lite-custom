@@ -748,5 +748,8 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
   C28「P.0048-P.0049」← PDF 48・49／C29「P.0050-裏見返し」← 50・51／C30「裏表紙」← 52。141号は原稿の頁が P.0002〜P.0050
   - 52 頁すべてに保存状態・納品に入る文字あり。Region 1 の 12 行（p2・3・4・22・25・26・30・38・46・50・51・52）は【広告】の頁の自動の枠で、直した文字なし
   - form_export.py は未修正（作り直しのスクリプトの中で割り振りを差し替えた）。号ごとの割り振りを選べる形を、142号の前に Jules へ発注する
+- Task 62 全体OCRを使わずに起動する切り替え（承認者 案甲・Jules 13277173054218706739・発注書 .nightly/prompts/task62_prompt.txt・AGENTS §8.14）。
+  app.py には触れない（Task 61 と当たらない）。新しい page_states.py・selection.py に 1 関数・launch_viewer.py。
+  入った後に `確認ビューア起動.bat`（git 外）へ「全体OCRなし」で開く選び方を足す
 - 保留（承認者「保留として進めて。朝の点検で」）: 一覧の枠の順番をマウスで動かす件（案甲＝つかんで引っ張る／案乙＝↑↓ボタン）。
   順番＝一覧の並び＝Excel の順。番号は付け替えない（Region 1 の決まり・直した文字は番号に結び付く）。flet 0.27.6 に ReorderableListView あり

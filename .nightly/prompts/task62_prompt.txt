@@ -1,0 +1,213 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 62: A launch switch to start the viewer WITHOUT the whole-page OCR
+         (NDLOCR_PAGE_OCR=off): frames start empty, no automatic Region 1,
+         frame ids start at 2
+================================================================================
+
+This order is Task 62 in .nightly/ROADMAP.md (AGENTS.md section 8.14).
+Do NOT touch custom_gui/app.py (another task is changing it).
+
+## 1. Purpose and background
+
+launch_viewer.py starts the confirmation viewer. Today it always:
+  - reads the whole-page OCR result work/output/01_raw_ocr/<issue>.json
+    (`with open(RAW_JSON, ...)`, no existence check);
+  - in BrowserImageViewer.__init__, for every page i < len(pages_contents):
+      parsed = normalize_page_ocr(pages_contents[i], basename)
+      container, edits, mark = self._load_persisted_state(png_p)
+      if the container is empty and parsed is not empty: add ONE rect that
+        wraps all lines with a 15 px margin (min clamped at 0.0) -> this is
+        the automatic "Region 1";
+      self.image_states[png_p] = {"selections": container,
+        "ocr_state": OcrState.DONE, "ocr_results": parsed,
+        "ocr_error": None, "edits": edits, "mark": mark}
+
+The whole-page OCR then shows up as (a) the text of a new frame before the
+user runs "この枠だけOCR", (b) the exported text of a frame the user never
+edited, (c) the automatic Region 1. The approver decided (2026-10-08) to add
+a switch that starts the viewer without it. Frames are then read only by
+the per-frame buttons.
+
+Rule that must keep working (AGENTS.md 8.5): the Excel conversion drops the
+text of region_id "1" (it is the automatic Region 1). Without Region 1 the
+user's first frame would get id "1" and be dropped. So, with the switch
+off, frame ids must start at "2".
+
+## 2. Contract
+
+### DoD-1 -- custom_gui/selection.py: one new method on SelectionContainer
+
+    def ensure_next_id_at_least(self, n: int) -> None:
+        """The next id given by add() will be at least n."""
+        self._next_id = max(self._next_id, n)
+
+Nothing else in selection.py changes.
+
+### DoD-2 -- new file custom_gui/page_states.py
+
+    REGION1_MARGIN = 15.0
+
+    def page_ocr_enabled(environ) -> bool:
+        """False only when environ.get("NDLOCR_PAGE_OCR", "") stripped and
+        lower-cased is exactly "off". True otherwise (missing, "on", "",
+        anything else)."""
+
+    def build_page_state(parsed, container, edits, mark, page_ocr: bool) -> dict:
+        """The image_states entry for one page."""
+
+  page_ocr True (EXACTLY today's behaviour):
+    if container.get_all() is empty and parsed is not empty:
+        xs = [l["bbox"][0] for l in parsed] + [l["bbox"][2] for l in parsed]
+        ys = [l["bbox"][1] for l in parsed] + [l["bbox"][3] for l in parsed]
+        container.add((max(0.0, min(xs) - REGION1_MARGIN),
+                       max(0.0, min(ys) - REGION1_MARGIN),
+                       max(xs) + REGION1_MARGIN,
+                       max(ys) + REGION1_MARGIN))
+    return {"selections": container, "ocr_state": OcrState.DONE,
+            "ocr_results": parsed, "ocr_error": None,
+            "edits": edits, "mark": mark}
+  page_ocr False:
+    no rect is added; container.ensure_next_id_at_least(2);
+    return the same dict but with "ocr_results": [] (parsed is ignored).
+
+  Import OcrState from custom_gui.app (as launch_viewer.py does today).
+
+### DoD-3 -- launch_viewer.py uses them
+
+1. After RAW_JSON is defined: `PAGE_OCR = page_ocr_enabled(os.environ)`.
+2. If PAGE_OCR: load RAW_JSON exactly as today. Else: do NOT open RAW_JSON
+   (it may not exist), set pages_contents = [] and print
+   "全体OCRを使いません（NDLOCR_PAGE_OCR=off）".
+3. In BrowserImageViewer.__init__ the loop becomes:
+       for i, png_p in enumerate(png_paths):
+           if PAGE_OCR and i >= len(pages_contents):
+               continue                      # as today: not pre-populated
+           parsed = (normalize_page_ocr(pages_contents[i], os.path.basename(png_p))
+                     if PAGE_OCR else [])
+           container, edits, mark = self._load_persisted_state(png_p)
+           self.image_states[png_p] = build_page_state(parsed, container, edits, mark, PAGE_OCR)
+   (With the switch off EVERY page is pre-populated as DONE with no
+   results, so the viewer never starts a whole-page OCR for a page.)
+4. page.title gets the suffix "（全体OCRなし）" when not PAGE_OCR, and the
+   start banner prints one more line "  全体OCR: なし" / "  全体OCR: あり".
+Nothing else in launch_viewer.py changes (normalize_page_ocr stays).
+
+## 3. Tests you must write (one new file; do not modify any existing test)
+
+New file `tests/test_page_states.py`. Test page_states and selection only
+(do not import launch_viewer.py: it runs at import time). Lines are dicts
+{"text", "bbox", "confidence", "is_vertical", "source_image"}.
+
+    1. page_ocr_enabled: {} -> True; {"NDLOCR_PAGE_OCR": "on"} -> True;
+       "" -> True; "OFF" -> False; " off " -> False; "no" -> True.
+    2. page_ocr True, empty container, two lines with bboxes
+       (10,20,110,40) and (5,100,60,300): exactly one rect, id "1",
+       bbox (0.0, 5.0, 125.0, 315.0); ocr_results is the same list object
+       as parsed; ocr_state is OcrState.DONE; edits/mark passed through.
+    3. page_ocr True, container already holding rects "4","5": no rect
+       added (ids stay ["4","5"]).
+    4. page_ocr True, parsed empty: no rect added; container.add(...) then
+       gives id "1" (today's behaviour, unchanged).
+    5. page_ocr False, empty container, parsed NOT empty: no rect added,
+       ocr_results == [], and container.add(...) gives id "2".
+    6. page_ocr False, container restored with [] (restore([])): add gives
+       id "2". Restored with ids "4","5": add gives id "6".
+    7. ensure_next_id_at_least: fresh container, n=2 -> add gives "2";
+       after restoring ids up to "7", n=2 -> add gives "8".
+    8. Export path with the switch off: build the state with page_ocr False,
+       add one rect (id "2"), then
+       custom_gui.exporter.build_export_rows("x.png", rects,
+       state["ocr_results"], edited_texts={}) gives text "" for "2", and
+       with edited_texts={"2": "縦書き"} gives "縦書き".
+    9. That row survives the Excel keyword step: write a CSV (utf-8-sig,
+       header image_name,region_id,x1,y1,x2,y2,line_count,text) with one row
+       for "doc_p0001.png", region "2", text "縦書き"; then
+       custom_gui.form_export.build_keywords(read_viewer_csv(path), 6)[0]
+       contains "縦書き".
+
+Use exact values. If a case cannot be built as written, do NOT weaken it:
+report what you found.
+
+## 4. Allowed and forbidden scope
+
+ALLOWED - these four files only:
+
+    custom_gui/page_states.py      (new)
+    custom_gui/selection.py        (DoD-1 only)
+    launch_viewer.py               (DoD-3 only)
+    tests/test_page_states.py      (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    custom_gui/app.py   custom_gui/vertical_ocr.py  custom_gui/region_ocr.py
+    custom_gui/form_export.py  custom_gui/exporter.py  custom_gui/batch_region_ocr.py
+    and every other file under custom_gui/ not listed above
+    every existing file under tests/
+    src/**  requirements.txt  pyproject.toml  custom_gui/requirements-custom.txt
+    .nightly/**  .claude/**  AGENTS.md  CLAUDE.md  README.md
+    LICENCE  LICENCE_DEPENDENCEIES  and every NDL credit header
+    train/**  scripts/**  resource/**  jpg/**  work/**  any *.bat file
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no notes: put your report in the session message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the four paths above, nothing else
+    git diff --stat custom_gui/selection.py   at most 4 insertions, 0 deletions
+    grep -c "def ensure_next_id_at_least" custom_gui/selection.py   exactly 1
+    grep -c "^def " custom_gui/page_states.py   exactly 2
+    grep -c "build_page_state" launch_viewer.py   2 (import + call)
+    grep -c "container.add" launch_viewer.py      0 (moved into page_states)
+    grep -c "^def test_" tests/test_page_states.py   9 or more
+    python -c "import ast;ast.parse(open('launch_viewer.py',encoding='utf-8').read())"   succeeds
+
+## 5. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Run the suite on master BEFORE your change and report the count
+  (it is 383 on 2026-10-08); after it, that count plus your new tests,
+  zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 6. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the five below: break the code, show the FAILING output
+(with --tb=line so the failing line number shows), restore it, show it green.
+
+    (i)   with page_ocr False still add the Region 1 rect      -> case 5 must fail
+    (ii)  with page_ocr False do not call ensure_next_id_at_least -> case 5 or 6 must fail
+    (iii) with page_ocr False keep ocr_results = parsed        -> case 5 must fail
+    (iv)  page_ocr_enabled always returns True                 -> case 1 must fail
+    (v)   REGION1_MARGIN = 10.0                                -> case 2 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 7. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Edit the files directly with your editor. Do NOT write helper or patch
+  scripts. If you created any other file, delete it before you submit, and
+  show `git status --short` with exactly four lines.
+- tests/test_page_states.py is required. A submission without it is
+  rejected.
+- You start from `master`.
+
+## 8. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the five injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. the full diff of launch_viewer.py and custom_gui/selection.py, and
+       the full content of custom_gui/page_states.py
+    5. anything you chose differently from this order, and why
