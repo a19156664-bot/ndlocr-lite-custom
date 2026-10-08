@@ -725,3 +725,12 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
   直下の fix_app_revised.py・patch_app_proper.py・patch_test_task54.py・report.txt／work の古い Excel `国際寫眞新聞_141号_p01-27_20261007.xlsx`
 - 未決: 一括処理で Region 1 を作るか（§8.5 は残す決まり。承認者は検品で消してこられた）／142〜145号に一括処理をいつ走らせるか（1 冊数時間）
 - 経緯は DEVELOPMENT_LOG の 2026-10-07、karte_web STATUS §118
+
+## 2026-10-08 の記録
+
+- Task 59b を master へマージ（ce4d723・承認者「マージ可」11:2x）。マージ後の master で 372 passed（1 回の実行）。push はまだ
+  - 連打の不具合は直さずに入れた。「>」は画像が出てから次を押す（AGENTS §8.12 の末尾）
+- 141号 p1〜p26 の Excel を、承認者ご指示の割り振りで作り直した: `work\国際寫眞新聞_141号_p01-26_20261008.xlsx`
+  - ご指示: PDF 1 → C3（表紙）／PDF 2-3 → C5（P.0002-P.0003）／PDF 4-5 → C6（P.0004-P.0005）。C4（表見返し-P.0001）は空
+  - form_export.py は変えていない（作り直しのスクリプトの中で割り振りだけ差し替えた）。第28号は印刷の頁番号で PDF n → P.(n−2) が正しい（PDF 7 に「5」）ので、直すなら号ごとに選べる形
+  - 未決: 末尾の PDF 48〜52 の割り振り／form_export の修正を今発注するか（案A＝末尾が決まってから・推奨）
