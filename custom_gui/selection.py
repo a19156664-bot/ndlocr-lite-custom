@@ -25,6 +25,10 @@ class SelectionContainer:
         self._next_id += 1
         return rect
 
+    def ensure_next_id_at_least(self, n: int) -> None:
+        """The next id given by add() will be at least n."""
+        self._next_id = max(self._next_id, n)
+
     def restore(self, rects: List[SelectionRect]) -> None:
         self._rects = list(rects)
         max_id = 0

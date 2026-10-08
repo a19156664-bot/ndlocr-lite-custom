@@ -21,6 +21,7 @@ from custom_gui.app import SelectableImageViewer, OcrState
 from custom_gui.image_sequence import ImageSequence
 from custom_gui.pdf_loader import ensure_page_rendered
 from custom_gui.web_image import show_web_image
+from custom_gui.page_states import page_ocr_enabled, build_page_state
 
 # 引数またはデフォルトから号数を決定
 target_num = "141"
@@ -32,6 +33,7 @@ if len(sys.argv) > 1:
 ISSUE_NAME = f"国際寫眞新聞_{target_num}号"
 PDF_PATH = os.path.join(BASE_DIR, "work", f"{ISSUE_NAME}.pdf")
 RAW_JSON = os.path.join(BASE_DIR, "work", "output", "01_raw_ocr", f"{ISSUE_NAME}.json")
+PAGE_OCR = page_ocr_enabled(os.environ)
 CACHE_DIR = os.path.join(BASE_DIR, "work", "cache_images", f"{target_num}号")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -39,12 +41,16 @@ if not os.path.exists(PDF_PATH):
     print(f"Error: {PDF_PATH} does not exist.")
     sys.exit(1)
 
-print(f"Loading raw OCR data for {ISSUE_NAME}...", flush=True)
-with open(RAW_JSON, 'r', encoding='utf-8') as f:
-    ocr_raw = json.load(f)
+if PAGE_OCR:
+    print(f"Loading raw OCR data for {ISSUE_NAME}...", flush=True)
+    with open(RAW_JSON, 'r', encoding='utf-8') as f:
+        ocr_raw = json.load(f)
 
-pages_contents = ocr_raw.get("contents", [])
-print(f"Loaded {len(pages_contents)} pages of OCR data.", flush=True)
+    pages_contents = ocr_raw.get("contents", [])
+    print(f"Loaded {len(pages_contents)} pages of OCR data.", flush=True)
+else:
+    pages_contents = []
+    print("全体OCRを使いません（NDLOCR_PAGE_OCR=off）")
 
 doc = pypdfium2.PdfDocument(PDF_PATH)
 page_count = len(doc)
@@ -103,30 +109,13 @@ class BrowserImageViewer(SelectableImageViewer):
         
         # Pre-populate all OCR results
         for i, png_p in enumerate(png_paths):
-            if i < len(pages_contents):
-                page_lines = pages_contents[i]
-                parsed = normalize_page_ocr(page_lines, os.path.basename(png_p))
-                container, edits, mark = self._load_persisted_state(png_p)
-                
-                # 【自動枠生成】枠がまだない場合、全行を包み込む枠（Region 1）を自動作成して即座に右側にテキストを表示させる！
-                if len(container.get_all()) == 0 and parsed:
-                    all_xs = [l["bbox"][0] for l in parsed] + [l["bbox"][2] for l in parsed]
-                    all_ys = [l["bbox"][1] for l in parsed] + [l["bbox"][3] for l in parsed]
-                    if all_xs and all_ys:
-                        min_x = max(0.0, min(all_xs) - 15.0)
-                        max_x = max(all_xs) + 15.0
-                        min_y = max(0.0, min(all_ys) - 15.0)
-                        max_y = max(all_ys) + 15.0
-                        container.add((min_x, min_y, max_x, max_y))
-                
-                self.image_states[png_p] = {
-                    "selections": container,
-                    "ocr_state": OcrState.DONE,
-                    "ocr_results": parsed,
-                    "ocr_error": None,
-                    "edits": edits,
-                    "mark": mark
-                }
+            if PAGE_OCR and i >= len(pages_contents):
+                continue
+
+            parsed = (normalize_page_ocr(pages_contents[i], os.path.basename(png_p))
+                      if PAGE_OCR else [])
+            container, edits, mark = self._load_persisted_state(png_p)
+            self.image_states[png_p] = build_page_state(parsed, container, edits, mark, PAGE_OCR)
 
     def _switch_image(self, path: str):
         if path in self.pdf_page_map:
@@ -149,7 +138,8 @@ class BrowserImageViewer(SelectableImageViewer):
             self.page.update()
 
 def main(page: ft.Page):
-    page.title = f"{ISSUE_NAME} — NDLOCR-Lite 確認・校正システム"
+    suffix = "" if PAGE_OCR else "（全体OCRなし）"
+    page.title = f"{ISSUE_NAME} — NDLOCR-Lite 確認・校正システム{suffix}"
     page.window_width = 1400
     page.window_height = 900
     page.padding = 0
@@ -191,6 +181,7 @@ def main(page: ft.Page):
 if __name__ == "__main__":
     print("=" * 65, flush=True)
     print(f"  {ISSUE_NAME} （全 {len(png_paths)} ページ）確認ビューアを起動しています...", flush=True)
+    print(f"  全体OCR: {'あり' if PAGE_OCR else 'なし'}")
     print(f"  ブラウザ (Edge / Chrome) で自動的に開きます。", flush=True)
     print(f"  URL: http://127.0.0.1:8555")
     print("=" * 65, flush=True)
