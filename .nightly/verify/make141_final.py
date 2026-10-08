@@ -7,7 +7,7 @@ import os, sys, json
 sys.stdout.reconfigure(encoding="utf-8")
 BASE = r"C:\Users\user\ndlocr-lite-custom"
 sys.path.insert(0, BASE)
-OUT = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(BASE, "work", "proofread")  # 中間の CSV はお客様の文字の全文なので、git の外（work）に置く（10-08）
 import openpyxl, pypdfium2
 import custom_gui.form_export as fe
 import custom_gui.work_state as work_state
