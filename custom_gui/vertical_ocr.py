@@ -13,8 +13,54 @@ PHOTO_ROW_RATIO = 0.35
 MIN_RUN = 5
 MARGIN = 3
 
+TILE = 48
+TILE_RATIO = 0.5
+PITCH_MIN = 15
+PITCH_MAX = 80
+PEAK_RATIO = 0.7
+SMOOTH = 5
+MIN_WIDTH_RATIO = 0.4
+
 _recognizer_lock = threading.Lock()
 _recognizer_instance = None
+
+def remove_photo_tiles(mask) -> np.ndarray:
+    out = mask.copy()
+    h, w = out.shape
+    for y in range(0, h, TILE):
+        for x in range(0, w, TILE):
+            tile = mask[y:y+TILE, x:x+TILE]
+            if tile.mean() > TILE_RATIO:
+                out[y:y+TILE, x:x+TILE] = 0
+    return out
+
+def estimate_pitch(profile, runs) -> int:
+    widest_run = max(runs, key=lambda r: r[1] - r[0])
+    s, e = widest_run
+    if e - s < 40:
+        return int(np.median([x2 - x1 for x1, x2 in runs]))
+        
+    v = profile[s:e] - profile[s:e].mean()
+    lags = list(range(PITCH_MIN, min(PITCH_MAX, len(v) // 2)))
+    if not lags:
+        return e - s
+        
+    ac = {}
+    for lag in lags:
+        ac[lag] = np.dot(v[:-lag], v[lag:]) / (len(v) - lag)
+        
+    top_lag = max(lags, key=lambda l: ac[l])
+    top = ac[top_lag]
+    if top <= 0:
+        return e - s
+        
+    for lag in lags:
+        if lag - 1 in lags and lag + 1 in lags:
+            if ac[lag] >= ac[lag-1] and ac[lag] >= ac[lag+1] and ac[lag] >= PEAK_RATIO * top:
+                return lag
+                
+    # On tie for top, Python max returns first, which is smallest lag
+    return top_lag
 
 def ink_mask(image_bgr) -> np.ndarray:
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
@@ -66,50 +112,55 @@ def split_columns(mask) -> list[tuple[int, int]]:
     if H == 0:
         return []
         
-    on = mask.sum(axis=0) > max(2, H * 0.01)
+    prof = mask.sum(axis=0).astype(float)
+    sm = np.convolve(prof, np.ones(SMOOTH) / SMOOTH, mode="same")
     
-    # Find runs of consecutive True
+    on = prof > max(2, H * 0.01)
     padded = np.concatenate(([False], on, [False]))
     edges = np.diff(padded.astype(int))
     starts = np.where(edges == 1)[0]
     ends = np.where(edges == -1)[0]
     
     runs = []
-    widths = []
-    
     for x1, x2 in zip(starts, ends):
-        w = x2 - x1
-        if w >= MIN_RUN:
+        if x2 - x1 >= MIN_RUN:
             runs.append((x1, x2))
-            widths.append(float(w))
             
     if not runs:
         return []
         
-    widths = np.array(widths)
-    q = np.percentile(widths, 25)
+    p = estimate_pitch(sm, runs)
+    columns = []
     
-    pitch_candidates = widths[widths <= 1.5 * q]
-    if len(pitch_candidates) == 0:
-        pitch = widths.mean() # fallback if nothing satisfies condition, though shouldn't happen with valid q
-    else:
-        pitch = np.median(pitch_candidates)
-    
-    if pitch == 0:
-        pitch = 1.0 # avoid division by zero
-        
-    parts = []
-    for x1, x2 in runs:
-        width = x2 - x1
-        n = max(1, int(round(width / pitch)))
-        step = width / n
-        
-        for i in range(n):
-            p1 = int(round(x1 + i * step))
-            p2 = int(round(x1 + (i + 1) * step))
-            parts.append((p1, p2))
+    for s, e in runs:
+        w = e - s
+        if w < MIN_WIDTH_RATIO * p:
+            continue
             
-    return parts
+        n = max(1, int(round(w / p)))
+        cuts = [s]
+        prev = s
+        
+        for i in range(1, n):
+            ideal = s + i * w / n
+            lo = max(int(ideal - p / 3), prev + 1)
+            hi = min(int(ideal + p / 3), e - 1)
+            if hi > lo:
+                # the x in [lo, hi] with the smallest sm[x]; 
+                # on a tie, the one closest to ideal; 
+                # on a further tie, the smaller x
+                search_range = range(lo, hi + 1)
+                c = min(search_range, key=lambda x: (sm[x], abs(x - ideal), x))
+            else:
+                c = int(ideal)
+            cuts.append(c)
+            prev = c
+            
+        cuts.append(e)
+        for i in range(len(cuts) - 1):
+            columns.append((cuts[i], cuts[i+1]))
+            
+    return columns
 
 def get_recognizer():
     global _recognizer_instance
@@ -138,7 +189,7 @@ def vertical_ocr_text(image_path: str, bbox, pad: int = REGION_OCR_PAD, recogniz
     if crop is None or crop.size == 0:
         return ""
         
-    mask = ink_mask(crop)
+    mask = remove_photo_tiles(ink_mask(crop))
     y1, y2 = text_band(mask)
     
     if y2 <= y1:
