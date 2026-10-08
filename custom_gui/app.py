@@ -62,6 +62,7 @@ class SelectableImageViewer(ImageViewer):
         # New state variables for per-image state
         self.image_states = {}
         self.hidden_regions = {}
+        self.region_ocr_running = {}
         
         container, edits, mark = self._load_persisted_state(image_src)
         
@@ -295,6 +296,9 @@ class SelectableImageViewer(ImageViewer):
 
     def _hidden_ids(self):
         return self.hidden_regions.setdefault(self.image_src, set())
+
+    def _running_ids(self, path=None):
+        return self.region_ocr_running.setdefault(path or self.image_src, set())
 
     def did_mount(self):
         super().did_mount()
@@ -1413,6 +1417,7 @@ class SelectableImageViewer(ImageViewer):
             
             self._redraw_overlays()
             self.selections_list.controls.clear()
+            self._row_by_id = {}
         
             all_rects = self.selection_container.get_all()
         
@@ -1421,130 +1426,8 @@ class SelectableImageViewer(ImageViewer):
                 self.active_region_id = all_rects[-1].rect_id if all_rects else None
             
             for rect in all_rects:
-                x1, y1, x2, y2 = rect.bbox
-                filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
-                extracted_text = assemble_text(filtered_lines)
-            
-                # Update list (結果パネル)
-                def delete_rect(e, rid=rect.rect_id):
-                    self.selection_container.delete_by_id(rid)
-                    if rid in self.edits:
-                        del self.edits[rid]
-                    if self.active_region_id == rid:
-                        self.active_region_id = None
-                    if self.editing_region_id == rid:
-                        self.editing_region_id = None
-                    self._update_selections_ui()
-                    self._persist_work_state()
-                
-                def edit_rect(e, rid=rect.rect_id):
-                    self.active_region_id = rid
-                    self.editing_region_id = rid
-                    self._update_selections_ui()
-                
-                def commit_edit(e, rid=rect.rect_id, text_field=None):
-                    self.commit_edit(rid, text_field.value)
-                
-                def cancel_edit(e, rid=rect.rect_id):
-                    self.editing_region_id = None
-                    self._update_selections_ui()
-                
-                def restore_rect(e, rid=rect.rect_id):
-                    if rid in self.edits:
-                        del self.edits[rid]
-                    self._update_selections_ui()
-                    self._persist_work_state()
-                
-                def make_active(e, rid=rect.rect_id):
-                    if self.active_region_id != rid:
-                        self.active_region_id = rid
-                        self._update_selections_ui()
-
-                has_edit = rect.rect_id in self.edits
-                display_text = self.edits[rect.rect_id] if has_edit else extracted_text
-                label_suffix = " (edited)" if has_edit else ""
-                rtl_count = count_rtl_lines(filtered_lines)
-                if rtl_count > 0:
-                    label_suffix += f" [横書き? {rtl_count}]"
-
-                def rtl_rect(e, rid=rect.rect_id, current_text=display_text, orig_text=extracted_text):
-                    if not current_text:
-                        return
-                    converted = convert_right_to_left(current_text)
-                    if converted == orig_text:
-                        if rid in self.edits:
-                            del self.edits[rid]
-                    else:
-                        self.edits[rid] = converted
-                    self._update_selections_ui()
-                    self._persist_work_state()
-
-                is_active = (self.active_region_id == rect.rect_id)
-                is_editing = (self.editing_region_id == rect.rect_id)
-
-                n_breaks = count_line_breaks(display_text)
-                header_text = ft.Text(f"{rect.label}{label_suffix} [改行 {n_breaks}]:", weight=ft.FontWeight.BOLD)
-
-                if is_editing:
-                    def on_change_handler(e, ht=header_text, label=rect.label, suffix=label_suffix):
-                        n = count_line_breaks(strip_break_marks(e.control.value))
-                        ht.value = f"{label}{suffix} [改行 {n}]:"
-                        if ht.page:
-                            ht.update()
-
-                    tf = ft.TextField(
-                        value=add_break_marks(display_text),
-                        multiline=True,
-                        shift_enter=True,
-                        autofocus=True,
-                        on_change=on_change_handler
-                    )
-                    tf.on_submit = lambda e, rid=rect.rect_id, t=tf: commit_edit(e, rid, t)
-                    
-                    content_area = ft.Column([
-                        tf,
-                        ft.Row([
-                            ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save (Enter)", on_click=lambda e, rid=rect.rect_id, t=tf: commit_edit(e, rid, t)),
-                            ft.IconButton(icon=ft.Icons.CANCEL, tooltip="Cancel", on_click=cancel_edit)
-                        ])
-                    ])
-                else:
-                    content_area = ft.Text(display_text, selectable=True)
-                
-                is_hidden = str(rect.rect_id) in self._hidden_ids()
-                
-                buttons = [
-                    ft.IconButton(icon=ft.Icons.EDIT, tooltip="Edit", on_click=edit_rect),
-                    ft.IconButton(icon=ft.Icons.SWAP_HORIZ, tooltip="右から変換", on_click=rtl_rect),
-                    ft.IconButton(icon=ft.Icons.DOCUMENT_SCANNER, tooltip="この枠だけOCR", on_click=lambda e, rid=rect.rect_id: self.start_region_ocr(rid)),
-                    ft.IconButton(
-                        icon=ft.Icons.VISIBILITY_OFF if is_hidden else ft.Icons.VISIBILITY,
-                        tooltip="画像の枠を表示" if is_hidden else "画像の枠を隠す",
-                        on_click=lambda e, rid=rect.rect_id: self.toggle_region_visible(rid, e.control)
-                    )
-                ]
-                if has_edit:
-                    buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
-                buttons.append(ft.IconButton(icon=ft.Icons.DELETE, tooltip="Delete", on_click=delete_rect))
-
-                item_content = ft.Column([
-                    ft.Row([
-                        header_text,
-                        ft.Row(buttons, spacing=0)
-                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True),
-                    content_area
-                ])
-            
-                border_color = ft.Colors.GREEN if is_active else ft.Colors.OUTLINE
-                border_width = 2 if is_active else 1
-                item = ft.Container(
-                    content=item_content,
-                    padding=10,
-                    border=ft.border.all(border_width, border_color),
-                    border_radius=5,
-                    on_click=make_active
-                )
-            
+                item = self._build_row(rect)
+                self._row_by_id[rect.rect_id] = item
                 self.selections_list.controls.append(item)
             
             def _safe_update(control):
@@ -1558,6 +1441,166 @@ class SelectableImageViewer(ImageViewer):
                 _safe_update(self.rects_layer)
                 self.selections_list.update()
 
+
+    def _row_index(self, rid) -> int | None:
+        row = self._row_by_id.get(rid)
+        if row is None:
+            return None
+        for i, control in enumerate(self.selections_list.controls):
+            if control is row:
+                return i
+        return None
+
+    def _refresh_row(self, rid):
+        with self.selections_lock:
+            idx = self._row_index(rid)
+            if idx is None:
+                return
+            
+            # Find the rect by ID
+            rect = None
+            for r in self.selection_container.get_all():
+                if r.rect_id == rid:
+                    rect = r
+                    break
+            
+            if rect is None:
+                return
+                
+            new_row = self._build_row(rect)
+            self.selections_list.controls[idx] = new_row
+            self._row_by_id[rid] = new_row
+            
+            if self.selections_list.page:
+                self.selections_list.update()
+
+    def _build_row(self, rect) -> ft.Container:
+        x1, y1, x2, y2 = rect.bbox
+        filtered_lines = filter_lines_by_region((x1, y1, x2, y2), self.ocr_results)
+        extracted_text = assemble_text(filtered_lines)
+    
+        # Update list (結果パネル)
+        def delete_rect(e, rid=rect.rect_id):
+            self.selection_container.delete_by_id(rid)
+            if rid in self.edits:
+                del self.edits[rid]
+            if self.active_region_id == rid:
+                self.active_region_id = None
+            if self.editing_region_id == rid:
+                self.editing_region_id = None
+            self._update_selections_ui()
+            self._persist_work_state()
+        
+        def edit_rect(e, rid=rect.rect_id):
+            self.active_region_id = rid
+            self.editing_region_id = rid
+            self._update_selections_ui()
+        
+        def commit_edit(e, rid=rect.rect_id, text_field=None):
+            self.commit_edit(rid, text_field.value)
+        
+        def cancel_edit(e, rid=rect.rect_id):
+            self.editing_region_id = None
+            self._update_selections_ui()
+        
+        def restore_rect(e, rid=rect.rect_id):
+            if rid in self.edits:
+                del self.edits[rid]
+            self._update_selections_ui()
+            self._persist_work_state()
+        
+        def make_active(e, rid=rect.rect_id):
+            if self.active_region_id != rid:
+                self.active_region_id = rid
+                self._update_selections_ui()
+
+        has_edit = rect.rect_id in self.edits
+        display_text = self.edits[rect.rect_id] if has_edit else extracted_text
+        label_suffix = " (edited)" if has_edit else ""
+        rtl_count = count_rtl_lines(filtered_lines)
+        if rtl_count > 0:
+            label_suffix += f" [横書き? {rtl_count}]"
+
+        def rtl_rect(e, rid=rect.rect_id, current_text=display_text, orig_text=extracted_text):
+            if not current_text:
+                return
+            converted = convert_right_to_left(current_text)
+            if converted == orig_text:
+                if rid in self.edits:
+                    del self.edits[rid]
+            else:
+                self.edits[rid] = converted
+            self._update_selections_ui()
+            self._persist_work_state()
+
+        is_active = (self.active_region_id == rect.rect_id)
+        is_editing = (self.editing_region_id == rect.rect_id)
+
+        n_breaks = count_line_breaks(display_text)
+        header_text = ft.Text(f"{rect.label}{label_suffix} [改行 {n_breaks}]:", weight=ft.FontWeight.BOLD)
+
+        if is_editing:
+            def on_change_handler(e, ht=header_text, label=rect.label, suffix=label_suffix):
+                n = count_line_breaks(strip_break_marks(e.control.value))
+                ht.value = f"{label}{suffix} [改行 {n}]:"
+                if ht.page:
+                    ht.update()
+
+            tf = ft.TextField(
+                value=add_break_marks(display_text),
+                multiline=True,
+                shift_enter=True,
+                autofocus=True,
+                on_change=on_change_handler
+            )
+            tf.on_submit = lambda e, rid=rect.rect_id, t=tf: commit_edit(e, rid, t)
+            
+            content_area = ft.Column([
+                tf,
+                ft.Row([
+                    ft.IconButton(icon=ft.Icons.SAVE, tooltip="Save (Enter)", on_click=lambda e, rid=rect.rect_id, t=tf: commit_edit(e, rid, t)),
+                    ft.IconButton(icon=ft.Icons.CANCEL, tooltip="Cancel", on_click=cancel_edit)
+                ])
+            ])
+        else:
+            content_area = ft.Text(display_text, selectable=True)
+        
+        is_hidden = str(rect.rect_id) in self._hidden_ids()
+        
+        buttons = [
+            ft.IconButton(icon=ft.Icons.EDIT, tooltip="Edit", on_click=edit_rect),
+            ft.IconButton(icon=ft.Icons.SWAP_HORIZ, tooltip="右から変換", on_click=rtl_rect),
+            ft.IconButton(icon=ft.Icons.DOCUMENT_SCANNER, tooltip="この枠だけOCR", on_click=lambda e, rid=rect.rect_id: self.start_region_ocr(rid)),
+            ft.IconButton(
+                icon=ft.Icons.VISIBILITY_OFF if is_hidden else ft.Icons.VISIBILITY,
+                tooltip="画像の枠を表示" if is_hidden else "画像の枠を隠す",
+                on_click=lambda e, rid=rect.rect_id: self.toggle_region_visible(rid, e.control)
+            )
+        ]
+        if has_edit:
+            buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
+        buttons.append(ft.IconButton(icon=ft.Icons.DELETE, tooltip="Delete", on_click=delete_rect))
+
+        item_content = ft.Column([
+            ft.Row([
+                header_text,
+                ft.Row(buttons, spacing=0)
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True),
+            content_area
+        ])
+    
+        border_color = ft.Colors.GREEN if is_active else ft.Colors.OUTLINE
+        border_width = 2 if is_active else 1
+        bgcolor = ft.Colors.ORANGE_100 if str(rect.rect_id) in self._running_ids() else None
+        item = ft.Container(
+            content=item_content,
+            padding=10,
+            border=ft.border.all(border_width, border_color),
+            border_radius=5,
+            bgcolor=bgcolor,
+            on_click=make_active
+        )
+        return item
 
     def start_region_ocr(self, rid):
         if rid in self.edits:
@@ -1579,32 +1622,59 @@ class SelectableImageViewer(ImageViewer):
         
         saved_image_src = self.image_src
         
+        self._running_ids(saved_image_src).add(str(rid))
+        
+        # Color the CURRENT row object ORANGE_100
+        idx = self._row_index(rid)
+        if idx is not None:
+            row_obj = self.selections_list.controls[idx]
+            row_obj.bgcolor = ft.Colors.ORANGE_100
+            if row_obj.page:
+                row_obj.update()
+
         def _run_region_ocr():
             try:
                 text = region_ocr_text(saved_image_src, rect.bbox)
+                
+                if text == "":
+                    self.latest_region_info = "範囲OCR: 文字が見つかりません"
+                    if self.page:
+                        self._update_status()
+                    return
+                
+                apply_updates = False
+                with self.selections_lock:
+                    rect_exists = any(r.rect_id == rid for r in self.selection_container.get_all())
+                    if rect_exists and self.image_src == saved_image_src:
+                        if self.editing_region_id == rid:
+                            self.latest_region_info = "編集中の枠なので範囲OCRの結果を入れませんでした"
+                        else:
+                            self.edits[rid] = text
+                            n = text.count("\n") + 1 if text else 0
+                            self.latest_region_info = f"範囲OCR: {n} 行"
+                            apply_updates = True
+                        
+                if apply_updates and self.page:
+                    self._refresh_row(rid)
+                    self._persist_work_state()
+
+                if self.page:
+                    self._update_status()
+                    
             except Exception as e:
                 self.latest_region_info = f"範囲OCR失敗: {e}"
                 if self.page:
                     self._update_status()
-                return
-                
-            if text == "":
-                self.latest_region_info = "範囲OCR: 文字が見つかりません"
-                if self.page:
-                    self._update_status()
-                return
-                
-            with self.selections_lock:
-                rect_exists = any(r.rect_id == rid for r in self.selection_container.get_all())
-                if rect_exists and self.image_src == saved_image_src:
-                    self.edits[rid] = text
-                    n = text.count("\n") + 1 if text else 0
-                    self.latest_region_info = f"範囲OCR: {n} 行"
-                    
-            if self.page:
-                self._update_selections_ui()
-                self._persist_work_state()
-                self._update_status()
+            finally:
+                with self.selections_lock:
+                    self._running_ids(saved_image_src).discard(str(rid))
+                    if self.image_src == saved_image_src:
+                        idx = self._row_index(rid)
+                        if idx is not None:
+                            row_obj = self.selections_list.controls[idx]
+                            row_obj.bgcolor = None
+                            if row_obj.page:
+                                row_obj.update()
                 
         if self.page:
             self.page.run_thread(_run_region_ocr)
