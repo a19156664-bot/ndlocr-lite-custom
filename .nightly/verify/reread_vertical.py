@@ -14,6 +14,7 @@
   - 「縦で読み直す」は、縦で読んだ字数が今の MIN_KEEP（7 割）以上のときだけ書く（下回れば回す）
   - 書いた枠の、前の文字と後の文字を <CSV と同じ所>\\<CSV の名前>_縦で読み直し_結果.csv に残す（判定と承認者の確認のため）
   - --write のときは、ビューア（127.0.0.1:8555）が開いていたら書かずに止まる
+    （--viewer-other-issue-ok を付けると、開いているビューアがすべて別の号のときだけ書く。viewer_guard.py・10-09 夜）
   - 書く前に、その号の保存を全部 work\\backup\\<時刻>_縦で読み直し前\\ に写す
   - 書いた後に読み戻し、書いた枠以外が 1 字も変わっていないことを確かめる
 """
@@ -109,7 +110,11 @@ def main():
     if not plan:
         print("書く所が無い"); return 0
     if viewer_open():
-        print("ビューア（8555）が開いている。書かずに止めた"); return 1
+        from viewer_guard import only_other_issues
+        if "--viewer-other-issue-ok" in sys.argv and only_other_issues(num):
+            print("ビューア（8555）は開いているが、すべて別の号（--viewer-other-issue-ok）。書く")
+        else:
+            print("ビューア（8555）が開いている。書かずに止めた"); return 1
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     bdir = os.path.join(BASE, "work", "backup", f"{stamp}_{num}号_縦で読み直し前")
     os.makedirs(bdir)

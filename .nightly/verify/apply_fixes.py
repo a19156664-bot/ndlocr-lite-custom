@@ -12,6 +12,7 @@
   - 「入力値」が枠の文字に、ちょうど 1 回あるときだけ置き換える（0 回・2 回以上は回す）
   - 置き換える範囲に改行があるときは置き換えない（行の区切りが変わるため。回す）
   - --write のときは、ビューア（127.0.0.1:8555）が開いていたら書かずに止まる
+    （--viewer-other-issue-ok を付けると、開いているビューアがすべて別の号のときだけ書く。viewer_guard.py・10-09 夜）
   - 書く前に、その号の保存を全部 work\\backup\\<時刻>_置き換え前\\ に写す
   - 書いた後に読み戻し、置き換えた所以外が 1 字も変わっていないことを確かめる
 """
@@ -69,7 +70,11 @@ def main():
     if not plan:
         print("書く所が無い"); return 0
     if viewer_open():
-        print("ビューア（8555）が開いている。書かずに止めた"); return 1
+        from viewer_guard import only_other_issues
+        if "--viewer-other-issue-ok" in sys.argv and only_other_issues(num):
+            print("ビューア（8555）は開いているが、すべて別の号（--viewer-other-issue-ok）。書く")
+        else:
+            print("ビューア（8555）が開いている。書かずに止めた"); return 1
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     bdir = os.path.join(BASE, "work", "backup", f"{stamp}_置き換え前")
     os.makedirs(bdir)
