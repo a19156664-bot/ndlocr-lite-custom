@@ -1,0 +1,626 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 65: Grips on the selected frame of the confirmation viewer -- drag a
+         grip to resize the frame, drag the middle grip to move it
+         (ids, labels, list order and corrected texts never change)
+================================================================================
+
+This order is Task 65 of the commander's local ROADMAP (not on GitHub; you
+do not need it: everything is in this order).
+
+## 1. Purpose and background
+
+In the confirmation viewer a frame (SelectionRect) can be drawn, selected
+and deleted, but once drawn it cannot be moved or resized: today the
+only way is to delete it and draw it again. The approver asked (2026-10-09) to
+move / resize frames with the mouse, and chose this design ("案甲"):
+
+  - Only the SELECTED frame (self.active_region_id) shows grips: 8 small
+    squares (corners and edge middles, 10 px) to resize, and 1 circle in the
+    middle (14 px) to move. Hovering a grip shows a resize / move mouse cursor
+    (a static property of each grip, so no server round trip on hover).
+  - While a grip is dragged only an orange preview frame moves. The frame
+    itself changes once, on release, and is saved then.
+  - Dragging anywhere else keeps today's behaviour (draw a new frame).
+    This matters: on 70 of 241 saved pages a frame is drawn INSIDE another
+    frame, so "drag inside a frame = move" would break the approver's work.
+
+Rules that must keep working:
+  - rect_id, label, list order and self.edits NEVER change when a frame is
+    moved or resized. Only bbox changes (original image pixels).
+  - The frame stays inside the image and never gets smaller than 4 px.
+  - No change while a card is being edited (self.editing_region_id is set):
+    a message in self.latest_region_info instead.
+  - Grips only in Select mode, never on a hidden frame.
+  - The grips layer is the LAST control of self.stack (above the gesture
+    detector AND above the inline editor, which opens right under a frame
+    and would otherwise cover the bottom grips).
+    tests/test_inline_edit.py test_f only requires inline_editor_layer after
+    gesture_detector; that stays true.
+
+## 2. Contract: apply EXACTLY this patch
+
+The patch below was made and tested by the commander on top of the current
+master (5284c9b). It changes custom_gui/selection.py and custom_gui/app.py and
+adds tests/test_viewer_task65.py. Save the part between the two marker lines
+(the markers are not part of it) and apply it with
+
+    git apply --whitespace=nowarn <file>
+
+Then delete that file. Do not change anything in the patch: not one line, not
+the blank lines with spaces in them, not the order of the methods. If it does
+not apply cleanly on master, do NOT edit code by hand to make it fit: stop and
+report the exact error.
+
+What the patch does, for your review:
+
+  DoD-1  selection.py: SelectionContainer.set_bbox(rect_id, bbox) -> bool
+         (just before delete_by_id) and a module function
+         adjust_bbox(bbox, grip, dx, dy, img_w, img_h, min_size=4.0)
+         (at the end of the file).
+  DoD-2  app.py: import adjust_bbox; a new ft.Stack self.handles_layer and
+         self._grip_drag = None in __init__; handles_layer appended LAST to
+         the three ft.Stack(controls=[...]) lists; its left/top/width/height
+         kept in step with inline_editor_layer in the same places; methods
+         GRIP_CURSORS, _update_handles, _on_grip_start, _on_grip_update,
+         _place_preview, _on_grip_end placed just before _row_index;
+         _update_handles is called at the end of _update_selections_ui, in
+         _toggle_mode, in _on_mode_change, in toggle_region_visible, and when
+         the zoom changes in _update_viewer.
+  DoD-3  tests/test_viewer_task65.py: 10 cases.
+
+----- BEGIN PATCH -----
+diff --git a/custom_gui/app.py b/custom_gui/app.py
+index 60729a4..736702e 100644
+--- a/custom_gui/app.py
++++ b/custom_gui/app.py
+@@ -1,7 +1,7 @@
+ import flet as ft
+ from custom_gui.image_sequence import ImageSequence, list_images_in_folder
+ from custom_gui.viewer import ImageViewer, original_to_display, apply_pan, InteractionMode, calculate_label_position
+-from custom_gui.selection import SelectionContainer, calculate_normalized_bbox, SelectionRect, find_region_at_point
++from custom_gui.selection import SelectionContainer, calculate_normalized_bbox, SelectionRect, find_region_at_point, adjust_bbox
+ from custom_gui.ocr_bridge import run_ocr_and_parse
+ import custom_gui.work_state as work_state
+ from custom_gui.region_filter import filter_lines_by_region
+@@ -202,6 +202,13 @@ class SelectableImageViewer(ImageViewer):
+             height=self.win_h,
+         )
+         self.inline_editing_region_id = None
++        # Grips of the selected frame (on top of everything, so they get their own drags)
++        self.handles_layer = ft.Stack(
++            controls=[],
++            width=self.win_w,
++            height=self.win_h,
++        )
++        self._grip_drag = None
+         
+         # Intercept mouse drag events
+         self.gesture_detector = ft.GestureDetector(
+@@ -262,13 +269,14 @@ class SelectableImageViewer(ImageViewer):
+                     self.highlight_layer,
+                     self.rects_layer,
+                     self.gesture_detector,
+-                    self.inline_editor_layer
++                    self.inline_editor_layer,
++                    self.handles_layer
+                 ],
+                 width=self.img_w * self.zoom_scale,
+                 height=self.img_h * self.zoom_scale,
+             )
+             if not hasattr(self, 'stack'):
+-                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector, self.inline_editor_layer])
++                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector, self.inline_editor_layer, self.handles_layer])
+             self.image_container.content = self.stack
+         
+         # Override overall layout again with status
+@@ -422,6 +430,7 @@ class SelectableImageViewer(ImageViewer):
+         self.mode_state.set_mode(new_mode)
+         self.mode_toggle.selected = {self.mode_state.current}
+         self._refresh_cursor()
++        self._update_handles()
+         if hasattr(self, 'status_text'):
+             self.status_text.value = self._get_status_message()
+         if self.page:
+@@ -439,6 +448,7 @@ class SelectableImageViewer(ImageViewer):
+             # Prevent deselecting everything - fallback to current mode
+             e.control.selected = {self.mode_state.current}
+         self._refresh_cursor()
++        self._update_handles()
+         if hasattr(self, 'status_text'):
+             self.status_text.value = self._get_status_message()
+         if self.page:
+@@ -865,7 +875,7 @@ class SelectableImageViewer(ImageViewer):
+             self.image_container.content = ft.Text(self.ocr_error, color=ft.Colors.RED, weight=ft.FontWeight.BOLD)
+         else:
+             if not hasattr(self, 'stack'):
+-                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector, self.inline_editor_layer])
++                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector, self.inline_editor_layer, self.handles_layer])
+             self.image_container.content = self.stack
+             
+         self.btn_prev.disabled = not self.sequence.has_prev()
+@@ -1193,6 +1203,8 @@ class SelectableImageViewer(ImageViewer):
+             self.rects_layer.height = self.img_h * self.zoom_scale
+             self.inline_editor_layer.width = self.img_w * self.zoom_scale
+             self.inline_editor_layer.height = self.img_h * self.zoom_scale
++            self.handles_layer.width = self.img_w * self.zoom_scale
++            self.handles_layer.height = self.img_h * self.zoom_scale
+             self.gesture_detector.width = self.img_w * self.zoom_scale
+             self.gesture_detector.height = self.img_h * self.zoom_scale
+             self.stack.width = self.img_w * self.zoom_scale
+@@ -1264,6 +1276,8 @@ class SelectableImageViewer(ImageViewer):
+             self.rects_layer.top = self.offset_y
+             self.inline_editor_layer.left = self.offset_x
+             self.inline_editor_layer.top = self.offset_y
++            self.handles_layer.left = self.offset_x
++            self.handles_layer.top = self.offset_y
+             
+             self._update_viewer()
+ 
+@@ -1386,6 +1400,7 @@ class SelectableImageViewer(ImageViewer):
+                 hidden.add(srid)
+             
+             self._redraw_overlays()
++            self._update_handles()
+             
+             if self.highlight_layer.page:
+                 self.highlight_layer.update()
+@@ -1415,6 +1430,8 @@ class SelectableImageViewer(ImageViewer):
+             self.rects_layer.top = self.offset_y
+             self.inline_editor_layer.left = self.offset_x
+             self.inline_editor_layer.top = self.offset_y
++            self.handles_layer.left = self.offset_x
++            self.handles_layer.top = self.offset_y
+             
+             self._redraw_overlays()
+             self.selections_list.controls.clear()
+@@ -1441,7 +1458,95 @@ class SelectableImageViewer(ImageViewer):
+                 _safe_update(self.highlight_layer)
+                 _safe_update(self.rects_layer)
+                 self.selections_list.update()
+-
++            self._update_handles()
++
++    GRIP_CURSORS = {
++        "nw": ft.MouseCursor.RESIZE_UP_LEFT_DOWN_RIGHT, "se": ft.MouseCursor.RESIZE_UP_LEFT_DOWN_RIGHT,
++        "ne": ft.MouseCursor.RESIZE_UP_RIGHT_DOWN_LEFT, "sw": ft.MouseCursor.RESIZE_UP_RIGHT_DOWN_LEFT,
++        "n": ft.MouseCursor.RESIZE_UP_DOWN, "s": ft.MouseCursor.RESIZE_UP_DOWN,
++        "e": ft.MouseCursor.RESIZE_LEFT_RIGHT, "w": ft.MouseCursor.RESIZE_LEFT_RIGHT,
++        "move": ft.MouseCursor.MOVE,
++    }
++
++    def _update_handles(self):
++        """Grips on the selected frame: 8 to resize, 1 in the middle to move (Select mode only)."""
++        if not hasattr(self, "handles_layer") or self._grip_drag is not None:
++            return
++        self.handles_layer.controls.clear()
++        rid = self.active_region_id
++        rect = next((r for r in self.selection_container.get_all() if r.rect_id == rid), None)
++        if rect is not None and self.mode_state.current == "SELECT" and str(rid) not in self._hidden_ids():
++            x1, y1, x2, y2 = rect.bbox
++            dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, 0.0, 0.0)
++            dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, 0.0, 0.0)
++            mx, my = (dx1 + dx2) / 2, (dy1 + dy2) / 2
++            spots = {"nw": (dx1, dy1), "n": (mx, dy1), "ne": (dx2, dy1), "e": (dx2, my),
++                     "se": (dx2, dy2), "s": (mx, dy2), "sw": (dx1, dy2), "w": (dx1, my), "move": (mx, my)}
++            for grip, (cx, cy) in spots.items():
++                size = 14 if grip == "move" else 10
++                self.handles_layer.controls.append(ft.GestureDetector(
++                    content=ft.Container(
++                        width=size, height=size, bgcolor=ft.Colors.WHITE,
++                        border=ft.border.all(2, ft.Colors.BLUE),
++                        border_radius=size / 2 if grip == "move" else 0,
++                    ),
++                    left=cx - size / 2, top=cy - size / 2, width=size, height=size,
++                    mouse_cursor=self.GRIP_CURSORS[grip],
++                    drag_interval=10,
++                    on_pan_start=lambda e, g=grip: self._on_grip_start(e, rid, g),
++                    on_pan_update=self._on_grip_update,
++                    on_pan_end=self._on_grip_end,
++                ))
++        if getattr(self.handles_layer, 'page', None):
++            self.handles_layer.update()
++
++    def _on_grip_start(self, e, rid, grip):
++        if self.editing_region_id is not None:
++            self.latest_region_info = "編集中は枠を動かせません（保存か取消をしてから）"
++            self._update_status()
++            return
++        rect = next((r for r in self.selection_container.get_all() if r.rect_id == rid), None)
++        if rect is None:
++            return
++        if self.inline_editing_region_id is not None:
++            self._cancel_inline_edit()
++        preview = ft.Container(border=ft.border.all(2, ft.Colors.ORANGE), bgcolor=ft.Colors.TRANSPARENT)
++        self._grip_drag = {"rid": rid, "grip": grip, "gx": e.global_x, "gy": e.global_y,
++                           "bbox": tuple(rect.bbox), "new": tuple(rect.bbox), "preview": preview}
++        self.handles_layer.controls.append(preview)
++        self._place_preview()
++
++    def _on_grip_update(self, e):
++        d = self._grip_drag
++        if d is None:
++            return
++        dx = (e.global_x - d["gx"]) / self.zoom_scale
++        dy = (e.global_y - d["gy"]) / self.zoom_scale
++        d["new"] = adjust_bbox(d["bbox"], d["grip"], dx, dy, self.img_w, self.img_h)
++        self._place_preview()
++
++    def _place_preview(self):
++        d = self._grip_drag
++        x1, y1, x2, y2 = d["new"]
++        dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, 0.0, 0.0)
++        dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, 0.0, 0.0)
++        p = d["preview"]
++        p.left, p.top, p.width, p.height = dx1, dy1, dx2 - dx1, dy2 - dy1
++        if getattr(self.handles_layer, 'page', None):
++            self.handles_layer.update()
++
++    def _on_grip_end(self, e):
++        d = self._grip_drag
++        self._grip_drag = None
++        if d is None:
++            return
++        if d["new"] != d["bbox"]:
++            self.selection_container.set_bbox(d["rid"], d["new"])
++            self.active_region_id = d["rid"]
++            self._update_selections_ui()
++            self._persist_work_state()
++        else:
++            self._update_handles()
+ 
+     def _row_index(self, rid) -> int | None:
+         row = self._row_by_id.get(rid)
+@@ -1778,6 +1883,8 @@ class SelectableImageViewer(ImageViewer):
+             self.rects_layer.height = self.img_h * self.zoom_scale
+             self.inline_editor_layer.width = self.img_w * self.zoom_scale
+             self.inline_editor_layer.height = self.img_h * self.zoom_scale
++            self.handles_layer.width = self.img_w * self.zoom_scale
++            self.handles_layer.height = self.img_h * self.zoom_scale
+             self.gesture_detector.width = self.img_w * self.zoom_scale
+             self.gesture_detector.height = self.img_h * self.zoom_scale
+             self.stack.width = self.img_w * self.zoom_scale
+@@ -1794,11 +1901,14 @@ class SelectableImageViewer(ImageViewer):
+                 self.rects_layer.update()
+             if getattr(self.inline_editor_layer, 'page', None):
+                 self.inline_editor_layer.update()
++            if getattr(self.handles_layer, 'page', None):
++                self.handles_layer.update()
+ 
+         if getattr(self, "_overlay_scale", None) is not None and getattr(self, "_overlay_scale") != self.zoom_scale:
+             with self.selections_lock:
+                 if getattr(self, "_overlay_scale", None) is not None and getattr(self, "_overlay_scale") != self.zoom_scale:
+                     self._redraw_overlays()
++                    self._update_handles()
+                     if getattr(self, 'page', None):
+                         if getattr(self.highlight_layer, 'page', None):
+                             self.highlight_layer.update()
+diff --git a/custom_gui/selection.py b/custom_gui/selection.py
+index a873e0b..7d31c64 100644
+--- a/custom_gui/selection.py
++++ b/custom_gui/selection.py
+@@ -44,6 +44,14 @@ class SelectionContainer:
+     def get_all(self) -> List[SelectionRect]:
+         return list(self._rects)
+ 
++    def set_bbox(self, rect_id: str, bbox: Tuple[float, float, float, float]) -> bool:
++        """Change where one frame is. ids, labels and the list order do not change."""
++        for rect in self._rects:
++            if rect.rect_id == rect_id:
++                rect.bbox = tuple(bbox)
++                return True
++        return False
++
+     def delete_by_id(self, rect_id: str) -> bool:
+         for i, rect in enumerate(self._rects):
+             if rect.rect_id == rect_id:
+@@ -100,3 +108,28 @@ def find_region_at_point(
+                 best_rect_id = rect.rect_id
+                 
+     return best_rect_id
++
++
++def adjust_bbox(
++    bbox: Tuple[float, float, float, float],
++    grip: str,
++    dx: float, dy: float,
++    img_w: float, img_h: float,
++    min_size: float = 4.0
++) -> Tuple[float, float, float, float]:
++    """Move ("move") or resize (a grip made of n / s / e / w) a frame by dx, dy
++    original pixels. The frame stays inside the image and never gets smaller than min_size."""
++    x1, y1, x2, y2 = bbox
++    if grip == "move":
++        dx = max(-x1, min(dx, img_w - x2))
++        dy = max(-y1, min(dy, img_h - y2))
++        return (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
++    if "w" in grip:
++        x1 = min(max(0.0, x1 + dx), x2 - min_size)
++    if "e" in grip:
++        x2 = max(min(img_w, x2 + dx), x1 + min_size)
++    if "n" in grip:
++        y1 = min(max(0.0, y1 + dy), y2 - min_size)
++    if "s" in grip:
++        y2 = max(min(img_h, y2 + dy), y1 + min_size)
++    return (x1, y1, x2, y2)
+diff --git a/tests/test_viewer_task65.py b/tests/test_viewer_task65.py
+new file mode 100644
+index 0000000..c142aa3
+--- /dev/null
++++ b/tests/test_viewer_task65.py
+@@ -0,0 +1,183 @@
++import pytest
++import flet as ft
++from custom_gui.selection import SelectionContainer, adjust_bbox
++from custom_gui import work_state
++from tests.test_marks_to_rects import get_app, make_clean_page
++
++
++@pytest.fixture
++def dummy_page():
++    class DummyPage:
++        def __init__(self):
++            self.controls = []
++            self.overlay = []
++            self.pending = []
++        def add(self, *args):
++            pass
++        def update(self, *args):
++            pass
++        def run_thread(self, target, *args, **kwargs):
++            self.pending.append((target, args, kwargs))
++        window_width = 800
++        window_height = 600
++        session_id = "test"
++    return DummyPage()
++
++
++def get_prepared_app(dummy_page, tmp_path):
++    app, path = get_app(dummy_page, tmp_path, make_clean_page)   # image 400 x 600
++    app.ocr_results = []
++    app.selection_container.restore([])
++    for bbox in [(0, 0, 60, 30), (80, 80, 200, 200), (10, 300, 90, 400)]:
++        app.selection_container.add(bbox)
++    app.edits = {"2": "二", "3": "三"}
++    app.image_states[str(path)]["edits"] = app.edits
++    app.editing_region_id = None
++    app.active_region_id = "2"
++    app._update_selections_ui()
++    return app, str(path)
++
++
++class Ev:
++    def __init__(self, gx, gy):
++        self.global_x = gx
++        self.global_y = gy
++
++
++def grip_at(app, grip):
++    """The grip control for one name, found by its place on the selected frame."""
++    order = ["nw", "n", "ne", "e", "se", "s", "sw", "w", "move"]
++    gs = [g for g in app.handles_layer.controls if isinstance(g, ft.GestureDetector)]
++    return gs[order.index(grip)]
++
++
++def drag(app, grip, dx_screen, dy_screen):
++    g = grip_at(app, grip)
++    g.on_pan_start(Ev(100, 100))
++    g.on_pan_update(Ev(100 + dx_screen / 2, 100 + dy_screen / 2))
++    g.on_pan_update(Ev(100 + dx_screen, 100 + dy_screen))
++    g.on_pan_end(Ev(100 + dx_screen, 100 + dy_screen))
++
++
++def bbox_of(app, rid):
++    return [r.bbox for r in app.selection_container.get_all() if r.rect_id == rid][0]
++
++
++def test_1_adjust_bbox_contract():
++    b = (100, 100, 200, 200)
++    assert adjust_bbox(b, "move", 10, -20, 400, 600) == (110, 80, 210, 180)
++    assert adjust_bbox(b, "move", -500, 900, 400, 600) == (0, 500, 100, 600)       # stays inside the image
++    assert adjust_bbox(b, "se", 30, 40, 400, 600) == (100, 100, 230, 240)
++    assert adjust_bbox(b, "nw", -30, -40, 400, 600) == (70, 60, 200, 200)
++    assert adjust_bbox(b, "e", 30, 40, 400, 600) == (100, 100, 230, 200)          # e ignores dy
++    assert adjust_bbox(b, "n", 30, 40, 400, 600) == (100, 140, 200, 200)          # n ignores dx
++    assert adjust_bbox(b, "se", 999, 999, 400, 600) == (100, 100, 400, 600)       # clipped to the image
++    assert adjust_bbox(b, "nw", 999, 999, 400, 600) == (196, 196, 200, 200)       # never below min_size
++    assert adjust_bbox(b, "w", -999, 0, 400, 600) == (0, 100, 200, 200)
++
++
++def test_2_set_bbox_contract():
++    c = SelectionContainer()
++    for i in range(3):
++        c.add((i, i, i + 1, i + 1))
++    assert c.set_bbox("2", (5, 6, 7, 8)) is True
++    assert [r.rect_id for r in c.get_all()] == ["1", "2", "3"]
++    assert [r.label for r in c.get_all()] == ["Region 1", "Region 2", "Region 3"]
++    assert c.get_all()[1].bbox == (5, 6, 7, 8)
++    assert c.set_bbox("9", (0, 0, 1, 1)) is False
++    assert c.add((0, 0, 1, 1)).rect_id == "4"                                     # numbering untouched
++
++
++def test_3_grips_on_selected_frame_only(dummy_page, tmp_path):
++    app, _ = get_prepared_app(dummy_page, tmp_path)
++    gs = [g for g in app.handles_layer.controls if isinstance(g, ft.GestureDetector)]
++    assert len(gs) == 9
++    assert [g.mouse_cursor for g in gs] == [
++        ft.MouseCursor.RESIZE_UP_LEFT_DOWN_RIGHT, ft.MouseCursor.RESIZE_UP_DOWN,
++        ft.MouseCursor.RESIZE_UP_RIGHT_DOWN_LEFT, ft.MouseCursor.RESIZE_LEFT_RIGHT,
++        ft.MouseCursor.RESIZE_UP_LEFT_DOWN_RIGHT, ft.MouseCursor.RESIZE_UP_DOWN,
++        ft.MouseCursor.RESIZE_UP_RIGHT_DOWN_LEFT, ft.MouseCursor.RESIZE_LEFT_RIGHT,
++        ft.MouseCursor.MOVE]
++    s = app.zoom_scale
++    se = grip_at(app, "se")
++    assert se.left + se.width / 2 == pytest.approx(200 * s)
++    assert se.top + se.height / 2 == pytest.approx(200 * s)
++    mv = grip_at(app, "move")
++    assert mv.left + mv.width / 2 == pytest.approx(140 * s)
++
++
++def test_4_no_grips_in_pan_mode_or_hidden(dummy_page, tmp_path):
++    app, _ = get_prepared_app(dummy_page, tmp_path)
++    app._toggle_mode(None)
++    assert app.mode_state.current == "PAN"
++    assert app.handles_layer.controls == []
++    app._toggle_mode(None)
++    assert len(app.handles_layer.controls) == 9
++    app.toggle_region_visible("2")
++    assert app.handles_layer.controls == []
++
++
++def test_5_resize_and_save(dummy_page, tmp_path):
++    app, path = get_prepared_app(dummy_page, tmp_path)
++    s = app.zoom_scale
++    drag(app, "se", 40 * s, 20 * s)
++    assert bbox_of(app, "2") == pytest.approx((80, 80, 240, 220))
++    assert [r.rect_id for r in app.selection_container.get_all()] == ["1", "2", "3"]
++    assert app.edits == {"2": "二", "3": "三"}
++    st = work_state.load_work_state(path)
++    assert st is not None
++    assert [r["rect_id"] for r in st["rects"]] == ["1", "2", "3"]
++    assert st["rects"][1]["bbox"] == pytest.approx([80, 80, 240, 220])
++    assert st["edits"] == {"2": "二", "3": "三"}
++    se = grip_at(app, "se")                                     # grips follow the new frame
++    assert se.left + se.width / 2 == pytest.approx(240 * s)
++
++
++def test_6_move_stays_inside(dummy_page, tmp_path):
++    app, _ = get_prepared_app(dummy_page, tmp_path)
++    s = app.zoom_scale
++    drag(app, "move", -1000 * s, 30 * s)
++    assert bbox_of(app, "2") == pytest.approx((0, 110, 120, 230))
++
++
++def test_7_preview_only_until_release(dummy_page, tmp_path):
++    app, path = get_prepared_app(dummy_page, tmp_path)
++    s = app.zoom_scale
++    g = grip_at(app, "e")
++    g.on_pan_start(Ev(100, 100))
++    g.on_pan_update(Ev(100 + 50 * s, 100))
++    assert bbox_of(app, "2") == (80, 80, 200, 200)              # not yet
++    preview = app.handles_layer.controls[-1]
++    assert preview.width == pytest.approx(170 * s)
++    assert work_state.load_work_state(path) is None
++    g.on_pan_end(Ev(100 + 50 * s, 100))
++    assert bbox_of(app, "2") == pytest.approx((80, 80, 250, 200))
++
++
++def test_8_no_change_writes_nothing(dummy_page, tmp_path):
++    app, path = get_prepared_app(dummy_page, tmp_path)
++    drag(app, "nw", 0, 0)
++    assert bbox_of(app, "2") == (80, 80, 200, 200)
++    assert work_state.load_work_state(path) is None
++    assert len(app.handles_layer.controls) == 9
++
++
++def test_9_no_change_while_editing(dummy_page, tmp_path):
++    app, path = get_prepared_app(dummy_page, tmp_path)
++    app.editing_region_id = "3"
++    drag(app, "se", 40, 40)
++    assert bbox_of(app, "2") == (80, 80, 200, 200)
++    assert "編集中" in app.latest_region_info
++    assert work_state.load_work_state(path) is None
++
++
++def test_10_layer_order_and_zoom(dummy_page, tmp_path):
++    app, _ = get_prepared_app(dummy_page, tmp_path)
++    c = app.stack.controls
++    assert c.index(app.gesture_detector) < c.index(app.inline_editor_layer) < c.index(app.handles_layer)
++    assert c[-1] is app.handles_layer
++    app.zoom_scale = app.zoom_scale * 2
++    app._update_viewer()
++    se = grip_at(app, "se")
++    assert se.left + se.width / 2 == pytest.approx(200 * app.zoom_scale)
++    assert app.handles_layer.width == pytest.approx(400 * app.zoom_scale)
+----- END PATCH -----
+
+## 3. Allowed and forbidden scope
+
+ALLOWED - these three files only, and only through the patch:
+
+    custom_gui/selection.py
+    custom_gui/app.py
+    tests/test_viewer_task65.py    (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    every other file under custom_gui/
+    every existing file under tests/
+    launch_viewer.py  src/**  requirements.txt  pyproject.toml
+    custom_gui/requirements-custom.txt  .nightly/**  .claude/**
+    AGENTS.md  CLAUDE.md  README.md  LICENCE  LICENCE_DEPENDENCEIES
+    and every NDL credit header
+    train/**  scripts/**  resource/**  jpg/**  work/**  any *.bat file
+    venv/ .venv/ or any virtual environment (do not commit one)
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no *.patch, no notes: put your report in the session
+    message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the three paths above, nothing else
+    git diff --stat custom_gui/selection.py   33 insertions, 0 deletions
+    git diff --stat custom_gui/app.py         115 insertions, 5 deletions
+    grep -c "def set_bbox" custom_gui/selection.py       exactly 1
+    grep -c "def adjust_bbox" custom_gui/selection.py    exactly 1
+    grep -c "def _update_handles" custom_gui/app.py      exactly 1
+    grep -c "self._update_handles()" custom_gui/app.py   exactly 6
+    grep -c "^def test_" tests/test_viewer_task65.py     exactly 10
+    and a line-by-line comparison with the commander's own copy.
+
+## 4. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Run the suite on master BEFORE your change and report the count
+  (it is 406 passed on 2026-10-09); after it, 416 passed, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 5. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the seven below: break the code, run
+`python -m pytest tests/test_viewer_task65.py -q --tb=line`, show the FAILING
+output, undo exactly that break (nothing else), show it green.
+
+    (i)   in set_bbox, replace `rect.bbox = tuple(bbox)` with `pass`
+                                                  -> cases 2, 5, 6, 7 must fail
+    (ii)  in _on_grip_end, remove self._persist_work_state()  -> case 5 must fail
+    (iii) in _on_grip_start, replace the editing check with `if False:`
+                                                  -> case 9 must fail
+    (iv)  in _update_handles, remove `self.mode_state.current == "SELECT" and`
+                                                  -> case 4 must fail
+    (v)   in adjust_bbox, remove the two clamp lines of the "move" branch
+                                                  -> cases 1 and 6 must fail
+    (vi)  in the first ft.Stack(controls=[...]) of __init__, put
+          self.handles_layer before self.inline_editor_layer -> case 10 must fail
+    (vii) in the same list, put self.handles_layer before
+          self.gesture_detector                   -> case 10 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 6. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do NOT write helper scripts. The only temporary file allowed is the patch
+  file, and it must be deleted before you submit. Show `git status --short`
+  with exactly three lines.
+- tests/test_viewer_task65.py is required. A submission without it is
+  rejected.
+- You start from `master`.
+
+## 7. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the seven injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. git diff --stat
+    5. anything you did differently from this order, and why
