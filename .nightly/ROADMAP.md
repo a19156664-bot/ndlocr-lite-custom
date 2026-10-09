@@ -889,7 +889,7 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
   画面（写しの画像 1 枚・8572）: 右下を引いて大きくなり保存も変わる・真ん中で動かして大きさと直した文字はそのまま・ふつうの枠描きも動く。
   マージのとき: GitHub の master に Task 64 が無いので、selection.py の delete_by_id の前で Task 64 の move_by とぶつかる（両方残す・ref/task-65 と同じ形）。
 
-## 2026-10-09 21:1x〜 166〜170号（入荷 in±009・指揮官と Sonnet で夜間に②〜⑤）
+## 2026-10-09 21:1x〜 166〜170号（入荷 in\261009・指揮官と Sonnet で夜間に②〜⑤）
 
 - 印が変わった: 黄緑の塗り → PDF の注釈（赤い四角 723・L 字の多角形 7・写真説明を丸で囲む手書き線）。注釈から枠を取る（annot_rects.py）。166号 p6・p43・p48 で赤い印の外の縁と一致を確かめた
 - ① 全体OCR: run_full_ocr.py（300dpi・1 号 10〜13 分・21:28〜22:29 で 5 号とも exit 0）
