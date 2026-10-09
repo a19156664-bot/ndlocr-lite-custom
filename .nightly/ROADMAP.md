@@ -888,3 +888,13 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
   見本（ndlocr-work3）: ref/task-65（手元の master ddac48f の上）424 passed／ref/task-65o（GitHub の master 5284c9b の上・発注はこちら）416 passed。壊し方 7 通りすべて鳴る。
   画面（写しの画像 1 枚・8572）: 右下を引いて大きくなり保存も変わる・真ん中で動かして大きさと直した文字はそのまま・ふつうの枠描きも動く。
   マージのとき: GitHub の master に Task 64 が無いので、selection.py の delete_by_id の前で Task 64 の move_by とぶつかる（両方残す・ref/task-65 と同じ形）。
+
+## 2026-10-09 21:1x〜 166〜170号（入荷 in±009・指揮官と Sonnet で夜間に②〜⑤）
+
+- 印が変わった: 黄緑の塗り → PDF の注釈（赤い四角 723・L 字の多角形 7・写真説明を丸で囲む手書き線）。注釈から枠を取る（annot_rects.py）。166号 p6・p43・p48 で赤い印の外の縁と一致を確かめた
+- ① 全体OCR: run_full_ocr.py（300dpi・1 号 10〜13 分・21:28〜22:29 で 5 号とも exit 0）
+- ① 一括処理: batch_annot_ocr.py（batch_region_ocr と同じ。枠だけ注釈から。並びは上から・左から）。3 本並べる（166→170・170→168・168→169。2 本→3 本で 1.4→2.0 枠/分）。ログ work\outputatch_annot_*.log
+- ②〜⑤ の道具: sonnet_to_check.py（Sonnet の返事→確認の CSV）。apply_fixes・reread_vertical に --viewer-other-issue-ok（承認者の 142号ビューアを開いたまま書く）。枠の文字を丸ごと入れ替えるときは確認の CSV の「置き換え元」「置き換える文字」
+- 今夜の型: 飾りの印を字に読む・枠の外のルビ／字の混入・右から左の横書きを逆に読む（rtl.convert_right_to_left で戻す）・飾り文字の大見出しが屑（画像で読んで入れ替え）・手書きの丸の枠は傾いて読めない（人へ）・縦で読み直すと旧字が新字に戻る（④で拾う）
+- 互換用の漢字（U+F900〜FAFF・例 福 U+FA1B）が保存に残る。141〜145号にも 15〜48 字。今夜は変えず、朝に伺う
+- 01:03 時点: ②〜⑤ 済み = 166号 全頁・167号 p1〜13・170号 p1〜34。人へ回す = work\proofread\<号>号_人へ回す.csv
