@@ -44,6 +44,19 @@ class SelectionContainer:
     def get_all(self) -> List[SelectionRect]:
         return list(self._rects)
 
+    def move_by(self, rect_id: str, delta: int) -> bool:
+        """Move one place up (-1) or down (+1) in the list. ids and labels do not change."""
+        if delta not in (-1, 1):
+            return False
+        for i, rect in enumerate(self._rects):
+            if rect.rect_id == rect_id:
+                j = i + delta
+                if j < 0 or j >= len(self._rects):
+                    return False
+                self._rects[i], self._rects[j] = self._rects[j], self._rects[i]
+                return True
+        return False
+
     def delete_by_id(self, rect_id: str) -> bool:
         for i, rect in enumerate(self._rects):
             if rect.rect_id == rect_id:

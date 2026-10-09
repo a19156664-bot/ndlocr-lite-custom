@@ -1591,7 +1591,13 @@ class SelectableImageViewer(ImageViewer):
                 header_text,
                 ft.Row(buttons, spacing=0)
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True),
-            content_area
+            content_area,
+            ft.Row([
+                ft.IconButton(icon=ft.Icons.ARROW_UPWARD, tooltip="上へ", icon_size=18, width=32, height=32, padding=0,
+                              on_click=lambda e, rid=rect.rect_id: self.move_region(rid, -1)),
+                ft.IconButton(icon=ft.Icons.ARROW_DOWNWARD, tooltip="下へ", icon_size=18, width=32, height=32, padding=0,
+                              on_click=lambda e, rid=rect.rect_id: self.move_region(rid, 1)),
+            ], spacing=0, alignment=ft.MainAxisAlignment.END)
         ])
     
         border_color = ft.Colors.GREEN if is_active else ft.Colors.OUTLINE
@@ -1606,6 +1612,17 @@ class SelectableImageViewer(ImageViewer):
             on_click=make_active
         )
         return item
+
+    def move_region(self, rid, delta: int) -> None:
+        if self.editing_region_id is not None:
+            self.latest_region_info = "編集中は順番を動かせません（保存か取消をしてから）"
+            self._update_status()
+            return
+        if not self.selection_container.move_by(rid, delta):
+            return
+        self.active_region_id = rid
+        self._update_selections_ui()
+        self._persist_work_state()
 
     def start_region_ocr(self, rid, vertical: bool = False):
         if rid in self.edits:
