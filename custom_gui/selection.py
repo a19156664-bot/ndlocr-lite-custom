@@ -44,6 +44,14 @@ class SelectionContainer:
     def get_all(self) -> List[SelectionRect]:
         return list(self._rects)
 
+    def set_bbox(self, rect_id: str, bbox: Tuple[float, float, float, float]) -> bool:
+        """Change where one frame is. ids, labels and the list order do not change."""
+        for rect in self._rects:
+            if rect.rect_id == rect_id:
+                rect.bbox = tuple(bbox)
+                return True
+        return False
+
     def delete_by_id(self, rect_id: str) -> bool:
         for i, rect in enumerate(self._rects):
             if rect.rect_id == rect_id:
@@ -100,3 +108,28 @@ def find_region_at_point(
                 best_rect_id = rect.rect_id
                 
     return best_rect_id
+
+
+def adjust_bbox(
+    bbox: Tuple[float, float, float, float],
+    grip: str,
+    dx: float, dy: float,
+    img_w: float, img_h: float,
+    min_size: float = 4.0
+) -> Tuple[float, float, float, float]:
+    """Move ("move") or resize (a grip made of n / s / e / w) a frame by dx, dy
+    original pixels. The frame stays inside the image and never gets smaller than min_size."""
+    x1, y1, x2, y2 = bbox
+    if grip == "move":
+        dx = max(-x1, min(dx, img_w - x2))
+        dy = max(-y1, min(dy, img_h - y2))
+        return (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
+    if "w" in grip:
+        x1 = min(max(0.0, x1 + dx), x2 - min_size)
+    if "e" in grip:
+        x2 = max(min(img_w, x2 + dx), x1 + min_size)
+    if "n" in grip:
+        y1 = min(max(0.0, y1 + dy), y2 - min_size)
+    if "s" in grip:
+        y2 = max(min(img_h, y2 + dy), y1 + min_size)
+    return (x1, y1, x2, y2)

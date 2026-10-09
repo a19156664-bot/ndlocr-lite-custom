@@ -1,7 +1,7 @@
 import flet as ft
 from custom_gui.image_sequence import ImageSequence, list_images_in_folder
 from custom_gui.viewer import ImageViewer, original_to_display, apply_pan, InteractionMode, calculate_label_position
-from custom_gui.selection import SelectionContainer, calculate_normalized_bbox, SelectionRect, find_region_at_point
+from custom_gui.selection import SelectionContainer, calculate_normalized_bbox, SelectionRect, find_region_at_point, adjust_bbox
 from custom_gui.ocr_bridge import run_ocr_and_parse
 import custom_gui.work_state as work_state
 from custom_gui.region_filter import filter_lines_by_region
@@ -202,6 +202,13 @@ class SelectableImageViewer(ImageViewer):
             height=self.win_h,
         )
         self.inline_editing_region_id = None
+        # Grips of the selected frame (on top of everything, so they get their own drags)
+        self.handles_layer = ft.Stack(
+            controls=[],
+            width=self.win_w,
+            height=self.win_h,
+        )
+        self._grip_drag = None
         
         # Intercept mouse drag events
         self.gesture_detector = ft.GestureDetector(
@@ -262,13 +269,14 @@ class SelectableImageViewer(ImageViewer):
                     self.highlight_layer,
                     self.rects_layer,
                     self.gesture_detector,
-                    self.inline_editor_layer
+                    self.inline_editor_layer,
+                    self.handles_layer
                 ],
                 width=self.img_w * self.zoom_scale,
                 height=self.img_h * self.zoom_scale,
             )
             if not hasattr(self, 'stack'):
-                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector, self.inline_editor_layer])
+                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector, self.inline_editor_layer, self.handles_layer])
             self.image_container.content = self.stack
         
         # Override overall layout again with status
@@ -422,6 +430,7 @@ class SelectableImageViewer(ImageViewer):
         self.mode_state.set_mode(new_mode)
         self.mode_toggle.selected = {self.mode_state.current}
         self._refresh_cursor()
+        self._update_handles()
         if hasattr(self, 'status_text'):
             self.status_text.value = self._get_status_message()
         if self.page:
@@ -439,6 +448,7 @@ class SelectableImageViewer(ImageViewer):
             # Prevent deselecting everything - fallback to current mode
             e.control.selected = {self.mode_state.current}
         self._refresh_cursor()
+        self._update_handles()
         if hasattr(self, 'status_text'):
             self.status_text.value = self._get_status_message()
         if self.page:
@@ -865,7 +875,7 @@ class SelectableImageViewer(ImageViewer):
             self.image_container.content = ft.Text(self.ocr_error, color=ft.Colors.RED, weight=ft.FontWeight.BOLD)
         else:
             if not hasattr(self, 'stack'):
-                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector, self.inline_editor_layer])
+                self.stack = ft.Stack(controls=[self.image_control, self.highlight_layer, self.rects_layer, self.gesture_detector, self.inline_editor_layer, self.handles_layer])
             self.image_container.content = self.stack
             
         self.btn_prev.disabled = not self.sequence.has_prev()
@@ -1193,6 +1203,8 @@ class SelectableImageViewer(ImageViewer):
             self.rects_layer.height = self.img_h * self.zoom_scale
             self.inline_editor_layer.width = self.img_w * self.zoom_scale
             self.inline_editor_layer.height = self.img_h * self.zoom_scale
+            self.handles_layer.width = self.img_w * self.zoom_scale
+            self.handles_layer.height = self.img_h * self.zoom_scale
             self.gesture_detector.width = self.img_w * self.zoom_scale
             self.gesture_detector.height = self.img_h * self.zoom_scale
             self.stack.width = self.img_w * self.zoom_scale
@@ -1264,6 +1276,8 @@ class SelectableImageViewer(ImageViewer):
             self.rects_layer.top = self.offset_y
             self.inline_editor_layer.left = self.offset_x
             self.inline_editor_layer.top = self.offset_y
+            self.handles_layer.left = self.offset_x
+            self.handles_layer.top = self.offset_y
             
             self._update_viewer()
 
@@ -1386,6 +1400,7 @@ class SelectableImageViewer(ImageViewer):
                 hidden.add(srid)
             
             self._redraw_overlays()
+            self._update_handles()
             
             if self.highlight_layer.page:
                 self.highlight_layer.update()
@@ -1415,6 +1430,8 @@ class SelectableImageViewer(ImageViewer):
             self.rects_layer.top = self.offset_y
             self.inline_editor_layer.left = self.offset_x
             self.inline_editor_layer.top = self.offset_y
+            self.handles_layer.left = self.offset_x
+            self.handles_layer.top = self.offset_y
             
             self._redraw_overlays()
             self.selections_list.controls.clear()
@@ -1441,7 +1458,95 @@ class SelectableImageViewer(ImageViewer):
                 _safe_update(self.highlight_layer)
                 _safe_update(self.rects_layer)
                 self.selections_list.update()
+            self._update_handles()
 
+    GRIP_CURSORS = {
+        "nw": ft.MouseCursor.RESIZE_UP_LEFT_DOWN_RIGHT, "se": ft.MouseCursor.RESIZE_UP_LEFT_DOWN_RIGHT,
+        "ne": ft.MouseCursor.RESIZE_UP_RIGHT_DOWN_LEFT, "sw": ft.MouseCursor.RESIZE_UP_RIGHT_DOWN_LEFT,
+        "n": ft.MouseCursor.RESIZE_UP_DOWN, "s": ft.MouseCursor.RESIZE_UP_DOWN,
+        "e": ft.MouseCursor.RESIZE_LEFT_RIGHT, "w": ft.MouseCursor.RESIZE_LEFT_RIGHT,
+        "move": ft.MouseCursor.MOVE,
+    }
+
+    def _update_handles(self):
+        """Grips on the selected frame: 8 to resize, 1 in the middle to move (Select mode only)."""
+        if not hasattr(self, "handles_layer") or self._grip_drag is not None:
+            return
+        self.handles_layer.controls.clear()
+        rid = self.active_region_id
+        rect = next((r for r in self.selection_container.get_all() if r.rect_id == rid), None)
+        if rect is not None and self.mode_state.current == "SELECT" and str(rid) not in self._hidden_ids():
+            x1, y1, x2, y2 = rect.bbox
+            dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, 0.0, 0.0)
+            dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, 0.0, 0.0)
+            mx, my = (dx1 + dx2) / 2, (dy1 + dy2) / 2
+            spots = {"nw": (dx1, dy1), "n": (mx, dy1), "ne": (dx2, dy1), "e": (dx2, my),
+                     "se": (dx2, dy2), "s": (mx, dy2), "sw": (dx1, dy2), "w": (dx1, my), "move": (mx, my)}
+            for grip, (cx, cy) in spots.items():
+                size = 14 if grip == "move" else 10
+                self.handles_layer.controls.append(ft.GestureDetector(
+                    content=ft.Container(
+                        width=size, height=size, bgcolor=ft.Colors.WHITE,
+                        border=ft.border.all(2, ft.Colors.BLUE),
+                        border_radius=size / 2 if grip == "move" else 0,
+                    ),
+                    left=cx - size / 2, top=cy - size / 2, width=size, height=size,
+                    mouse_cursor=self.GRIP_CURSORS[grip],
+                    drag_interval=10,
+                    on_pan_start=lambda e, g=grip: self._on_grip_start(e, rid, g),
+                    on_pan_update=self._on_grip_update,
+                    on_pan_end=self._on_grip_end,
+                ))
+        if getattr(self.handles_layer, 'page', None):
+            self.handles_layer.update()
+
+    def _on_grip_start(self, e, rid, grip):
+        if self.editing_region_id is not None:
+            self.latest_region_info = "編集中は枠を動かせません（保存か取消をしてから）"
+            self._update_status()
+            return
+        rect = next((r for r in self.selection_container.get_all() if r.rect_id == rid), None)
+        if rect is None:
+            return
+        if self.inline_editing_region_id is not None:
+            self._cancel_inline_edit()
+        preview = ft.Container(border=ft.border.all(2, ft.Colors.ORANGE), bgcolor=ft.Colors.TRANSPARENT)
+        self._grip_drag = {"rid": rid, "grip": grip, "gx": e.global_x, "gy": e.global_y,
+                           "bbox": tuple(rect.bbox), "new": tuple(rect.bbox), "preview": preview}
+        self.handles_layer.controls.append(preview)
+        self._place_preview()
+
+    def _on_grip_update(self, e):
+        d = self._grip_drag
+        if d is None:
+            return
+        dx = (e.global_x - d["gx"]) / self.zoom_scale
+        dy = (e.global_y - d["gy"]) / self.zoom_scale
+        d["new"] = adjust_bbox(d["bbox"], d["grip"], dx, dy, self.img_w, self.img_h)
+        self._place_preview()
+
+    def _place_preview(self):
+        d = self._grip_drag
+        x1, y1, x2, y2 = d["new"]
+        dx1, dy1 = original_to_display(x1, y1, self.zoom_scale, 0.0, 0.0)
+        dx2, dy2 = original_to_display(x2, y2, self.zoom_scale, 0.0, 0.0)
+        p = d["preview"]
+        p.left, p.top, p.width, p.height = dx1, dy1, dx2 - dx1, dy2 - dy1
+        if getattr(self.handles_layer, 'page', None):
+            self.handles_layer.update()
+
+    def _on_grip_end(self, e):
+        d = self._grip_drag
+        self._grip_drag = None
+        if d is None:
+            return
+        if d["new"] != d["bbox"]:
+            self.selection_container.set_bbox(d["rid"], d["new"])
+            self.active_region_id = d["rid"]
+            self._update_selections_ui()
+            self._persist_work_state()
+        else:
+            self._update_handles()
 
     def _row_index(self, rid) -> int | None:
         row = self._row_by_id.get(rid)
@@ -1778,6 +1883,8 @@ class SelectableImageViewer(ImageViewer):
             self.rects_layer.height = self.img_h * self.zoom_scale
             self.inline_editor_layer.width = self.img_w * self.zoom_scale
             self.inline_editor_layer.height = self.img_h * self.zoom_scale
+            self.handles_layer.width = self.img_w * self.zoom_scale
+            self.handles_layer.height = self.img_h * self.zoom_scale
             self.gesture_detector.width = self.img_w * self.zoom_scale
             self.gesture_detector.height = self.img_h * self.zoom_scale
             self.stack.width = self.img_w * self.zoom_scale
@@ -1794,11 +1901,14 @@ class SelectableImageViewer(ImageViewer):
                 self.rects_layer.update()
             if getattr(self.inline_editor_layer, 'page', None):
                 self.inline_editor_layer.update()
+            if getattr(self.handles_layer, 'page', None):
+                self.handles_layer.update()
 
         if getattr(self, "_overlay_scale", None) is not None and getattr(self, "_overlay_scale") != self.zoom_scale:
             with self.selections_lock:
                 if getattr(self, "_overlay_scale", None) is not None and getattr(self, "_overlay_scale") != self.zoom_scale:
                     self._redraw_overlays()
+                    self._update_handles()
                     if getattr(self, 'page', None):
                         if getattr(self.highlight_layer, 'page', None):
                             self.highlight_layer.update()
