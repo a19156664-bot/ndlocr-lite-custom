@@ -32,6 +32,13 @@ class OcrState(Enum):
     DONE = auto()
     ERROR = auto()
 
+def center_offset(center: float, img_len: float, scale: float, view_len: float) -> float:
+    """Task 68: 枠の真ん中（元の画像の座標）を、画像の見えている所（長さ view_len）の真ん中へ置くずらし量。
+    その向きで画像が見えている所に収まっているときは 0（動かさない）。"""
+    if img_len * scale <= view_len:
+        return 0.0
+    return view_len / 2 - center * scale
+
 def get_ocr_status_text(state: OcrState, line_count: int = 0) -> str:
     if state == OcrState.IDLE:
         return "OCR not started"
@@ -1361,6 +1368,23 @@ class SelectableImageViewer(ImageViewer):
         self._update_selections_ui()
         self._update_inline_editor()
 
+    def center_on_region(self, rid) -> None:
+        """Task 68: 右の一覧で押した枠の真ん中を、画像の見えている所の真ん中へ動かす（承認者 10-10・枠を探して動かす手間を省く）。
+        動かすのは Pan と同じずらし量（offset_x/y）。倍率は変えない。スクロールは 0 に戻す（ずらし量はスクロール 0 で計るため）。"""
+        rect = next((r for r in self.selection_container.get_all() if r.rect_id == rid), None)
+        if rect is None or getattr(self, 'ocr_error', None):
+            return
+        x1, y1, x2, y2 = rect.bbox
+        self.offset_x = center_offset((x1 + x2) / 2, self.img_w, self.zoom_scale, self.win_w)
+        self.offset_y = center_offset((y1 + y2) / 2, self.img_h, self.zoom_scale, self.win_h)
+        for layer in (self.image_control, self.highlight_layer, self.rects_layer, self.inline_editor_layer):
+            layer.left = self.offset_x
+            layer.top = self.offset_y
+        for scroller in (self.scrollable_image, self.scrollable_image.controls[0]):
+            if getattr(scroller, 'page', None):
+                scroller.scroll_to(offset=0)
+        self._update_viewer()
+
     def _redraw_overlays(self):
         self.rects_layer.controls.clear()
         self.highlight_layer.controls.clear()
@@ -1564,6 +1588,7 @@ class SelectableImageViewer(ImageViewer):
             self._persist_work_state()
         
         def make_active(e, rid=rect.rect_id):
+            self.center_on_region(rid)  # Task 68: 選び直しでなくても、押せば画像をその枠へ動かす
             if self.active_region_id != rid:
                 self.active_region_id = rid
                 self._update_selections_ui()
