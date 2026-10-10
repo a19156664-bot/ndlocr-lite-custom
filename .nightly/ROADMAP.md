@@ -932,3 +932,4 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
 - 16:11 Task 67 Jules COMPLETED。成果を GitHub の master に当てた tree は見本と一致（005393f）。手元の master の上 check/task-67（131dcf2）449 passed
 - 画面（写しのビューア 8572・ヘッドレス Edge）で測ると、直した枠の行はボタン 8 個で右の一覧の幅 280 を超え、コピーが半分切れ Delete が見えなかった（試験は木の形だけ見ていて捕まえない）→ 指揮官の設計の穴。ボタンの列に wrap=True を足すと 2 段目にコピーと Delete が並び、押すと Last: に「コピーしました: page_01 Region 9」
 - [ ] Task 67b（67 の出し直し・wrap を 1 行）Jules 14515787981024014574（.nightly/prompts/task67b_prompt.txt）。見本 ref/task-67bo（418 passed・壊し方 9/9・tree c3d396f）／手元 check/task-67b（2e8dc8a・449 passed）→ 検収 → 承認者の画面確認（クリップボードに入るか）→ マージ。Task 67（17886470487823122346）は取り込まない
+- [x] Task 67b マージ 208f666（Jules 14515787981024014574・成果の tree は見本と一致 c3d396f・master 449 passed）。承認者 10-10 写しの画面確認の後「マージをお願いいたします」。Jules の計画に「patch を文字列で当てた・自前の script」とあったが、成果は見本と同じ。本物のビューアは起動し直すとボタンが出る
