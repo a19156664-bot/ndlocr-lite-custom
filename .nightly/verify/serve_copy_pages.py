@@ -23,7 +23,11 @@ for i in range(1, N + 1):
     st_src = os.path.join(SRC, ".ndlocr_cache", f"国際寫眞新聞_142号_p{i:04d}.work.json")
     st_dst = os.path.join(HERE, ".ndlocr_cache", f"page_{i:02d}.work.json")
     if os.path.exists(st_src) and not os.path.exists(st_dst):
-        shutil.copyfile(st_src, st_dst)   # 元は読むだけ。写しに書く
+        # 元は読むだけ。照合の値（元の PDF の大きさ・時刻）を写しの画像のものに替えて写しに書く（替えないと読み込まれず、枠が出ない）
+        d = json.load(open(st_src, encoding="utf-8"))
+        st = os.stat(png)
+        d.update(source_name=os.path.basename(png), source_size=st.st_size, source_mtime=st.st_mtime, page_index=None)
+        json.dump(d, open(st_dst, "w", encoding="utf-8"), ensure_ascii=False)
     paths.append(png)
 
 import flet as ft
