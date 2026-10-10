@@ -23,6 +23,20 @@ def list_images_in_folder(folder: str) -> List[str]:
     return image_paths
 
 
+def page_index_from_text(text: Optional[str], count: int) -> Optional[int]:
+    """
+    Task 66: 頁番号の入力（1 始まり。全角の数字も可）を 0 始まりの位置にする。
+    空・数でない・1〜count の外は None（移らない）。
+    """
+    s = (text or "").strip()
+    if not s or not s.isdecimal():
+        return None
+    n = int(s)
+    if 1 <= n <= count:
+        return n - 1
+    return None
+
+
 class ImageSequence:
     def __init__(self, paths: List[str]):
         self._paths = list(paths)
