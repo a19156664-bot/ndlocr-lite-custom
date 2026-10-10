@@ -43,6 +43,22 @@ def pages_of(pdf):
         return None
 
 
+def f1_chars(xlsx):
+    """納品の Excel の F1（=SUM(D3:D143)、D は LEN(B)+LEN(C)）を再現する。form_export が書いた Excel は式の値を持たないので、
+    ファイルの F1 は読めない。LEN は UTF-16 の単位で数える（見本 第28号の Excel の保存値 7932 と一致・10-10）"""
+    import openpyxl
+    ws = openpyxl.load_workbook(xlsx, data_only=True)["入力フォーム"]
+    u16 = lambda v: 0 if v is None else len(str(v).encode("utf-16-le")) // 2
+    return sum(u16(ws.cell(r, 2).value) + u16(ws.cell(r, 3).value) for r in range(3, 144))
+
+
+def delivered_xlsx(n):
+    """その号の（ご納品…）xlsx のうち最も新しい 1 本（141号は「ご納品／修正」がある）。Excel が開いている印 ~$ は除く"""
+    xs = [p for p in glob.glob(os.path.join(W, "納品", "*", "*.xlsx"))
+          if f"_{n}号" in os.path.basename(p) and "ご納品" in os.path.basename(p) and not os.path.basename(p).startswith("~$")]
+    return max(xs, key=os.path.getmtime) if xs else None
+
+
 def ledger():
     got = {}
     if os.path.exists(LEDGER):
@@ -100,9 +116,11 @@ def measure(n, led):
             s["人の確認"] = (TODO, "", "")
     else:
         s["人の確認"] = (TODO, "", "")
-    xl = [p for p in glob.glob(os.path.join(W, "*.xlsx")) + glob.glob(os.path.join(W, "納品", "*", "*.xlsx")) if f"_{n}号" in os.path.basename(p)]
+    xl = [p for p in glob.glob(os.path.join(W, "*.xlsx")) + glob.glob(os.path.join(W, "納品", "*", "*.xlsx"))
+          if f"_{n}号" in os.path.basename(p) and not os.path.basename(p).startswith("~$")]
     s["Excel"] = (DONE, f"{max(t(p) for p in xl):%m-%d}", "") if xl else (TODO, "", "")
-    dl = [p for p in glob.glob(os.path.join(W, "納品", "*", "*")) if f"_{n}号" in os.path.basename(p) and "ご納品" in os.path.basename(p)]
+    dl = [p for p in glob.glob(os.path.join(W, "納品", "*", "*"))
+          if f"_{n}号" in os.path.basename(p) and "ご納品" in os.path.basename(p) and not os.path.basename(p).startswith("~$")]
     s["納品"] = (DONE, f"{max(t(p) for p in dl):%m-%d}（{os.path.basename(os.path.dirname(dl[0]))}）", "") if dl else (TODO, "", "")
     for key, _, _ in STAGES:  # 手で付けた行が勝つ
         r = led.get((str(n), key))
@@ -122,9 +140,12 @@ def main():
     now = datetime.now()
     color = {DONE: "ok", PART: "part", WAIT: "part", TODO: "todo", NA: "na", OPEN: "na"}
     head = "".join(f"<th>{html.escape(lbl)}<br><span class='who'>{html.escape(who)}</span></th>" for _, lbl, who in STAGES)
-    body = []
+    body, chars = [], {}
     for n in nums:
         s = measure(n, led)
+        dx = delivered_xlsx(n) if s["納品"][0] == DONE else None
+        if dx:
+            chars[n] = (f1_chars(dx), os.path.basename(dx))
         # 次の一手: 判定待ちの監査（脇の工程）と、順番の工程で最初に残っている 1 つ
         nxt = [(lbl, s[key][2] or who) for key, lbl, who in STAGES if key == "監査" and s[key][0] in (WAIT, PART)]
         nxt += [(lbl, s[key][2] or who) for key, lbl, who in STAGES if key != "監査" and s[key][0] not in (DONE, NA, OPEN)][:1]
@@ -135,8 +156,13 @@ def main():
             cells.append(f"<td class='{color.get(st, 'part')}'><b>{html.escape(st)}</b>"
                          f"<div class='det'>{html.escape(det)}</div>{by_txt}</td>")
         nx = "".join(f"<div>{html.escape(l)}<div class='who'>{html.escape(w)}</div></div>" for l, w in nxt) if nxt else "完了"
-        body.append(f"<tr><th>{n}号</th>{''.join(cells)}<td class='next'>{nx}</td></tr>")
-        print(f"{n}号: " + " / ".join(f"{k}={s[k][0]}" for k, _, _ in STAGES) + " → 次: " + ("・".join(f"{l}（{w}）" for l, w in nxt) if nxt else "完了"))
+        fc = (f"<td class='num'><b>{chars[n][0]:,}</b> 字<div class='det'>{html.escape(chars[n][1])}</div></td>"
+              if n in chars else "<td class='num na'>—</td>")
+        body.append(f"<tr><th>{n}号</th>{''.join(cells)}{fc}<td class='next'>{nx}</td></tr>")
+        print(f"{n}号: " + " / ".join(f"{k}={s[k][0]}" for k, _, _ in STAGES) + " → 次: " + ("・".join(f"{l}（{w}）" for l, w in nxt) if nxt else "完了")
+              + (f" ／ 納品 F1={chars[n][0]}（{chars[n][1]}）" if n in chars else ""))
+    total = sum(c for c, _ in chars.values())
+    print(f"総文字数（納品済み {len(chars)} 号の F1 の合計）= {total}")
     page = f"""<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>進捗管理表</title>
@@ -149,14 +175,21 @@ h1{{font-size:20px;margin:0 0 4px}}p.note{{color:var(--mut);font-size:13px;margi
 th,td{{border:1px solid var(--line);padding:6px 8px;vertical-align:top;text-align:left}}
 thead th{{background:var(--head);font-size:13px}}tbody th{{background:var(--head);white-space:nowrap}}
 td.ok{{background:var(--ok)}}td.part{{background:var(--part)}}td.todo{{background:var(--todo)}}td.na{{background:var(--na);color:var(--mut)}}
-td.next{{font-weight:bold}}.who{{color:var(--mut);font-size:12px;font-weight:normal}}.det{{font-size:12px}}
+td.next{{font-weight:bold}}td.num{{text-align:right;white-space:nowrap}}td.num .det{{max-width:220px;white-space:normal;text-align:left}}
+.sum{{display:flex;gap:12px;flex-wrap:wrap;margin:10px 0 12px}}.tile{{border:1px solid var(--line);border-radius:8px;padding:8px 14px;background:var(--head)}}
+.tile .v{{font-size:24px;font-weight:bold}}.tile .l{{color:var(--mut);font-size:12px}}.who{{color:var(--mut);font-size:12px;font-weight:normal}}.det{{font-size:12px}}
 </style></head><body>
 <h1>進捗管理表（号ごと）</h1>
 <p class="note">測った時刻 {now:%Y-%m-%d %H:%M}。ファイルの有無と時刻から機械で測っています。色: 緑＝済／黄＝途中・待ち／白＝未／灰＝この号では不要・未定。見出しの下は担当。「次の一手」は順番で最初に残っている工程と、判定待ちの監査。</p>
-<div class="wrap"><table><thead><tr><th>号</th>{head}<th>次の一手</th></tr></thead><tbody>
+<div class="sum">
+<div class="tile"><div class="l">総文字数（納品済みの F1 の合計）</div><div class="v">{total:,} 字</div></div>
+<div class="tile"><div class="l">納品済み</div><div class="v">{len(chars)} 号</div><div class="l">{html.escape("・".join(f"{n}号 {c:,}" for n, (c, _) in sorted(chars.items())))}</div></div>
+</div>
+<div class="wrap"><table><thead><tr><th>号</th>{head}<th>納品の文字数<br><span class='who'>Excel の F1</span></th><th>次の一手</th></tr></thead><tbody>
 {''.join(body)}
 </tbody></table></div>
 <p class="note">機械で測れない所（⑥ 人の確認の完了・監査の判定済み など）は {html.escape(LEDGER)} の行で上書きしています（列: 号,工程,状態,日付,誰,メモ）。</p>
+<p class="note">納品の文字数は、納品の場所（work\\納品\\）にある「（ご納品…）」の Excel のうち最も新しい 1 本の F1（=SUM(D3:D143)、D 列は B 列と C 列の字数の和）を、Excel と同じ数え方で再現した値です。この道具が書いた Excel は計算済みの値を持たないため、ファイルの F1 を直接は読めません（数え方は見本 第28号の F1 7,932 と一致を確認）。</p>
 <p class="note">⑥ の「途中」は、人へ回す一覧を作った 10 分後より後に、ビューアで保存された頁があることを表します。誰が保存したかまでは測っていません。</p>
 </body></html>
 """
