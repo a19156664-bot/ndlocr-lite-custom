@@ -921,3 +921,11 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
 - [x] Task 66（頁へ飛ぶ）マージ dab72e1。[ ] Task 65（枠のつまみ）は 143号の実作業で「枠をクリックしても四角も丸も出ない」→ 外した 684a1d0。原因は未特定（STATUS §123-3）
 - 気づき: launch_viewer.py が 166〜170号を受け付けない（黙って 141号を開く）
 - 再開時の最初の一手: karte_web RESUME §2
+
+## 2026-10-10 15:5x Task 67 発注（承認者のご依頼: 右の一覧の枠に「頁と枠番号をコピー」）
+
+- 理由（承認者）: ■■NG■■ の枠の頁と RegionNo をすぐ指揮官に伝え、人の作業と NG 枠の再 OCR を並べて進めるため
+- 形: 各枠の Delete の直前に CONTENT_COPY のボタン。「<画像の名前> <枠の札>」（例 国際寫眞新聞_143号_p0014 Region 3）をクリップボードへ写し、下の帯の Last: にも出す
+- 見本: ref/task-67o（GitHub の master 5284c9b の上・418 passed・壊し方 8/8）／ref/task-67（手元の master の上・449 passed）。発注書の patch を当てた tree は見本と一致（005393f）
+- 既存の試験: ボタンの並びを丸ごと確かめる 3 本に 1 語足す。test_viewer_task55.py:84 と test_viewer_task61.py:52 は発注書の patch で（Task 61b と同じ形）、手元にだけある test_viewer_task64.py:91 は取り込みのときに指揮官が足す（ref/task-67 の 65e241c）
+- [ ] Task 67 Jules 17886470487823122346（.nightly/prompts/task67_prompt.txt）→ 検収 → 画面確認（本物の起動で。ブラウザのクリップボードが効くかも見る）→ マージ
