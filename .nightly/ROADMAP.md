@@ -929,3 +929,6 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
 - 見本: ref/task-67o（GitHub の master 5284c9b の上・418 passed・壊し方 8/8）／ref/task-67（手元の master の上・449 passed）。発注書の patch を当てた tree は見本と一致（005393f）
 - 既存の試験: ボタンの並びを丸ごと確かめる 3 本に 1 語足す。test_viewer_task55.py:84 と test_viewer_task61.py:52 は発注書の patch で（Task 61b と同じ形）、手元にだけある test_viewer_task64.py:91 は取り込みのときに指揮官が足す（ref/task-67 の 65e241c）
 - [ ] Task 67 Jules 17886470487823122346（.nightly/prompts/task67_prompt.txt）→ 検収 → 画面確認（本物の起動で。ブラウザのクリップボードが効くかも見る）→ マージ
+- 16:11 Task 67 Jules COMPLETED。成果を GitHub の master に当てた tree は見本と一致（005393f）。手元の master の上 check/task-67（131dcf2）449 passed
+- 画面（写しのビューア 8572・ヘッドレス Edge）で測ると、直した枠の行はボタン 8 個で右の一覧の幅 280 を超え、コピーが半分切れ Delete が見えなかった（試験は木の形だけ見ていて捕まえない）→ 指揮官の設計の穴。ボタンの列に wrap=True を足すと 2 段目にコピーと Delete が並び、押すと Last: に「コピーしました: page_01 Region 9」
+- [ ] Task 67b（67 の出し直し・wrap を 1 行）Jules 14515787981024014574（.nightly/prompts/task67b_prompt.txt）。見本 ref/task-67bo（418 passed・壊し方 9/9・tree c3d396f）／手元 check/task-67b（2e8dc8a・449 passed）→ 検収 → 承認者の画面確認（クリップボードに入るか）→ マージ。Task 67（17886470487823122346）は取り込まない

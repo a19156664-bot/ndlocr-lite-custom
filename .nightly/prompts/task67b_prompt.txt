@@ -1,0 +1,391 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 67b: A "copy page and region number" button on each region in the
+          right-hand list of the confirmation viewer (re-issue of Task 67)
+================================================================================
+
+This order is Task 67b of the commander's local ROADMAP (an approver's request
+of 2026-10-10; not on GitHub; you do not need it: everything is in this order).
+
+It replaces Task 67. Task 67 was applied exactly as ordered, but on screen
+the commander found that a region row with an edit has 8 buttons, which do
+not fit in the right-hand list: the new button was cut in half and Delete
+was not visible. Task 67b is the same patch plus one changed line: the
+button Row gets wrap=True, so the buttons continue on a second line; and two
+asserts in tests/test_viewer_task67.py check that wrap is True.
+
+## 1. Purpose and background
+
+During the human check, the approver marks frames the OCR could not read by
+typing "■■NG■■" into them, then has to tell the commander which page and which
+region each one is, so the commander can re-read them while the approver
+keeps working. Today the approver reads the page from the status bar and the
+region from the list header by eye. The approver asked (2026-10-10) for a
+button that gets the page and the region number at once.
+
+Design (decided by the commander, who is the reader of the copied text):
+
+  - In the right-hand list, each region row gets one more icon button
+    (ft.Icons.CONTENT_COPY, tooltip "頁と枠番号をコピー"), placed just
+    before the Delete button (after "Revert to OCR" when that is shown).
+  - Clicking it copies "<image name without extension> <region label>" to the
+    clipboard, e.g. "国際寫眞新聞_143号_p0014 Region 3", and shows
+    "コピーしました: 国際寫眞新聞_143号_p0014 Region 3" in the status bar
+    (self.latest_region_info), so the text can be read even where the
+    clipboard does not work.
+  - It changes nothing else: no edits, no order, no selection, no saving.
+  - Unknown region id: do nothing. No page attached: no clipboard call, but
+    the status text is still set.
+
+## 2. Contract: apply EXACTLY this patch
+
+The patch below was made and tested by the commander on top of the current
+master (5284c9b). It changes custom_gui/app.py, adds tests/test_viewer_task67.py,
+and adds ONE word to the expected list in two existing tests that compare the
+WHOLE button row (tests/test_viewer_task55.py line 84 and
+tests/test_viewer_task61.py line 52): "頁と枠番号をコピー" is inserted just
+before "Delete". Those two one-word changes are part of the commander's
+contract (the same as Task 61b); they are the ONLY changes allowed to existing
+tests. Save the part between the two marker lines (the markers are not part of
+it) and apply it with
+
+    git apply --whitespace=nowarn <file>
+
+Then delete that file. Do not change anything in the patch: not one line, not
+the blank lines, not the order of the methods. If it does not apply cleanly on
+master, do NOT edit code by hand to make it fit: stop and report the exact
+error.
+
+What the patch does, for your review:
+
+  DoD-1  app.py: module function region_ref_text(image_src, label) -> str
+         (just before class SelectableImageViewer).
+  DoD-2  app.py: method copy_region_ref(self, rid) just before
+         toggle_region_visible; the new IconButton appended to `buttons`
+         just before the Delete button in the region-row builder; and
+         `ft.Row(buttons, spacing=0)` becomes
+         `ft.Row(buttons, spacing=0, wrap=True)` (with a comment).
+  DoD-3  tests/test_viewer_task67.py: 7 test functions, 12 cases; and the
+         one-word change in test_viewer_task55.py (test_task55) and
+         test_viewer_task61.py (test_1_button_place).
+
+----- BEGIN PATCH -----
+diff --git a/custom_gui/app.py b/custom_gui/app.py
+index 60729a4..e5e59eb 100644
+--- a/custom_gui/app.py
++++ b/custom_gui/app.py
+@@ -45,6 +45,12 @@ def get_ocr_status_text(state: OcrState, line_count: int = 0) -> str:
+         return f"Lines: {line_count}"
+     return ""
+ 
++def region_ref_text(image_src, label) -> str:
++    """Task 67: 右の一覧の枠を指す文字。画像の名前（拡張子なし）と枠の札。
++    例: 国際寫眞新聞_143号_p0014 Region 3"""
++    stem = os.path.splitext(os.path.basename((image_src or "").replace("\\", "/")))[0]
++    return f"{stem or 'None'} {label}"
++
+ class SelectableImageViewer(ImageViewer):
+     def __init__(self, image_src: str, img_w: float, img_h: float, win_w: float, win_h: float, **kwargs):
+         self.frame_w = win_w
+@@ -1376,6 +1382,18 @@ class SelectableImageViewer(ImageViewer):
+                     self.highlight_layer.controls.append(highlight)
+         self._overlay_scale = self.zoom_scale
+ 
++    def copy_region_ref(self, rid) -> None:
++        """Task 67: その枠の「画像の名前 枠の札」をクリップボードへ写し、下の帯の Last: にも出す
++        （クリップボードが効かない環境でも読めるように）。"""
++        rect = next((r for r in self.selection_container.get_all() if r.rect_id == rid), None)
++        if rect is None:
++            return
++        text = region_ref_text(self.image_src, rect.label)
++        if self.page:
++            self.page.set_clipboard(text)
++        self.latest_region_info = f"コピーしました: {text}"
++        self._update_status()
++
+     def toggle_region_visible(self, rid, button=None):
+         with self.selections_lock:
+             srid = str(rid)
+@@ -1584,12 +1602,17 @@ class SelectableImageViewer(ImageViewer):
+         ]
+         if has_edit:
+             buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
++        # Task 67: 頁と枠番号をクリップボードへ（■■NG■■ の枠をすぐ指揮官へ伝えるため・承認者 10-10）
++        buttons.append(ft.IconButton(
++            icon=ft.Icons.CONTENT_COPY, tooltip="頁と枠番号をコピー",
++            on_click=lambda e, rid=rect.rect_id: self.copy_region_ref(rid)
++        ))
+         buttons.append(ft.IconButton(icon=ft.Icons.DELETE, tooltip="Delete", on_click=delete_rect))
+ 
+         item_content = ft.Column([
+             ft.Row([
+                 header_text,
+-                ft.Row(buttons, spacing=0)
++                ft.Row(buttons, spacing=0, wrap=True)  # Task 67b: 直した枠はボタン 8 個で右の一覧の幅を超えるので折り返す
+             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True),
+             content_area
+         ])
+diff --git a/tests/test_viewer_task55.py b/tests/test_viewer_task55.py
+index 02270b5..b45a8c1 100644
+--- a/tests/test_viewer_task55.py
++++ b/tests/test_viewer_task55.py
+@@ -81,7 +81,7 @@ def test_task55(tmp_path, monkeypatch):
+     tooltips = [c.tooltip for c in buttons_row2.controls]
+     
+     # 1. Check tooltips and icon
+-    assert tooltips == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "Delete"]
++    assert tooltips == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "頁と枠番号をコピー", "Delete"]
+     eye_button_2 = buttons_row2.controls[3]
+     assert eye_button_2.icon == ft.Icons.VISIBILITY
+     
+diff --git a/tests/test_viewer_task61.py b/tests/test_viewer_task61.py
+index 97bc870..769662e 100644
+--- a/tests/test_viewer_task61.py
++++ b/tests/test_viewer_task61.py
+@@ -49,7 +49,7 @@ def test_1_button_place(dummy_page, tmp_path):
+     
+     buttons_row = row_3.content.controls[0].controls[1]
+     tooltips = [b.tooltip for b in buttons_row.controls if hasattr(b, "tooltip")]
+-    assert tooltips == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "Delete"]
++    assert tooltips == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "頁と枠番号をコピー", "Delete"]
+     
+     vertical_button = buttons_row.controls[4]
+     assert vertical_button.icon == ft.Icons.TEXT_ROTATION_DOWN
+diff --git a/tests/test_viewer_task67.py b/tests/test_viewer_task67.py
+new file mode 100644
+index 0000000..971a5ca
+--- /dev/null
++++ b/tests/test_viewer_task67.py
+@@ -0,0 +1,120 @@
++"""Task 67: 右の一覧の各枠に「頁と枠番号をコピー」ボタン（承認者 10-10）。
++■■NG■■ の枠の「画像の名前 枠の札」をすぐ指揮官へ伝えるため。"""
++import flet as ft
++import pytest
++
++from custom_gui.app import region_ref_text
++from tests.test_marks_to_rects import get_app, make_clean_page
++
++COPY = "頁と枠番号をコピー"
++
++
++@pytest.mark.parametrize("src,label,want", [
++    ("C:\\Users\\user\\work\\cache_images\\143号\\国際寫眞新聞_143号_p0014.png", "Region 3", "国際寫眞新聞_143号_p0014 Region 3"),
++    ("C:/Users/user/work/国際寫眞新聞_141号_p0052.png", "Region 12", "国際寫眞新聞_141号_p0052 Region 12"),
++    ("/tmp/x/p5.jpg", "Region 2", "p5 Region 2"),
++    ("p7", "Region 2", "p7 Region 2"),       # 拡張子なし
++    ("", "Region 2", "None Region 2"),
++    (None, "Region 2", "None Region 2"),
++])
++def test_1_region_ref_text(src, label, want):
++    assert region_ref_text(src, label) == want
++
++
++@pytest.fixture
++def dummy_page():
++    class DummyPage:
++        def __init__(self):
++            self.controls = []
++            self.overlay = []
++            self.clipboard = []
++        def add(self, *args):
++            pass
++        def update(self, *args):
++            pass
++        def run_thread(self, target, *args, **kwargs):
++            target(*args, **kwargs)
++        def set_clipboard(self, value):
++            self.clipboard.append(value)
++        window_width = 800
++        window_height = 600
++        session_id = "test"
++    return DummyPage()
++
++
++def prepared(dummy_page, tmp_path, edits=None):
++    app, path = get_app(dummy_page, tmp_path, make_clean_page)
++    app.ocr_results = []
++    app.selection_container._rects = []
++    r2 = app.selection_container.add((0, 0, 60, 30))
++    r2.rect_id, r2.label = "2", "Region 2"
++    r3 = app.selection_container.add((80, 80, 200, 200))
++    r3.rect_id, r3.label = "3", "Region 3"
++    app.edits = dict(edits or {})
++    app.image_states[str(path)]["edits"] = app.edits
++    app._update_selections_ui()
++    return app
++
++
++def buttons_of(row):
++    return row.content.controls[0].controls[1].controls
++
++
++def test_2_button_place(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path)
++    assert len(app.selections_list.controls) == 2
++    for row in app.selections_list.controls:
++        bs = buttons_of(row)
++        assert [b.tooltip for b in bs] == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", COPY, "Delete"]
++        assert bs[5].icon == ft.Icons.CONTENT_COPY
++        assert row.content.controls[0].controls[1].wrap is True   # Task 67b: 幅を超えたら折り返す
++
++
++def test_3_button_place_with_edit(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path, edits={"3": "■■NG■■"})
++    assert app.selections_list.controls[1].content.controls[0].controls[1].wrap is True
++    bs = buttons_of(app.selections_list.controls[1])
++    assert [b.tooltip for b in bs] == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "Revert to OCR", COPY, "Delete"]
++
++
++def test_4_click_copies_this_region(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path)
++    copy3 = [b for b in buttons_of(app.selections_list.controls[1]) if b.tooltip == COPY]
++    assert len(copy3) == 1
++    copy3[0].on_click(None)
++    assert dummy_page.clipboard == ["test_page Region 3"]
++    assert app.latest_region_info == "コピーしました: test_page Region 3"
++    assert "Last: コピーしました: test_page Region 3" in app.status_text.value
++
++    copy2 = [b for b in buttons_of(app.selections_list.controls[0]) if b.tooltip == COPY]
++    copy2[0].on_click(None)
++    assert dummy_page.clipboard == ["test_page Region 3", "test_page Region 2"]
++
++
++def test_5_copy_changes_nothing_else(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path, edits={"3": "■■NG■■"})
++    before_edits = dict(app.edits)
++    before_ids = [r.rect_id for r in app.selection_container.get_all()]
++    before_active, before_editing = app.active_region_id, app.editing_region_id
++    app.copy_region_ref("3")
++    assert dummy_page.clipboard == ["test_page Region 3"]
++    assert app.edits == before_edits
++    assert [r.rect_id for r in app.selection_container.get_all()] == before_ids
++    assert (app.active_region_id, app.editing_region_id) == (before_active, before_editing)
++
++
++def test_6_unknown_region_does_nothing(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path)
++    app.latest_region_info = "前の知らせ"
++    app.copy_region_ref("99")
++    assert dummy_page.clipboard == []
++    assert app.latest_region_info == "前の知らせ"
++
++
++def test_7_no_page_still_shows_text(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path)
++    app.page = None
++    app.status_text.page = None
++    app.copy_region_ref("2")
++    assert dummy_page.clipboard == []
++    assert app.latest_region_info == "コピーしました: test_page Region 2"
+----- END PATCH -----
+
+## 3. Allowed and forbidden scope
+
+ALLOWED - these four files only, and only through the patch:
+
+    custom_gui/app.py
+    tests/test_viewer_task67.py    (new)
+    tests/test_viewer_task55.py    (the one-word change at line 84 only)
+    tests/test_viewer_task61.py    (the one-word change at line 52 only)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    every other file under custom_gui/
+    every other existing file under tests/, and every other line of the two
+    test files above
+    launch_viewer.py  src/**  requirements.txt  pyproject.toml
+    custom_gui/requirements-custom.txt  .nightly/**  .claude/**
+    AGENTS.md  CLAUDE.md  README.md  LICENCE  LICENCE_DEPENDENCEIES
+    and every NDL credit header
+    train/**  scripts/**  resource/**  jpg/**  work/**  any *.bat file
+    venv/ .venv/ or any virtual environment (do not commit one)
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no *.patch, no notes: put your report in the session
+    message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the four paths above, nothing else
+    git diff --numstat custom_gui/app.py              24 insertions, 1 deletion
+    git diff --numstat tests/test_viewer_task55.py     1 insertion, 1 deletion
+    git diff --numstat tests/test_viewer_task61.py     1 insertion, 1 deletion
+    grep -c "def region_ref_text" custom_gui/app.py                  exactly 1
+    grep -c "def copy_region_ref" custom_gui/app.py                  exactly 1
+    grep -c "self.copy_region_ref" custom_gui/app.py                 exactly 1
+    grep -c "^def test_" tests/test_viewer_task67.py                 exactly 7
+    grep -c "ft.Row(buttons, spacing=0, wrap=True)" custom_gui/app.py exactly 1
+    and a line-by-line comparison with the commander's own copy.
+
+## 4. Absolute protection of existing tests
+
+- Apart from the two one-word changes in the patch, do NOT delete, skip,
+  rename, or change the expected value of ANY existing test. Run the suite on
+  master BEFORE your change and report the count (it is 406 passed on
+  2026-10-10); after it, 418 passed, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 5. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the nine below: break the code in custom_gui/app.py, run
+
+    python -m pytest tests/test_viewer_task67.py tests/test_viewer_task55.py tests/test_viewer_task61.py -q --tb=line
+
+show the FAILING output, undo exactly that break (nothing else), show it green.
+
+    (i)    in region_ref_text, `return f"{stem or 'None'} {label}"`
+           -> `return f"{stem or 'None'}{label}"`
+                              -> test_1, test_4, test_5, test_7 must fail
+    (ii)   in copy_region_ref, `if r.rect_id == rid), None)`
+           -> `if r.rect_id != rid), None)`
+                              -> test_4, test_5, test_6, test_7 must fail
+    (iii)  in copy_region_ref, `self.page.set_clipboard(text)` -> `pass`
+                              -> test_4 and test_5 must fail
+    (iv)   delete the four lines that append the new CONTENT_COPY IconButton
+                              -> test_2, test_3, test_4 (task67),
+                                 test_task55 and test_1_button_place must fail
+    (v)    in copy_region_ref,
+           `self.latest_region_info = f"コピーしました: {text}"`
+           -> `self.latest_region_info = text`
+                              -> test_4 and test_7 must fail
+    (vi)   in copy_region_ref, `if self.page:` -> `if True:`
+                              -> test_7 must fail
+    (vii)  move the new IconButton's four lines to just AFTER the Delete
+           button line        -> test_2, test_3 (task67), test_task55 and
+                                 test_1_button_place must fail
+    (viii) in the new IconButton, `on_click=lambda e, rid=rect.rect_id:
+           self.copy_region_ref(rid)` -> `on_click=lambda e, rid=rect.rect_id:
+           None`              -> test_4 must fail
+    (ix)   `ft.Row(buttons, spacing=0, wrap=True)` -> `ft.Row(buttons, spacing=0)`
+                              -> test_2 and test_3 (task67) must fail
+
+The commander ran all nine on the same patch on 2026-10-10: each one failed
+exactly the tests listed. If an injected defect does NOT make a test fail on
+your side, say so plainly.
+
+## 6. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do NOT write helper scripts. The only temporary file allowed is the patch
+  file, and it must be deleted before you submit. Show `git status --short`
+  with exactly four lines.
+- tests/test_viewer_task67.py is required. A submission without it is
+  rejected.
+- You start from `master`.
+
+## 7. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the nine injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. git diff --stat
+    5. anything you did differently from this order, and why
