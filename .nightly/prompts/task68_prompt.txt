@@ -1,0 +1,352 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 68: Clicking a region row in the right-hand list brings that region to
+         the centre of the visible image area
+================================================================================
+
+This order is Task 68 of the commander's local ROADMAP (an approver's request
+of 2026-10-10; not on GitHub; you do not need it: everything is in this order).
+
+## 1. Purpose and background
+
+During the human check the approver zooms in on a newspaper page and works
+through the regions listed in the right-hand list. To look at a region, the
+approver has to find it on the page and drag (Pan) or scroll the image until
+it is in view. The approver asked (2026-10-10): when a row in the right-hand
+list is clicked, the image should move so that this region is in the centre,
+to save that moving.
+
+Design (decided by the commander, checked on screen in a browser):
+
+  - Clicking a region row (the row Container's on_click, i.e. make_active)
+    calls a new method center_on_region(rid) BEFORE the existing code. It
+    does so even when the row is already the active one (the approver may
+    have panned away since).
+  - center_on_region moves the image with the same offsets that Pan uses
+    (self.offset_x / self.offset_y), and moves the image and the three
+    overlay layers (highlight, rects, inline editor) by exactly the same
+    amount, so the frames stay on the image. The zoom does not change.
+  - The offset puts the centre of the region's bbox at the centre of the
+    visible area (self.win_w x self.win_h). On an axis where the whole image
+    already fits in the visible area (img_len * zoom <= view_len), the offset
+    on that axis is 0 (nothing moves). Regions near the page edge are still
+    centred (blank space outside the page may show, as with Pan today).
+  - The two scrollables around the image (self.scrollable_image and its only
+    child Row) are scrolled back to 0, because the offset is computed for
+    scroll position 0. This is done only when the control is on a page.
+  - Unknown region id, or a page whose image failed to load (ocr_error):
+    do nothing.
+  - It changes nothing else: no edits, no order, no bbox, no saving.
+
+## 2. Contract: apply EXACTLY this patch
+
+The patch below was made and tested by the commander on top of the current
+master (5284c9b). It changes custom_gui/app.py and adds
+tests/test_viewer_task68.py. No existing test is changed. Save the part
+between the two marker lines (the markers are not part of it) and apply it
+with
+
+    git apply --whitespace=nowarn <file>
+
+Then delete that file. Do not change anything in the patch: not one line, not
+the blank lines, not the order of the methods. If it does not apply cleanly on
+master, do NOT edit code by hand to make it fit: stop and report the exact
+error.
+
+What the patch does, for your review:
+
+  DoD-1  app.py: module function
+         center_offset(center, img_len, scale, view_len) -> float
+         (just after class OcrState, before get_ocr_status_text).
+  DoD-2  app.py: method center_on_region(self, rid) just after _on_tap_up
+         (before _redraw_overlays); and one line at the top of make_active
+         in the region-row builder: self.center_on_region(rid).
+  DoD-3  tests/test_viewer_task68.py: 7 test functions, 12 cases.
+
+----- BEGIN PATCH -----
+diff --git a/custom_gui/app.py b/custom_gui/app.py
+index 60729a4..215acf8 100644
+--- a/custom_gui/app.py
++++ b/custom_gui/app.py
+@@ -32,6 +32,13 @@ class OcrState(Enum):
+     DONE = auto()
+     ERROR = auto()
+ 
++def center_offset(center: float, img_len: float, scale: float, view_len: float) -> float:
++    """Task 68: 枠の真ん中（元の画像の座標）を、画像の見えている所（長さ view_len）の真ん中へ置くずらし量。
++    その向きで画像が見えている所に収まっているときは 0（動かさない）。"""
++    if img_len * scale <= view_len:
++        return 0.0
++    return view_len / 2 - center * scale
++
+ def get_ocr_status_text(state: OcrState, line_count: int = 0) -> str:
+     if state == OcrState.IDLE:
+         return "OCR not started"
+@@ -1320,6 +1327,23 @@ class SelectableImageViewer(ImageViewer):
+         self._update_selections_ui()
+         self._update_inline_editor()
+ 
++    def center_on_region(self, rid) -> None:
++        """Task 68: 右の一覧で押した枠の真ん中を、画像の見えている所の真ん中へ動かす（承認者 10-10・枠を探して動かす手間を省く）。
++        動かすのは Pan と同じずらし量（offset_x/y）。倍率は変えない。スクロールは 0 に戻す（ずらし量はスクロール 0 で計るため）。"""
++        rect = next((r for r in self.selection_container.get_all() if r.rect_id == rid), None)
++        if rect is None or getattr(self, 'ocr_error', None):
++            return
++        x1, y1, x2, y2 = rect.bbox
++        self.offset_x = center_offset((x1 + x2) / 2, self.img_w, self.zoom_scale, self.win_w)
++        self.offset_y = center_offset((y1 + y2) / 2, self.img_h, self.zoom_scale, self.win_h)
++        for layer in (self.image_control, self.highlight_layer, self.rects_layer, self.inline_editor_layer):
++            layer.left = self.offset_x
++            layer.top = self.offset_y
++        for scroller in (self.scrollable_image, self.scrollable_image.controls[0]):
++            if getattr(scroller, 'page', None):
++                scroller.scroll_to(offset=0)
++        self._update_viewer()
++
+     def _redraw_overlays(self):
+         self.rects_layer.controls.clear()
+         self.highlight_layer.controls.clear()
+@@ -1511,6 +1535,7 @@ class SelectableImageViewer(ImageViewer):
+             self._persist_work_state()
+         
+         def make_active(e, rid=rect.rect_id):
++            self.center_on_region(rid)  # Task 68: 選び直しでなくても、押せば画像をその枠へ動かす
+             if self.active_region_id != rid:
+                 self.active_region_id = rid
+                 self._update_selections_ui()
+diff --git a/tests/test_viewer_task68.py b/tests/test_viewer_task68.py
+new file mode 100644
+index 0000000..1be9372
+--- /dev/null
++++ b/tests/test_viewer_task68.py
+@@ -0,0 +1,124 @@
++"""Task 68: 右の一覧の枠を押すと、画像のその枠が見えている所の真ん中へ来る（承認者 10-10）。
++枠を探して画像を動かす手間を省くため。動かすのは Pan と同じずらし量。倍率は変えない。"""
++import pytest
++
++from custom_gui.app import center_offset
++from tests.test_marks_to_rects import get_app, make_clean_page
++
++
++@pytest.mark.parametrize("center,img_len,scale,view_len,want", [
++    (140, 400, 2.0, 480, -40.0),     # 240 - 280
++    (140, 600, 2.0, 500, -30.0),     # 250 - 280
++    (10, 400, 2.0, 480, 220.0),      # 端の枠も真ん中へ（画像の外が見えてもよい）
++    (390, 400, 2.0, 480, -540.0),
++    (140, 400, 1.2, 480, 0.0),       # 400*1.2 = 480 は収まる → 動かさない
++    (140, 400, 0.5, 480, 0.0),
++])
++def test_1_center_offset(center, img_len, scale, view_len, want):
++    assert center_offset(center, img_len, scale, view_len) == pytest.approx(want)
++
++
++@pytest.fixture
++def dummy_page():
++    class DummyPage:
++        def __init__(self):
++            self.controls = []
++            self.overlay = []
++        def add(self, *args):
++            pass
++        def update(self, *args):
++            pass
++        def run_thread(self, target, *args, **kwargs):
++            target(*args, **kwargs)
++        window_width = 800
++        window_height = 600
++        session_id = "test"
++    return DummyPage()
++
++
++def prepared(dummy_page, tmp_path):
++    # 窓 800x600 → 画像の見えている所 480x500（win_w / win_h）。画像 400x600
++    app, path = get_app(dummy_page, tmp_path, make_clean_page)
++    app.ocr_results = []
++    app.selection_container._rects = []
++    r2 = app.selection_container.add((0, 0, 60, 30))
++    r2.rect_id, r2.label = "2", "Region 2"
++    r3 = app.selection_container.add((80, 80, 200, 200))
++    r3.rect_id, r3.label = "3", "Region 3"
++    app.edits = {}
++    app.image_states[str(path)]["edits"] = app.edits
++    app.zoom_scale = 2.0
++    app._update_selections_ui()
++    return app
++
++
++def where(app):
++    return [(c.left, c.top) for c in (app.image_control, app.highlight_layer, app.rects_layer, app.inline_editor_layer)]
++
++
++def test_2_click_row_centers_that_region(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path)
++    assert (app.win_w, app.win_h) == (480, 500)
++    app.selections_list.controls[1].on_click(None)          # Region 3 の行
++    assert (app.offset_x, app.offset_y) == pytest.approx((-40.0, -30.0))
++    assert where(app) == [(app.offset_x, app.offset_y)] * 4  # 画像と枠の層が同じだけ動く（ずれない）
++    assert app.active_region_id == "3"
++    assert app.zoom_scale == 2.0
++
++    app.selections_list.controls[0].on_click(None)          # Region 2 の行（真ん中 30,15）
++    assert (app.offset_x, app.offset_y) == pytest.approx((180.0, 220.0))
++    assert where(app) == [(180.0, 220.0)] * 4
++    assert app.active_region_id == "2"
++
++
++def test_3_click_active_row_again_recenters(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path)
++    app.selections_list.controls[1].on_click(None)
++    app.offset_x, app.offset_y = 5.0, 7.0                   # そのあと Pan で動かした
++    app.selections_list.controls[1].on_click(None)          # 同じ行をもう一度
++    assert (app.offset_x, app.offset_y) == pytest.approx((-40.0, -30.0))
++    assert app.image_control.left == pytest.approx(-40.0)
++
++
++def test_4_fitting_direction_does_not_move(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path)
++    app.zoom_scale = 1.0                                    # 横 400 は 480 に収まる・縦 600 は 500 を超える
++    app.offset_x, app.offset_y = 12.0, 34.0
++    app.center_on_region("3")
++    assert (app.offset_x, app.offset_y) == pytest.approx((0.0, 110.0))   # 250 - 140
++
++    app.zoom_scale = 0.5                                    # どちらも収まる（Fit より小さい）
++    app.center_on_region("3")
++    assert (app.offset_x, app.offset_y) == (0.0, 0.0)
++
++
++def test_5_scroll_back_to_zero(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path)
++    calls = []
++    outer = app.scrollable_image
++    inner = app.scrollable_image.controls[0]
++    outer.page = dummy_page
++    inner.page = dummy_page
++    outer.scroll_to = lambda **kw: calls.append(("outer", kw))
++    inner.scroll_to = lambda **kw: calls.append(("inner", kw))
++    app.center_on_region("3")
++    assert calls == [("outer", {"offset": 0}), ("inner", {"offset": 0})]
++
++
++def test_6_unknown_region_does_nothing(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path)
++    app.offset_x, app.offset_y = 5.0, 7.0
++    app.center_on_region("99")
++    assert (app.offset_x, app.offset_y) == (5.0, 7.0)
++
++
++def test_7_changes_nothing_else(dummy_page, tmp_path):
++    app = prepared(dummy_page, tmp_path)
++    app.edits["3"] = "直した文字"
++    before_ids = [r.rect_id for r in app.selection_container.get_all()]
++    before_bbox = [tuple(r.bbox) for r in app.selection_container.get_all()]
++    app.center_on_region("3")
++    assert app.edits == {"3": "直した文字"}
++    assert [r.rect_id for r in app.selection_container.get_all()] == before_ids
++    assert [tuple(r.bbox) for r in app.selection_container.get_all()] == before_bbox
++    assert app.editing_region_id is None
+----- END PATCH -----
+
+## 3. Allowed and forbidden scope
+
+ALLOWED - these two files only, and only through the patch:
+
+    custom_gui/app.py
+    tests/test_viewer_task68.py    (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    every other file under custom_gui/ (viewer.py included)
+    every existing file under tests/
+    launch_viewer.py  src/**  requirements.txt  pyproject.toml
+    custom_gui/requirements-custom.txt  .nightly/**  .claude/**
+    AGENTS.md  CLAUDE.md  README.md  LICENCE  LICENCE_DEPENDENCEIES
+    and every NDL credit header
+    train/**  scripts/**  resource/**  jpg/**  work/**  any *.bat file
+    venv/ .venv/ or any virtual environment (do not commit one)
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no *.patch, no notes: put your report in the session
+    message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the two paths above, nothing else
+    git diff --numstat custom_gui/app.py              25 insertions, 0 deletions
+    grep -c "def center_offset" custom_gui/app.py                    exactly 1
+    grep -c "def center_on_region" custom_gui/app.py                 exactly 1
+    grep -c "self.center_on_region(rid)" custom_gui/app.py           exactly 1
+    grep -c "scroller.scroll_to(offset=0)" custom_gui/app.py         exactly 1
+    grep -c "^def test_" tests/test_viewer_task68.py                 exactly 7
+    and a line-by-line comparison with the commander's own copy.
+
+## 4. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Run the suite on master BEFORE your change and report the count (it
+  is 406 passed on 2026-10-10); after it, 418 passed, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 5. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the nine below: break the code in custom_gui/app.py, run
+
+    python -m pytest tests/test_viewer_task68.py -q --tb=line
+
+show the FAILING output, undo exactly that break (nothing else), show it green.
+
+    (i)    in center_offset, `if img_len * scale <= view_len:` -> `if False:`
+                              -> test_1 and test_4 must fail
+    (ii)   in center_offset, `return view_len / 2 - center * scale`
+           -> `return -center * scale`
+                              -> test_1, test_2, test_3, test_4 must fail
+    (iii)  in center_on_region, on the self.offset_y line,
+           `self.zoom_scale, self.win_h)` -> `self.zoom_scale, self.win_w)`
+                              -> test_2, test_3, test_4 must fail
+    (iv)   delete the line `self.center_on_region(rid)  # Task 68: ...`
+           in make_active     -> test_2 and test_3 must fail
+    (v)    in center_on_region, remove `self.image_control, ` from the
+           tuple of the `for layer in (...)` loop
+                              -> test_2 and test_3 must fail
+    (vi)   in center_on_region, `scroller.scroll_to(offset=0)` -> `pass`
+                              -> test_5 must fail
+    (vii)  in center_on_region,
+           `if rect is None or getattr(self, 'ocr_error', None):`
+           -> `if False:`     -> test_6 must fail
+    (viii) in center_on_region, `if r.rect_id == rid), None)`
+           -> `if r.rect_id != rid), None)`
+                              -> test_2, test_3, test_4, test_6 must fail
+    (ix)   in make_active, move the line `self.center_on_region(rid)  # ...`
+           to just after `self.active_region_id = rid` inside the if
+           (indented one more level)
+                              -> test_2 and test_3 must fail
+
+The commander ran all nine on the same patch on 2026-10-10: each one failed
+exactly the tests listed. If an injected defect does NOT make a test fail on
+your side, say so plainly.
+
+## 6. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do NOT write helper scripts. The only temporary file allowed is the patch
+  file, and it must be deleted before you submit. Show `git status --short`
+  with exactly two lines.
+- tests/test_viewer_task68.py is required. A submission without it is
+  rejected.
+- You start from `master`.
+
+## 7. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the nine injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. git diff --stat
+    5. anything you did differently from this order, and why
