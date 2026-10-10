@@ -1,5 +1,5 @@
 import flet as ft
-from custom_gui.image_sequence import ImageSequence, list_images_in_folder
+from custom_gui.image_sequence import ImageSequence, list_images_in_folder, page_index_from_text
 from custom_gui.viewer import ImageViewer, original_to_display, apply_pan, InteractionMode, calculate_label_position
 from custom_gui.selection import SelectionContainer, calculate_normalized_bbox, SelectionRect, find_region_at_point, adjust_bbox
 from custom_gui.ocr_bridge import run_ocr_and_parse
@@ -143,6 +143,26 @@ class SelectableImageViewer(ImageViewer):
             disabled=not self.sequence.has_next()
         )
 
+        # Task 66: 頁番号を入れて Enter か「移動」で、その頁へ飛ぶ（承認者 10-10 案甲）
+        self.page_jump_field = ft.TextField(
+            width=64,
+            height=36,
+            dense=True,
+            content_padding=6,
+            text_align=ft.TextAlign.CENTER,
+            hint_text="頁",
+            tooltip="頁番号を入れて Enter（1〜全頁）",
+            keyboard_type=ft.KeyboardType.NUMBER,
+            on_submit=self._on_page_jump,
+        )
+        self.btn_page_jump = ft.TextButton(
+            "移動",
+            tooltip="入れた頁へ移動",
+            on_click=self._on_page_jump,
+        )
+
+        self.controls_row.controls.insert(0, self.btn_page_jump)
+        self.controls_row.controls.insert(0, self.page_jump_field)
         self.controls_row.controls.insert(0, self.btn_next)
         self.controls_row.controls.insert(0, self.btn_prev)
         self.controls_row.controls.insert(0, self.btn_batch_ocr)
@@ -745,7 +765,22 @@ class SelectableImageViewer(ImageViewer):
     def _on_next_click(self, e):
         if self.sequence.has_next():
             self._switch_image(self.sequence.next())
-            
+
+    def _on_page_jump(self, e):
+        """Task 66: 入力欄の頁へ移る。範囲の外・数でないときは移らず、下の帯の Last: に知らせる。"""
+        text = self.page_jump_field.value
+        i = page_index_from_text(text, self.sequence.count)
+        if i is None:
+            shown = (text or "").strip() or "空"
+            self.latest_region_info = f"頁は 1〜{self.sequence.count} の数で入れてください（入力: {shown}）"
+            self._update_status()
+            return
+        if i != self.sequence.index:
+            self._switch_image(self.sequence.goto(i))
+        self.page_jump_field.value = ""
+        if self.page_jump_field.page:
+            self.page_jump_field.update()
+
     def _load_persisted_state(self, path: str):
         """Returns (SelectionContainer, edits dict, mark) for `path`,
         restoring from disk when a valid saved state exists, otherwise a
