@@ -80,16 +80,19 @@ def measure(n, led):
         s["判定"] = (TODO, "", "")
     aud = [p for d in glob.glob(os.path.join(PR, "監査_*")) for p in glob.glob(os.path.join(d, f"{n}号_p*_校正案.csv"))]
     if aud:
-        d = os.path.dirname(aud[0]); k = 0
-        lst = os.path.join(d, "指摘の一覧.txt")
-        if os.path.exists(lst):
-            with open(lst, encoding="utf-8-sig") as fp:
-                k = sum(1 for l in fp if l.startswith(f"{n}号"))
+        k = sum(rows(p) for p in aud)  # 指摘の一覧.txt は号ごとの集計の行も「<号>号」で始まるので数えない（10-10 に 1 件ずつ多く数えた）
         s["監査"] = (WAIT, f"返却 {max(t(p) for p in aud):%m-%d}・指摘 {k} 件・判定待ち", "指揮官")
     else:
         s["監査"] = (OPEN, "頼むかは 142〜145号の結果で決める", "")
     if os.path.exists(hum):
-        after = [p for p in cache if os.path.getmtime(p) > os.path.getmtime(hum) + 600]
+        # 機械の書き込み（apply_fixes 等は書く直前に work\backup\<時刻>_… を作る）から 2 分以内の保存は、人の形跡に数えない（10-10 に誤って数えた）
+        bk = []
+        for d in glob.glob(os.path.join(W, "backup", "*_*_*")):
+            m = re.match(r"(\d{8}_\d{6})_", os.path.basename(d))
+            if m:
+                bk.append(datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").timestamp())
+        machine = lambda ts: any(b <= ts <= b + 120 for b in bk)
+        after = [p for p in cache if os.path.getmtime(p) > os.path.getmtime(hum) + 600 and not machine(os.path.getmtime(p))]
         if after:
             last = max(t(p) for p in after)
             s["人の確認"] = (PART, f"ビューアで保存 {len(after)} 頁（最終 {last:%m-%d %H:%M}）", "")
@@ -123,7 +126,7 @@ def main():
     for n in nums:
         s = measure(n, led)
         # 次の一手: 判定待ちの監査（脇の工程）と、順番の工程で最初に残っている 1 つ
-        nxt = [(lbl, s[key][2] or who) for key, lbl, who in STAGES if key == "監査" and s[key][0] == WAIT]
+        nxt = [(lbl, s[key][2] or who) for key, lbl, who in STAGES if key == "監査" and s[key][0] in (WAIT, PART)]
         nxt += [(lbl, s[key][2] or who) for key, lbl, who in STAGES if key != "監査" and s[key][0] not in (DONE, NA, OPEN)][:1]
         cells = []
         for key, _, who in STAGES:
