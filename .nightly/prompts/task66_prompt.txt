@@ -1,0 +1,374 @@
+DO NOT DELETE ANY FILE UNDER .nightly/ OR .claude/. They are the commander's
+management files. Deleting or editing them is an immediate rejection.
+
+================================================================================
+Task 66: Page jump in the confirmation viewer -- type a page number and press
+         Enter (or the "移動" button) to go straight to that page
+================================================================================
+
+This order is Task 66 of the commander's local ROADMAP (not on GitHub; you
+do not need it: everything is in this order).
+
+## 1. Purpose and background
+
+Today the confirmation viewer moves between pages only one at a time
+(Previous / Next buttons and Ctrl+N). Issues have 52 to 68 pages, and the
+approver works from lists that name a page number ("p51 frame 8"). The approver
+asked (2026-10-10) for a way to jump to a page, and chose this design ("案甲"):
+
+  - Right after the Next button: a small text field (hint "頁") and a
+    "移動" text button. Typing a number and pressing Enter, or clicking
+    "移動", goes to that page.
+  - Page numbers start at 1 and equal the PDF page number (the viewer lists
+    every PDF page in order; the status bar already shows [index+1/count]).
+    Full-width digits typed with a Japanese IME ("１２") are accepted.
+  - Empty, not a number, or outside 1..count: do NOT move. Show
+    "頁は 1〜N の数で入れてください（入力: ...）" in self.latest_region_info
+    and keep the typed text so it can be corrected.
+  - Same page as now: do not reload it.
+  - Moving goes through the same self._switch_image(...) as Previous / Next,
+    so saving the current page and restoring the target page work the same.
+
+## 2. Contract: apply EXACTLY this patch
+
+The patch below was made and tested by the commander on top of the current
+master (5284c9b). It changes custom_gui/image_sequence.py and custom_gui/app.py
+and adds tests/test_viewer_task66.py. Save the part between the two marker
+lines (the markers are not part of it) and apply it with
+
+    git apply --whitespace=nowarn <file>
+
+Then delete that file. Do not change anything in the patch: not one line, not
+the blank lines, not the order of the methods. If it does not apply cleanly on
+master, do NOT edit code by hand to make it fit: stop and report the exact
+error.
+
+What the patch does, for your review:
+
+  DoD-1  image_sequence.py: module function
+         page_index_from_text(text, count) -> Optional[int]
+         (just before class ImageSequence).
+  DoD-2  app.py: import page_index_from_text; in __init__, right after
+         self.btn_next, a ft.TextField self.page_jump_field and a
+         ft.TextButton self.btn_page_jump ("移動"), inserted into
+         self.controls_row so the order is ... Previous, Next, field, 移動 ...;
+         a method _on_page_jump(self, e) right after _on_next_click.
+  DoD-3  tests/test_viewer_task66.py: 7 test functions, 23 cases.
+
+----- BEGIN PATCH -----
+diff --git a/custom_gui/app.py b/custom_gui/app.py
+index 60729a4..c0b6863 100644
+--- a/custom_gui/app.py
++++ b/custom_gui/app.py
+@@ -1,5 +1,5 @@
+ import flet as ft
+-from custom_gui.image_sequence import ImageSequence, list_images_in_folder
++from custom_gui.image_sequence import ImageSequence, list_images_in_folder, page_index_from_text
+ from custom_gui.viewer import ImageViewer, original_to_display, apply_pan, InteractionMode, calculate_label_position
+ from custom_gui.selection import SelectionContainer, calculate_normalized_bbox, SelectionRect, find_region_at_point
+ from custom_gui.ocr_bridge import run_ocr_and_parse
+@@ -143,6 +143,26 @@ class SelectableImageViewer(ImageViewer):
+             disabled=not self.sequence.has_next()
+         )
+ 
++        # Task 66: 頁番号を入れて Enter か「移動」で、その頁へ飛ぶ（承認者 10-10 案甲）
++        self.page_jump_field = ft.TextField(
++            width=64,
++            height=36,
++            dense=True,
++            content_padding=6,
++            text_align=ft.TextAlign.CENTER,
++            hint_text="頁",
++            tooltip="頁番号を入れて Enter（1〜全頁）",
++            keyboard_type=ft.KeyboardType.NUMBER,
++            on_submit=self._on_page_jump,
++        )
++        self.btn_page_jump = ft.TextButton(
++            "移動",
++            tooltip="入れた頁へ移動",
++            on_click=self._on_page_jump,
++        )
++
++        self.controls_row.controls.insert(0, self.btn_page_jump)
++        self.controls_row.controls.insert(0, self.page_jump_field)
+         self.controls_row.controls.insert(0, self.btn_next)
+         self.controls_row.controls.insert(0, self.btn_prev)
+         self.controls_row.controls.insert(0, self.btn_batch_ocr)
+@@ -735,7 +755,22 @@ class SelectableImageViewer(ImageViewer):
+     def _on_next_click(self, e):
+         if self.sequence.has_next():
+             self._switch_image(self.sequence.next())
+-            
++
++    def _on_page_jump(self, e):
++        """Task 66: 入力欄の頁へ移る。範囲の外・数でないときは移らず、下の帯の Last: に知らせる。"""
++        text = self.page_jump_field.value
++        i = page_index_from_text(text, self.sequence.count)
++        if i is None:
++            shown = (text or "").strip() or "空"
++            self.latest_region_info = f"頁は 1〜{self.sequence.count} の数で入れてください（入力: {shown}）"
++            self._update_status()
++            return
++        if i != self.sequence.index:
++            self._switch_image(self.sequence.goto(i))
++        self.page_jump_field.value = ""
++        if self.page_jump_field.page:
++            self.page_jump_field.update()
++
+     def _load_persisted_state(self, path: str):
+         """Returns (SelectionContainer, edits dict, mark) for `path`,
+         restoring from disk when a valid saved state exists, otherwise a
+diff --git a/custom_gui/image_sequence.py b/custom_gui/image_sequence.py
+index a524bf9..dbf67e6 100644
+--- a/custom_gui/image_sequence.py
++++ b/custom_gui/image_sequence.py
+@@ -23,6 +23,20 @@ def list_images_in_folder(folder: str) -> List[str]:
+     return image_paths
+ 
+ 
++def page_index_from_text(text: Optional[str], count: int) -> Optional[int]:
++    """
++    Task 66: 頁番号の入力（1 始まり。全角の数字も可）を 0 始まりの位置にする。
++    空・数でない・1〜count の外は None（移らない）。
++    """
++    s = (text or "").strip()
++    if not s or not s.isdecimal():
++        return None
++    n = int(s)
++    if 1 <= n <= count:
++        return n - 1
++    return None
++
++
+ class ImageSequence:
+     def __init__(self, paths: List[str]):
+         self._paths = list(paths)
+diff --git a/tests/test_viewer_task66.py b/tests/test_viewer_task66.py
+new file mode 100644
+index 0000000..a4ff1b5
+--- /dev/null
++++ b/tests/test_viewer_task66.py
+@@ -0,0 +1,131 @@
++"""Task 66: 頁番号を入れて Enter か「移動」で、その頁へ飛ぶ（承認者 10-10 案甲）。"""
++from unittest.mock import patch, MagicMock
++
++import flet as ft
++import pytest
++from PIL import Image
++
++from custom_gui.app import SelectableImageViewer
++from custom_gui.image_sequence import ImageSequence, page_index_from_text
++
++
++class MockPage:
++    def run_thread(self, fn, *args, **kwargs):
++        fn(*args, **kwargs)
++
++
++@pytest.mark.parametrize("text,count,want", [
++    ("5", 68, 4),
++    ("1", 68, 0),
++    ("68", 68, 67),
++    (" 3 ", 68, 2),
++    ("１２", 68, 11),   # 全角の数字
++    ("0", 68, None),
++    ("69", 68, None),
++    ("", 68, None),
++    (None, 68, None),
++    ("abc", 68, None),
++    ("-1", 68, None),
++    ("2.5", 68, None),
++    ("²", 68, None),    # isdigit は真だが int にできない字
++    ("1", 0, None),     # 頁が無い
++])
++def test_1_page_index_from_text(text, count, want):
++    assert page_index_from_text(text, count) == want
++
++
++@pytest.fixture
++def viewer(tmp_path):
++    paths = []
++    for i in range(4):
++        p = tmp_path / f"p{i + 1}.png"
++        Image.new("RGB", (200, 150), color="white").save(p)
++        paths.append(str(p))
++    with patch("custom_gui.app.run_ocr_and_parse", return_value=[]):
++        v = SelectableImageViewer(image_src=paths[0], img_w=200, img_h=150, win_w=1000, win_h=800, expand=True)
++        v.sequence = ImageSequence(paths)
++        v.btn_prev.update = MagicMock()
++        v.btn_next.update = MagicMock()
++        v.status_row.update = MagicMock()
++        v.status_text = MagicMock()
++        v.selections_list.update = MagicMock()
++        v.image_container.update = MagicMock()
++        v.page = MockPage()
++        v._switch_image(paths[0])
++        yield v, paths
++
++
++def jump(v, text, how="button"):
++    v.page_jump_field.value = text
++    if how == "enter":
++        v.page_jump_field.on_submit(None)
++    else:
++        v.btn_page_jump.on_click(None)
++
++
++def test_2_toolbar_order(viewer):
++    """「前へ」「次へ」のすぐ右に、入力欄と「移動」が並ぶ。"""
++    v, _ = viewer
++    c = v.controls_row.controls
++    i = c.index(v.btn_next)
++    assert c[i - 1] is v.btn_prev
++    assert c[i + 1] is v.page_jump_field
++    assert c[i + 2] is v.btn_page_jump
++    assert isinstance(v.page_jump_field, ft.TextField)
++    assert v.btn_page_jump.text == "移動"
++
++
++def test_3_jump_by_button(viewer):
++    v, paths = viewer
++    with patch("custom_gui.app.run_ocr_and_parse", return_value=[]):
++        jump(v, "3")
++    assert v.sequence.index == 2
++    assert v.image_src == paths[2]
++    assert v.page_jump_field.value == ""
++    assert v.btn_prev.disabled is False and v.btn_next.disabled is False
++
++
++def test_4_jump_by_enter_to_last(viewer):
++    v, paths = viewer
++    with patch("custom_gui.app.run_ocr_and_parse", return_value=[]):
++        jump(v, "4", how="enter")
++    assert v.sequence.index == 3
++    assert v.image_src == paths[3]
++    assert v.btn_next.disabled is True     # 最後の頁では「次へ」が押せない
++
++
++@pytest.mark.parametrize("text", ["0", "5", "abc", ""])
++def test_5_out_of_range_stays(viewer, text):
++    """範囲の外・数でないときは移らず、下の帯で知らせる。入力は消さない（直して打ち直せるように）。"""
++    v, paths = viewer
++    with patch("custom_gui.app.run_ocr_and_parse", return_value=[]):
++        jump(v, "2")
++        jump(v, text)
++    assert v.sequence.index == 1
++    assert v.image_src == paths[1]
++    assert "1〜4" in v.latest_region_info
++    assert v.page_jump_field.value == text
++
++
++def test_6_same_page_does_not_reload(viewer):
++    v, paths = viewer
++    v._switch_image = MagicMock()
++    jump(v, "1")
++    v._switch_image.assert_not_called()
++    assert v.page_jump_field.value == ""
++
++
++def test_7_edits_survive_round_trip(viewer):
++    """飛ぶ前の頁の枠と直した文字は保存され、戻ると元どおり（前へ／次へと同じ道を通る）。"""
++    v, paths = viewer
++    v.selection_container.add((10, 10, 60, 40))
++    rid = v.selection_container.get_all()[-1].rect_id
++    v.edits[rid] = "直した字"
++    with patch("custom_gui.app.run_ocr_and_parse", return_value=[]):
++        jump(v, "3")
++        assert v.image_src == paths[2]
++        assert rid not in v.edits
++        jump(v, "1")
++    assert v.image_src == paths[0]
++    assert v.edits.get(rid) == "直した字"
++    assert [r.rect_id for r in v.selection_container.get_all()].count(rid) == 1
+----- END PATCH -----
+
+## 3. Allowed and forbidden scope
+
+ALLOWED - these three files only, and only through the patch:
+
+    custom_gui/image_sequence.py
+    custom_gui/app.py
+    tests/test_viewer_task66.py    (new)
+
+FORBIDDEN - do not create, modify, move, rename or delete anything else:
+
+    every other file under custom_gui/
+    every existing file under tests/
+    launch_viewer.py  src/**  requirements.txt  pyproject.toml
+    custom_gui/requirements-custom.txt  .nightly/**  .claude/**
+    AGENTS.md  CLAUDE.md  README.md  LICENCE  LICENCE_DEPENDENCEIES
+    and every NDL credit header
+    train/**  scripts/**  resource/**  jpg/**  work/**  any *.bat file
+    venv/ .venv/ or any virtual environment (do not commit one)
+    any other file at the repository root (no report.txt, no fix_*.py,
+    no patch_*.py, no *.patch, no notes: put your report in the session
+    message only)
+
+Checks the commander will run on your patch:
+
+    git status --short        exactly the three paths above, nothing else
+    git diff --numstat custom_gui/app.py              37 insertions, 2 deletions
+    git diff --numstat custom_gui/image_sequence.py   14 insertions, 0 deletions
+    grep -c "def page_index_from_text" custom_gui/image_sequence.py   exactly 1
+    grep -c "def _on_page_jump" custom_gui/app.py                     exactly 1
+    grep -c "self._on_page_jump" custom_gui/app.py                    exactly 2
+    grep -c "^def test_" tests/test_viewer_task66.py                  exactly 7
+    and a line-by-line comparison with the commander's own copy.
+
+## 4. Absolute protection of existing tests
+
+- Do NOT delete, skip, rename, or change the expected value of ANY existing
+  test. Run the suite on master BEFORE your change and report the count
+  (it is 406 passed on 2026-10-10); after it, 429 passed, zero failures.
+- If an existing test fails, do NOT edit it. Stop and report it.
+
+## 5. Before you submit
+
+    python -m pytest tests/ --collect-only -q     # must succeed
+    python -m pytest tests/ -v                    # must be all green
+
+Then, for EACH of the eight below: break the code, run
+`python -m pytest tests/test_viewer_task66.py -q --tb=line`, show the FAILING
+output, undo exactly that break (nothing else), show it green.
+
+    (i)    in page_index_from_text, `return n - 1` -> `return n`
+                                         -> test_1 and test_3 must fail
+    (ii)   in page_index_from_text, `if 1 <= n <= count:` -> `if True:`
+                                         -> test_1 and test_5 must fail
+    (iii)  in the TextField, `on_submit=self._on_page_jump,` -> `on_submit=None,`
+                                         -> test_4 must fail
+    (iv)   in _on_page_jump, `if i != self.sequence.index:` -> `if True:`
+                                         -> test_6 must fail
+    (v)    swap the two lines that insert self.btn_page_jump and
+           self.page_jump_field into self.controls_row -> test_2 must fail
+    (vi)   in _on_page_jump, add `self.page_jump_field.value = ""` just before
+           the first `return`             -> test_5 must fail
+    (vii)  in _on_page_jump, replace `self._switch_image(self.sequence.goto(i))`
+           with `self.sequence.goto(i)`   -> test_3 and test_7 must fail
+    (viii) in page_index_from_text, `s.isdecimal()` -> `s.isdigit()`
+                                         -> test_1 must fail
+
+If an injected defect does NOT make a test fail, say so plainly.
+
+## 6. How to work
+
+- Do not stop to ask questions. If something is ambiguous, choose the safer
+  option, write down why in your report, and keep going.
+- If this contract disagrees with what you find on `master`, do NOT guess:
+  stop and report the disagreement.
+- Do NOT write helper scripts. The only temporary file allowed is the patch
+  file, and it must be deleted before you submit. Show `git status --short`
+  with exactly three lines.
+- tests/test_viewer_task66.py is required. A submission without it is
+  rejected.
+- You start from `master`.
+
+## 7. Your report (in the session message, not in a file) must contain
+
+    1. git status --short
+    2. the pass count on master BEFORE your change, and the last 20 lines of
+       python -m pytest tests/ -v AFTER it
+    3. for each of the eight injections: what you broke, the FAILING output,
+       and the passing output after restoring
+    4. git diff --stat
+    5. anything you did differently from this order, and why
