@@ -948,6 +948,7 @@ Python          C:\Users\user\ndlocr-lite-custom\.venv\Scripts\python.exe
 - 選んだ形: 端の枠も真ん中へ（ページの外の白が見える。今の Pan と同じ）。見えている所に収めて止める案は取らなかった（ご依頼の「中央に来る」をそのまま）
 - 見本: ref/task-68o（GitHub の master 5284c9b の上・418 passed・壊し方 9/9・tree 4af638d）／ref/task-68（手元の master の上・461 passed）。既存の試験は変えない
 - 画面（写しのビューア 8572・142号 p1・1920x940・倍率 0.814・スクロール 600 の後・1 回）: Region 2 の中心 (800,470)、表示域の中央 (805,481)
-- [ ] Task 68 Jules 13186952292192804009（.nightly/prompts/task68_prompt.txt）→ 検収 → 承認者の画面確認 → マージ
+- [x] Task 68 Jules 13186952292192804009（.nightly/prompts/task68_prompt.txt）→ 検収 → 承認者の画面確認 → マージ
 - 21:0x Task 68 Jules COMPLETED。成果を GitHub の master に当てた tree は見本と一致（4af638d）。integration/task-68（87d8686・手元の master の上）461 passed。写しのビューア 8572 で、行の見出し・空いた所を押すと枠が真ん中へ来た。本文の文字の上を押しても動かない（文字を選べる作りのため・行が選ばれないのも前から同じ）
 - 判断（承認者 10-10 案甲）: 次から小さな直しは Jules を通さない（AGENTS §8.18）
+- [x] Task 68 マージ 4743152（承認者 10-10 写しの画面確認「プログラムは成功しております」・master 461 passed）。本物のビューアは起動し直すと効く
