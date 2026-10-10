@@ -45,6 +45,12 @@ def get_ocr_status_text(state: OcrState, line_count: int = 0) -> str:
         return f"Lines: {line_count}"
     return ""
 
+def region_ref_text(image_src, label) -> str:
+    """Task 67: 右の一覧の枠を指す文字。画像の名前（拡張子なし）と枠の札。
+    例: 国際寫眞新聞_143号_p0014 Region 3"""
+    stem = os.path.splitext(os.path.basename((image_src or "").replace("\\", "/")))[0]
+    return f"{stem or 'None'} {label}"
+
 class SelectableImageViewer(ImageViewer):
     def __init__(self, image_src: str, img_w: float, img_h: float, win_w: float, win_h: float, **kwargs):
         self.frame_w = win_w
@@ -1411,6 +1417,18 @@ class SelectableImageViewer(ImageViewer):
                     self.highlight_layer.controls.append(highlight)
         self._overlay_scale = self.zoom_scale
 
+    def copy_region_ref(self, rid) -> None:
+        """Task 67: その枠の「画像の名前 枠の札」をクリップボードへ写し、下の帯の Last: にも出す
+        （クリップボードが効かない環境でも読めるように）。"""
+        rect = next((r for r in self.selection_container.get_all() if r.rect_id == rid), None)
+        if rect is None:
+            return
+        text = region_ref_text(self.image_src, rect.label)
+        if self.page:
+            self.page.set_clipboard(text)
+        self.latest_region_info = f"コピーしました: {text}"
+        self._update_status()
+
     def toggle_region_visible(self, rid, button=None):
         with self.selections_lock:
             srid = str(rid)
@@ -1619,12 +1637,17 @@ class SelectableImageViewer(ImageViewer):
         ]
         if has_edit:
             buttons.append(ft.IconButton(icon=ft.Icons.RESTORE, tooltip="Revert to OCR", on_click=restore_rect))
+        # Task 67: 頁と枠番号をクリップボードへ（■■NG■■ の枠をすぐ指揮官へ伝えるため・承認者 10-10）
+        buttons.append(ft.IconButton(
+            icon=ft.Icons.CONTENT_COPY, tooltip="頁と枠番号をコピー",
+            on_click=lambda e, rid=rect.rect_id: self.copy_region_ref(rid)
+        ))
         buttons.append(ft.IconButton(icon=ft.Icons.DELETE, tooltip="Delete", on_click=delete_rect))
 
         item_content = ft.Column([
             ft.Row([
                 header_text,
-                ft.Row(buttons, spacing=0)
+                ft.Row(buttons, spacing=0, wrap=True)  # Task 67b: 直した枠はボタン 8 個で右の一覧の幅を超えるので折り返す
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True),
             content_area,
             ft.Row([

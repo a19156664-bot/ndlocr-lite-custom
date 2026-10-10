@@ -88,7 +88,7 @@ def test_2_buttons_place_and_size(dummy_page, tmp_path):
         assert len(col.controls) == 3
         assert len(col.controls[0].controls) == 2               # title row unchanged
         assert [b.tooltip for b in col.controls[0].controls[1].controls] == \
-            ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "Revert to OCR", "Delete"]
+            ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "Revert to OCR", "頁と枠番号をコピー", "Delete"]
         move_row = col.controls[2]
         assert isinstance(move_row, ft.Row)
         assert len(move_row.controls) == 2

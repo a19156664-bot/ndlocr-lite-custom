@@ -49,7 +49,7 @@ def test_1_button_place(dummy_page, tmp_path):
     
     buttons_row = row_3.content.controls[0].controls[1]
     tooltips = [b.tooltip for b in buttons_row.controls if hasattr(b, "tooltip")]
-    assert tooltips == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "Delete"]
+    assert tooltips == ["Edit", "右から変換", "この枠だけOCR", "画像の枠を隠す", "縦で読む", "頁と枠番号をコピー", "Delete"]
     
     vertical_button = buttons_row.controls[4]
     assert vertical_button.icon == ft.Icons.TEXT_ROTATION_DOWN
